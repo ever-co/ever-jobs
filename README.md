@@ -11,6 +11,8 @@
 
 **Ever® Jobs™** searches job postings from **160+ sources** concurrently and returns aggregated, normalized results through a single REST API, **GraphQL API**, **CLI**, or **MCP server** for AI assistants. Sources span search-based job boards, ATS (Applicant Tracking System) boards, and company-specific career APIs. Each source is an independent, reusable NestJS package — making it easy to add new sources, consume individual packages in other projects, or deploy the full API.
 
+It is also used by our other platform, **Ever® Hust™ — The Anti-Hustle Career OS**: an open, agentic job-search platform that finds and evaluates opportunities, tailors your applications, and then tracks every application from the initial search all the way to a signed offer, see: <https://github.com/ever-hust/ever-hust> (AGPL v3)
+
 ### Search-Based Job Boards (107)
 
 | Source                      | Method                 | Region                              |
