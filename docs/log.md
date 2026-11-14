@@ -11,7 +11,7 @@
 
 **Cause.** `parseSalaryCurrency` (`packages/common/src/utils/helpers.ts`, rule 3) tested the ambiguous symbol with `lowered.includes('kr')`, a plain substring test, while ISO codes already needed a boundary on both sides.
 
-**Fix.** `kr` now counts only when no letter (any script) sits directly before or after it. A digit, space or punctuation still counts as a boundary, so `500 kr`, `500kr`, `kr 500`, `Kr. 500` and `45 000 kr/mån` keep their result (SEK, or the `country` hint's NOK / DKK). Unique symbols (`€`, `£`, `zł`, `Fr.`, `$`) are unchanged. Known limit: `Fr.` still matches the German weekday abbreviation (`Mo-Fr.`); not touched here.
+**Fix.** `kr` now counts only when no letter (Unicode `\p{L}`, so caseless scripts such as Han, Arabic and Thai count too) or combining mark (`\p{M}`) sits directly before or after it. A digit, space or punctuation still counts as a boundary, so `500 kr`, `500kr`, `kr 500`, `Kr. 500` and `45 000 kr/mån` keep their result (SEK, or the `country` hint's NOK / DKK). Unique symbols (`€`, `£`, `zł`, `Fr.`, `$`) are unchanged. Known limit: `Fr.` still matches the German weekday abbreviation (`Mo-Fr.`); not touched here.
 
 **Files:** `packages/common/src/utils/helpers.ts`, `packages/common/__tests__/helpers.spec.ts`, `docs/log.md`.
 

@@ -255,9 +255,15 @@ function matchIsoCode(text: string): string | null {
   return null;
 }
 
-/** Letter test (any script): a character with distinct upper and lower case. */
+/**
+ * Letter test for any script, including scripts without letter case (Han,
+ * Arabic, Hebrew, Thai …) and combining marks, which belong to the letter
+ * before them (`kr` + U+0301 is one accented letter, not a krona sign).
+ */
+const LETTER_OR_MARK = /[\p{L}\p{M}]/u;
+
 function isLetter(ch: string): boolean {
-  return ch !== '' && ch.toLowerCase() !== ch.toUpperCase();
+  return ch !== '' && LETTER_OR_MARK.test(ch);
 }
 
 /**
