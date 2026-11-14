@@ -5,6 +5,18 @@
 
 ---
 
+## 2026-11-14 — Fix: the ambiguous `kr` currency symbol only matches as a stand-alone token
+
+**Symptom.** A salary text with no currency symbol or ISO code but a word that starts with the letters "kr" (`8.000 - 10.000, Kraków`, `Krefeld`, `Kroger`) was read as Swedish kronor. The wrong detection also hid the country currency (`confidence: 'symbol'` outranks `'country'`), so `extractSalary` found no range at all where a `country` hint should have given `PLN` / `EUR` / `GBP` and a bare-range match.
+
+**Cause.** `parseSalaryCurrency` (`packages/common/src/utils/helpers.ts`, rule 3) tested the ambiguous symbol with `lowered.includes('kr')`, a plain substring test, while ISO codes already needed a boundary on both sides.
+
+**Fix.** `kr` now counts only when no letter (Unicode `\p{L}`, so caseless scripts such as Han, Arabic and Thai count too) or combining mark (`\p{M}`) sits directly before or after it; the neighbouring character is read as a whole code point, so a letter outside the Basic Multilingual Plane (`𠮷`, `𝐀`) counts, while an emoji does not. A digit, space or punctuation still counts as a boundary, so `500 kr`, `500kr`, `kr 500`, `Kr. 500` and `45 000 kr/mån` keep their result (SEK, or the `country` hint's NOK / DKK). Unique symbols (`€`, `£`, `zł`, `Fr.`, `$`) are unchanged. Known limit: `Fr.` still matches the German weekday abbreviation (`Mo-Fr.`); not touched here.
+
+**Files:** `packages/common/src/utils/helpers.ts`, `packages/common/__tests__/helpers.spec.ts`, `docs/log.md`.
+
+**Validation:** `npx jest --testPathPatterns packages/common/` passes (43 suites, 3578 tests; `helpers.spec.ts` 124/124) and the `tsconfig.typecheck.json` type-check is clean. Against develop's `helpers.ts`, the new word tests fail (11 of them on the first version of this fix); the "still a krona sign" tests pass on both.
+
 ## 2026-11-13 — CI doc: blocking and non-blocking jobs; `Retry-After` parsing honours fractional seconds and is bounded; Internshala live e2e no longer asserts the board's ranking
 
 **CI: live scraper e2e shards no longer block.** The live scraper e2e matrix already had `fail-fast: false` and a job-level `continue-on-error: true`, but the in-cluster runner (`ci-builds`, which runs the workflow with `act`) ignores a job-level `continue-on-error`, so a failing live shard turned the `ci-builds/ci.yml` status red. The test step "Run source scraper e2e tests" now also carries `continue-on-error: true`, the same pattern as `Test (E2E - Live APIs)`. New `docs/CI.md` lists which `ci.yml` jobs fail a run (docs lint, build and type-check, health and smoke, Core, feature plugins, Docker, and in-cluster the mocked scraper unit shards) and which only report (live API e2e, live-site scraper e2e shards), and why live third-party boards cannot gate a pull request. Files: `.github/workflows/ci.yml`, `docs/CI.md`, `docs/index.md`, `docs/log.md`.

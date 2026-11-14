@@ -423,6 +423,57 @@ describe('parseSalaryCurrency (Spec 012 / T01)', () => {
       confidence: 'symbol',
     });
   });
+
+  // ─── `kr` must be a stand-alone token, not the start of a word ─────
+  it.each(['Kraków', 'Krefeld', 'Kroger HQ', 'skriv', 'KRAKOW'])(
+    'does not read the letters "kr" inside "%s" as a krona sign',
+    (word) => {
+      const text = `8.000 - 10.000, ${word}`;
+      expect(parseSalaryCurrency(text, { country: Country.POLAND })).toEqual({
+        code: 'PLN',
+        symbol: null,
+        confidence: 'country',
+      });
+      expect(parseSalaryCurrency(text)).toEqual({
+        code: 'USD',
+        symbol: null,
+        confidence: 'default',
+      });
+    },
+  );
+
+  it.each(['東京kr', 'kr東京', 'مkr', 'kŕ', 'กkr', 'kr公司', '公司kr', 'kr𠮷', '𠮷kr', 'kr𝐀', '𝐀kr'])(
+    'treats a letter of a caseless script or a combining mark next to "kr" as part of a word (%s)',
+    (word) => {
+      expect(parseSalaryCurrency(`8.000 - 10.000, ${word}`, { country: Country.POLAND })).toEqual({
+        code: 'PLN',
+        symbol: null,
+        confidence: 'country',
+      });
+    },
+  );
+
+  it.each(['💰kr 500', '500 kr💰', '500 kr', '500kr', 'kr 500', 'Kr. 500', 'KR 500', '500,- kr.', 'Lön: 45 000 kr/mån'])(
+    'still reads "kr" as a krona sign in "%s"',
+    (text) => {
+      expect(parseSalaryCurrency(text)).toEqual({ code: 'SEK', symbol: 'kr', confidence: 'symbol' });
+    },
+  );
+
+  it('finds a stand-alone "kr" after one buried inside a longer word', () => {
+    expect(parseSalaryCurrency('Kraków office, 500 kr', { country: Country.NORWAY })).toEqual({
+      code: 'NOK',
+      symbol: 'kr',
+      confidence: 'symbol',
+    });
+  });
+
+  it('extractSalary uses the country currency when a place name starts with "kr"', () => {
+    const result = extractSalary('8.000 - 10.000 Kraków', { country: Country.POLAND });
+    expect(result.currency).toBe('PLN');
+    expect(result.minAmount).toBe(8000);
+    expect(result.maxAmount).toBe(10000);
+  });
 });
 
 /**

@@ -207,7 +207,7 @@ export function parseSalaryCurrency(
   // present; otherwise use the documented fallback (Q-025: SEK).
   const lowered = text.toLowerCase();
   for (const [symbol, ambiguous] of SALARY_AMBIGUOUS_SYMBOLS.entries()) {
-    if (lowered.includes(symbol.toLowerCase())) {
+    if (containsStandaloneToken(lowered, symbol.toLowerCase())) {
       const fromCountry = opts?.country
         ? ambiguous.byCountry.get(opts.country)
         : undefined;
@@ -253,6 +253,48 @@ function matchIsoCode(text: string): string | null {
     }
   }
   return null;
+}
+
+/**
+ * Letter test for any script, including scripts without letter case (Han,
+ * Arabic, Hebrew, Thai …) and combining marks, which belong to the letter
+ * before them (`kr` + U+0301 is one accented letter, not a krona sign).
+ */
+const LETTER_OR_MARK = /[\p{L}\p{M}]/u;
+
+function isLetter(ch: string): boolean {
+  return ch !== '' && LETTER_OR_MARK.test(ch);
+}
+
+/**
+ * Whether `token` occurs in `text` without a letter directly before or after
+ * it. Used for the ambiguous `kr` symbol, so the first letters of a word
+ * ("Kraków", "Kroger", "Krefeld") are not read as a krona sign. A digit,
+ * space or punctuation on either side still counts as a boundary (`500kr`,
+ * `kr 500`, `kr.`). Both arguments must already be lower-cased.
+ */
+function containsStandaloneToken(text: string, token: string): boolean {
+  for (let idx = text.indexOf(token); idx !== -1; idx = text.indexOf(token, idx + 1)) {
+    if (!isLetter(codePointBefore(text, idx)) && !isLetter(codePointAt(text, idx + token.length))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** The whole code point starting at `index` (a surrogate pair is one character), or `''` past the end. */
+function codePointAt(text: string, index: number): string {
+  const cp = index < text.length ? text.codePointAt(index) : undefined;
+  return cp === undefined ? '' : String.fromCodePoint(cp);
+}
+
+/** The whole code point ending just before `index`, or `''` at the start. */
+function codePointBefore(text: string, index: number): string {
+  if (index <= 0) return '';
+  const low = text.charCodeAt(index - 1);
+  const high = index >= 2 ? text.charCodeAt(index - 2) : 0;
+  const isPair = low >= 0xdc00 && low <= 0xdfff && high >= 0xd800 && high <= 0xdbff;
+  return text.slice(isPair ? index - 2 : index - 1, index);
 }
 
 /** Word-character test for the ISO-code boundary check. */
