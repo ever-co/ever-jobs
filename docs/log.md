@@ -15,7 +15,7 @@
 
 **Files:** `packages/common/src/utils/helpers.ts`, `packages/common/__tests__/helpers.spec.ts`, `docs/log.md`.
 
-**Validation:** reasoned by hand against the new and existing `parseSalaryCurrency` / `extractSalary` cases; the test suite could not be run in this session (no shell access).
+**Validation:** `npx jest --testPathPatterns packages/common/` passes (43 suites, 3578 tests; `helpers.spec.ts` 124/124) and the `tsconfig.typecheck.json` type-check is clean. Against develop's `helpers.ts`, the new word tests fail (11 of them on the first version of this fix); the "still a krona sign" tests pass on both.
 
 ## 2026-11-13 — CI doc: blocking and non-blocking jobs; `Retry-After` parsing honours fractional seconds and is bounded; Internshala live e2e no longer asserts the board's ranking
 
