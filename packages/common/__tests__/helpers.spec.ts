@@ -442,7 +442,7 @@ describe('parseSalaryCurrency (Spec 012 / T01)', () => {
     },
   );
 
-  it.each(['東京kr', 'kr東京', 'مkr', 'kŕ', 'กkr'])(
+  it.each(['東京kr', 'kr東京', 'مkr', 'kŕ', 'กkr', 'kr公司', '公司kr', 'kr𠮷', '𠮷kr', 'kr𝐀', '𝐀kr'])(
     'treats a letter of a caseless script or a combining mark next to "kr" as part of a word (%s)',
     (word) => {
       expect(parseSalaryCurrency(`8.000 - 10.000, ${word}`, { country: Country.POLAND })).toEqual({
@@ -453,7 +453,7 @@ describe('parseSalaryCurrency (Spec 012 / T01)', () => {
     },
   );
 
-  it.each(['500 kr', '500kr', 'kr 500', 'Kr. 500', 'KR 500', '500,- kr.', 'Lön: 45 000 kr/mån'])(
+  it.each(['💰kr 500', '500 kr💰', '500 kr', '500kr', 'kr 500', 'Kr. 500', 'KR 500', '500,- kr.', 'Lön: 45 000 kr/mån'])(
     'still reads "kr" as a krona sign in "%s"',
     (text) => {
       expect(parseSalaryCurrency(text)).toEqual({ code: 'SEK', symbol: 'kr', confidence: 'symbol' });

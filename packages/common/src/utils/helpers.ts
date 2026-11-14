@@ -275,11 +275,26 @@ function isLetter(ch: string): boolean {
  */
 function containsStandaloneToken(text: string, token: string): boolean {
   for (let idx = text.indexOf(token); idx !== -1; idx = text.indexOf(token, idx + 1)) {
-    const before = idx === 0 ? '' : text[idx - 1];
-    const after = idx + token.length >= text.length ? '' : text[idx + token.length];
-    if (!isLetter(before) && !isLetter(after)) return true;
+    if (!isLetter(codePointBefore(text, idx)) && !isLetter(codePointAt(text, idx + token.length))) {
+      return true;
+    }
   }
   return false;
+}
+
+/** The whole code point starting at `index` (a surrogate pair is one character), or `''` past the end. */
+function codePointAt(text: string, index: number): string {
+  const cp = index < text.length ? text.codePointAt(index) : undefined;
+  return cp === undefined ? '' : String.fromCodePoint(cp);
+}
+
+/** The whole code point ending just before `index`, or `''` at the start. */
+function codePointBefore(text: string, index: number): string {
+  if (index <= 0) return '';
+  const low = text.charCodeAt(index - 1);
+  const high = index >= 2 ? text.charCodeAt(index - 2) : 0;
+  const isPair = low >= 0xdc00 && low <= 0xdfff && high >= 0xd800 && high <= 0xdbff;
+  return text.slice(isPair ? index - 2 : index - 1, index);
 }
 
 /** Word-character test for the ISO-code boundary check. */
