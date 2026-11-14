@@ -207,7 +207,7 @@ export function parseSalaryCurrency(
   // present; otherwise use the documented fallback (Q-025: SEK).
   const lowered = text.toLowerCase();
   for (const [symbol, ambiguous] of SALARY_AMBIGUOUS_SYMBOLS.entries()) {
-    if (lowered.includes(symbol.toLowerCase())) {
+    if (containsStandaloneToken(lowered, symbol.toLowerCase())) {
       const fromCountry = opts?.country
         ? ambiguous.byCountry.get(opts.country)
         : undefined;
@@ -253,6 +253,27 @@ function matchIsoCode(text: string): string | null {
     }
   }
   return null;
+}
+
+/** Letter test (any script): a character with distinct upper and lower case. */
+function isLetter(ch: string): boolean {
+  return ch !== '' && ch.toLowerCase() !== ch.toUpperCase();
+}
+
+/**
+ * Whether `token` occurs in `text` without a letter directly before or after
+ * it. Used for the ambiguous `kr` symbol, so the first letters of a word
+ * ("Kraków", "Kroger", "Krefeld") are not read as a krona sign. A digit,
+ * space or punctuation on either side still counts as a boundary (`500kr`,
+ * `kr 500`, `kr.`). Both arguments must already be lower-cased.
+ */
+function containsStandaloneToken(text: string, token: string): boolean {
+  for (let idx = text.indexOf(token); idx !== -1; idx = text.indexOf(token, idx + 1)) {
+    const before = idx === 0 ? '' : text[idx - 1];
+    const after = idx + token.length >= text.length ? '' : text[idx + token.length];
+    if (!isLetter(before) && !isLetter(after)) return true;
+  }
+  return false;
 }
 
 /** Word-character test for the ISO-code boundary check. */
