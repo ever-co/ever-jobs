@@ -50,7 +50,8 @@ export const NUMERIC_FLAGS: readonly NumericFlagSpec[] = [
   { key: 'offset', flag: '--offset', min: 0, max: 100_000, integer: true },
   { key: 'hoursOld', flag: '--hours-old', min: 0, max: 87_600, integer: true }, // 10 years
   { key: 'distance', flag: '--distance', min: 0, max: 25_000, integer: true },
-  { key: 'timeout', flag: '--timeout', min: 1, max: 3_600, integer: true },
+  // 0 = no request timeout (HttpClient / axios), as before this module.
+  { key: 'timeout', flag: '--timeout', min: 0, max: 3_600, integer: true },
   { key: 'rateDelayMin', flag: '--rate-delay-min', min: 0, max: 3_600, integer: false },
   { key: 'rateDelayMax', flag: '--rate-delay-max', min: 0, max: 3_600, integer: false },
 ];
@@ -71,7 +72,8 @@ export function sanitizeNumericOptions<T extends object>(
   options: T,
 ): { options: T; warnings: string[] } {
   const warnings: string[] = [];
-  const clean: Record<string, unknown> = { ...options };
+  // `T extends object` has no index signature, so the copy is typed loosely here.
+  const clean = { ...options } as Record<string, unknown>;
 
   for (const spec of NUMERIC_FLAGS) {
     const value = clean[spec.key];

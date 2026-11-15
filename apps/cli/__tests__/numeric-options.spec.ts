@@ -115,7 +115,7 @@ describe('sanitizeNumericOptions', () => {
       offset: 100_001,
       hoursOld: 87_601,
       distance: 1.5,
-      timeout: 0,
+      timeout: 3_601,
       rateDelayMin: Number.POSITIVE_INFINITY,
       rateDelayMax: -1,
       searchTerm: 'dev',
@@ -206,6 +206,13 @@ describe('search command — numeric flags end to end', () => {
     expect(input.offset).toBe(0);
     expect(input.requestTimeout).toBe(60);
     expect(input.hoursOld).toBeUndefined();
+    expect(warnings()).toEqual([]);
+  });
+
+  it('--timeout 0 still reaches the input as 0 (no request timeout), without a warning', async () => {
+    const { cmd, jobsService } = makeSearch();
+    await cmd.run([], parse(cmd, ['-q', 'engineer', '--timeout', '0']) as any);
+    expect(jobsService.searchJobs.mock.calls[0][0].requestTimeout).toBe(0);
     expect(warnings()).toEqual([]);
   });
 

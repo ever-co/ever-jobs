@@ -503,7 +503,7 @@ export class SearchCommand extends CommandRunner {
   @Option({ flags: '--enforce-annual-salary', description: 'Convert all wages to annual equivalent' })
   parseEnforceAnnualSalary(): boolean { return true; }
 
-  @Option({ flags: '--timeout <seconds>', description: 'Request timeout in seconds (default: 60)' })
+  @Option({ flags: '--timeout <seconds>', description: 'Request timeout in seconds, 0 = none (default: 60)' })
   parseTimeout(val: string): number { return parseCliInteger(val); }
 
   @Option({ flags: '-p, --proxy [urls...]', description: 'Proxy URLs for rotation' })
