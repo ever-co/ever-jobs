@@ -5,6 +5,16 @@
 
 ---
 
+## 2026-11-15 — CLI: numeric flags are parsed strictly and bounded
+
+**Symptom.** `search --results abc` (also `--offset`, `--hours-old`, `--distance`, `--timeout`, `--rate-delay-min/-max`, `--linkedin-company-ids`, and the same flags of `compare`) ran the search with `resultsWanted: NaN` and no message. The flags used `parseInt` / `parseFloat`, and `NaN ?? 15` stays `NaN`, so the default never applied and the API-side `EVER_JOBS_MAX_RESULTS_WANTED` clamp ignores `NaN` too. `5x`, `1e3` and `20.7` were silently read as `5`, `1` and `20`, and nothing had an upper bound (`-n 100000000` was sent as written).
+
+**Fix.** New `apps/cli/src/commands/numeric-options.ts`. The parsers accept plain decimal text only (`parseCliInteger`: digits; `parseCliDecimal`: digits with an optional fraction) and return `NaN` otherwise, like `parseNonNegativeInt` for the crawl flags. `search` and `compare` then call `applyNumericCliOptions`, which drops every flag that is not a finite number inside its range and prints `Warning: --results must be a whole number from 1 to 100000; ignoring it` to stderr, so the built-in default applies (the same "warn and ignore" stance as the crawl flags). Ranges: `--results` 1–100000, `--offset` 0–100000, `--hours-old` 0–87600, `--distance` 0–25000, `--timeout` 1–3600, `--rate-delay-min/-max` 0–3600 (decimal), `--linkedin-company-ids` whole numbers ≥ 1 (invalid ids are dropped, valid ones kept). Valid values and unset flags behave as before. Behaviour that changes: `5x`, `1e3`, `20.7` and `-5` are now warned about and ignored instead of being read as a different number; `--results 0` and `--timeout 0` are now ignored (default 15 / 60) instead of being sent as 0. Not touched: the `--stdin` JSON path, the HTTP API, and `rateDelayMax < rateDelayMin`.
+
+**Files:** `apps/cli/src/commands/numeric-options.ts` (new), `apps/cli/src/commands/{search,compare}.command.ts`, `apps/cli/__tests__/numeric-options.spec.ts` (new), `docs/log.md`.
+
+**Validation:** written without a shell, so the new spec and the existing CLI specs were not run here; CI on the pull request is the first run. The spec was checked by hand against the module (warning order, bounds) and against the commander option harness the existing CLI specs use.
+
 ## 2026-11-14 — Fix: the ambiguous `kr` currency symbol only matches as a stand-alone token
 
 **Symptom.** A salary text with no currency symbol or ISO code but a word that starts with the letters "kr" (`8.000 - 10.000, Kraków`, `Krefeld`, `Kroger`) was read as Swedish kronor. The wrong detection also hid the country currency (`confidence: 'symbol'` outranks `'country'`), so `extractSalary` found no range at all where a `country` hint should have given `PLN` / `EUR` / `GBP` and a bare-range match.

@@ -17,6 +17,7 @@ import {
   applyCrawlCliOptions,
   parseNonNegativeInt,
 } from './crawl-options';
+import { applyNumericCliOptions, parseCliDecimal, parseCliInteger } from './numeric-options';
 
 interface SearchOptions extends CrawlCliOptions {
   site?: string[];
@@ -163,7 +164,9 @@ export class SearchCommand extends CommandRunner {
     await this.executeAndOutput(input, options);
   }
 
-  private buildInputFromOptions(options: SearchOptions): ScraperInputDto {
+  private buildInputFromOptions(rawOptions: SearchOptions): ScraperInputDto {
+    // Invalid or out-of-range numbers are dropped with a warning, so the defaults below apply.
+    const options = applyNumericCliOptions(rawOptions);
     // Build per-source auth from CLI flags
     let auth: any;
     if (options.upworkAuthJson) {
@@ -460,7 +463,7 @@ export class SearchCommand extends CommandRunner {
   }
 
   @Option({ flags: '-d, --distance <miles>', description: 'Search radius in miles (default: 50)' })
-  parseDistance(val: string): number { return parseInt(val, 10); }
+  parseDistance(val: string): number { return parseCliInteger(val); }
 
   @Option({ flags: '-r, --remote', description: 'Filter for remote jobs only' })
   parseRemote(): boolean { return true; }
@@ -472,13 +475,13 @@ export class SearchCommand extends CommandRunner {
   parseEasyApply(): boolean { return true; }
 
   @Option({ flags: '-n, --results <count>', description: 'Number of results wanted per site (default: 15)' })
-  parseResults(val: string): number { return parseInt(val, 10); }
+  parseResults(val: string): number { return parseCliInteger(val); }
 
   @Option({ flags: '--offset <n>', description: 'Skip first N results' })
-  parseOffset(val: string): number { return parseInt(val, 10); }
+  parseOffset(val: string): number { return parseCliInteger(val); }
 
   @Option({ flags: '--hours-old <hours>', description: 'Max job age in hours' })
-  parseHoursOld(val: string): number { return parseInt(val, 10); }
+  parseHoursOld(val: string): number { return parseCliInteger(val); }
 
   @Option({ flags: '-c, --country <code>', description: 'Country for Indeed/Glassdoor domain (default: USA)' })
   parseCountry(val: string): string { return val; }
@@ -494,14 +497,14 @@ export class SearchCommand extends CommandRunner {
 
   @Option({ flags: '--linkedin-company-ids [ids...]', description: 'Filter LinkedIn by company IDs' })
   parseLinkedinCompanyIds(val: string, acc?: number[]): number[] {
-    return (acc ?? []).concat(parseInt(val, 10));
+    return (acc ?? []).concat(parseCliInteger(val));
   }
 
   @Option({ flags: '--enforce-annual-salary', description: 'Convert all wages to annual equivalent' })
   parseEnforceAnnualSalary(): boolean { return true; }
 
   @Option({ flags: '--timeout <seconds>', description: 'Request timeout in seconds (default: 60)' })
-  parseTimeout(val: string): number { return parseInt(val, 10); }
+  parseTimeout(val: string): number { return parseCliInteger(val); }
 
   @Option({ flags: '-p, --proxy [urls...]', description: 'Proxy URLs for rotation' })
   parseProxy(val: string, acc?: string[]): string[] {
@@ -515,10 +518,10 @@ export class SearchCommand extends CommandRunner {
   parseUserAgent(val: string): string { return val; }
 
   @Option({ flags: '--rate-delay-min <seconds>', description: 'Minimum delay between requests in seconds' })
-  parseRateDelayMin(val: string): number { return parseFloat(val); }
+  parseRateDelayMin(val: string): number { return parseCliDecimal(val); }
 
   @Option({ flags: '--rate-delay-max <seconds>', description: 'Maximum delay between requests in seconds' })
-  parseRateDelayMax(val: string): number { return parseFloat(val); }
+  parseRateDelayMax(val: string): number { return parseCliDecimal(val); }
 
   @Option({ flags: '-f, --format <format>', description: 'Output format: json, csv, table, summary (default: json)' })
   parseFormat(val: string): string { return val; }
