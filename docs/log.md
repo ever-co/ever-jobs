@@ -5,7 +5,11 @@
 
 ---
 
-## 2026-11-16 — Fix: CSV exports neutralise spreadsheet formulas and keep object list items readable (PR #136)
+## 2026-11-16 — Lane-scan fixes (T-2459–T-2462)
+
+One dated entry for the day; each fix has its own section.
+
+### Fix: CSV exports neutralise spreadsheet formulas and keep object list items readable (PR #136)
 
 **Symptom.** Titles, company names and descriptions are scraped from third-party boards. In the API `?format=csv` and the CLI `--format csv` exports, a cell starting with `=`, `+`, `-`, `@`, a tab or a carriage return ran as a formula when the file was opened in a spreadsheet, a bare `\r` was not quoted and could split a row, and in the API export object items in lists (`locations`, `offices`) came out as `[object Object]`.
 
@@ -15,7 +19,7 @@
 
 **Validation:** the new specs and the API controller, CLI and `packages/common` suites pass; the `tsconfig.typecheck.json` type-check shows no error in the touched files. Against develop's sources, all 7 new tests of the first commit fail.
 
-## 2026-11-16 — Fix: GraphQL queries work with API key auth and rate limiting on
+### Fix: GraphQL queries work with API key auth and rate limiting on (PR #137)
 
 **Symptom.** With `ENABLE_API_KEY_AUTH=true` (and `API_KEYS` set) or `RATE_LIMIT_ENABLED=true`, every `/graphql` query failed with `Cannot read properties of undefined (reading 'headers')` (or `'ip'`), even with a valid key. GraphQL only broke in the hardened deployments.
 
