@@ -3,6 +3,8 @@ import {
   MCP_LOCATION_FORMAT_ENV_VAR,
   MCP_REQUEST_KEYS_ENV_VAR,
   buildSearchRequestBody,
+  describeRequestError,
+  displayApiUrl,
   formatJobLocation,
   getJobDetails,
   readLocationFormat,
@@ -327,6 +329,42 @@ describe('API key and unreachable API', () => {
     await expect(searchJobs({ query: 'x' })).rejects.toThrow(
       /http:\/\/localhost:3001 is unreachable/,
     );
+  });
+
+  const UNREACHABLE = /the Ever Jobs API at \S+ is unreachable \(connection refused\)/;
+
+  it('rejects with an "unreachable" error when the connection is refused', async () => {
+    const client = mockClient({});
+    client.post.mockRejectedValue({ code: 'ECONNREFUSED', message: 'connect ECONNREFUSED' });
+    await expect(searchJobs({ query: 'x' })).rejects.toThrow(UNREACHABLE);
+    await expect(searchJobs({ query: 'x' })).rejects.toThrow(/^Search failed: /);
+  });
+
+  it('reports a refused connection the same way from get_job_details', async () => {
+    const client = mockClient({});
+    client.get.mockRejectedValue({ code: 'ECONNREFUSED', message: '' });
+    await expect(getJobDetails({ jobId: 'j1' })).rejects.toThrow(UNREACHABLE);
+  });
+
+  it('falls back to the error code when the error has no message', async () => {
+    const client = mockClient({});
+    client.get.mockRejectedValue({ code: 'ETIMEDOUT', message: '' });
+    await expect(getJobDetails({ jobId: 'j1' })).rejects.toThrow('Failed to get job details: ETIMEDOUT');
+  });
+
+  it('names the API URL in the unreachable error', () => {
+    expect(describeRequestError({ code: 'ECONNREFUSED' }, 'http://localhost:3001')).toContain(
+      'the Ever Jobs API at http://localhost:3001 is unreachable',
+    );
+  });
+
+  it('never echoes credentials from EVER_JOBS_API_URL', () => {
+    const text = describeRequestError({ code: 'ECONNREFUSED' }, 'https://user:s3cr@t@api.example.com:8443/base');
+    expect(text).toContain('https://api.example.com:8443/base');
+    expect(text).not.toContain('s3cr');
+    expect(text).not.toContain('user');
+    expect(displayApiUrl('http://api.example.com/a@b')).toBe('http://api.example.com/a@b');
+    expect(displayApiUrl('http://localhost:3001')).toBe('http://localhost:3001');
   });
 
   it('still reports other failures as "Search failed"', async () => {

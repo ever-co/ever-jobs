@@ -119,8 +119,9 @@ _No parameters required._
 | `EVER_JOBS_API_KEY`             | _(unset)_               | API key sent with every request when the API has `ENABLE_API_KEY_AUTH` on (one of its `API_KEYS`). No key header is sent when unset                                          |
 | `EVER_JOBS_API_KEY_HEADER`      | `x-api-key`             | Header name used for `EVER_JOBS_API_KEY`; set it to match the API's `API_KEY_HEADER_NAME`                                                                                    |
 
-If the API cannot be reached (connection refused), `search_jobs` and `search_remote_jobs` return an
-error naming `EVER_JOBS_API_URL` rather than an empty result.
+If the API cannot be reached (connection refused), `search_jobs`, `search_remote_jobs`,
+`get_salary_insights` and `get_job_details` return an error naming `EVER_JOBS_API_URL` (without any
+`user:password@` part) rather than an empty result.
 
 Remote-only jobs: whether their `location` reads `Remote` depends on the API's
 `EVER_JOBS_LOCATION_REMOTE_CITY` (default `false` — a bare `Remote` label gives

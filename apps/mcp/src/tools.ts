@@ -86,6 +86,31 @@ function buildHeaders(env: NodeJS.ProcessEnv = process.env): Record<string, stri
   return headers;
 }
 
+/**
+ * `EVER_JOBS_API_URL` as it may appear in a tool error: any `user:password@`
+ * part is dropped, so basic-auth credentials put in the URL are never echoed
+ * to the MCP client.
+ */
+export function displayApiUrl(url: string = getApiUrl()): string {
+  return url.replace(/^([a-z][a-z0-9+.-]*:\/\/)[^/?#]*@/i, '$1');
+}
+
+/**
+ * The reason text for a failed API request. A refused connection names the
+ * API URL, so an unreachable API never looks like "no jobs found". An error
+ * with no message (Node's AggregateError when every address of a dual-stack
+ * host such as `localhost` fails) falls back to its code.
+ */
+export function describeRequestError(err: any, url: string = getApiUrl()): string {
+  if (err?.code === 'ECONNREFUSED') {
+    return (
+      `the Ever Jobs API at ${displayApiUrl(url)} is unreachable (connection refused). ` +
+      'Check that it is running and that EVER_JOBS_API_URL is correct.'
+    );
+  }
+  return err?.message || err?.code || String(err);
+}
+
 function getClient(): AxiosInstance {
   return axios.create({
     baseURL: getApiUrl(),
@@ -536,13 +561,7 @@ export async function searchJobs(params: JobSearchParams): Promise<SearchRespons
     };
   } catch (err: any) {
     // An unreachable API must not look like "no jobs found": fail loudly.
-    if (err.code === 'ECONNREFUSED') {
-      throw new Error(
-        `Search failed: the Ever Jobs API at ${getApiUrl()} is unreachable (connection refused). ` +
-          'Check that it is running and that EVER_JOBS_API_URL is correct.',
-      );
-    }
-    throw new Error(`Search failed: ${err.message}`);
+    throw new Error(`Search failed: ${describeRequestError(err)}`);
   }
 }
 
@@ -585,7 +604,7 @@ export async function getJobDetails(params: {
       application_url: job.applicationUrl ?? job.application_url ?? job.jobUrl ?? null,
     };
   } catch (err: any) {
-    throw new Error(`Failed to get job details: ${err.message}`);
+    throw new Error(`Failed to get job details: ${describeRequestError(err)}`);
   }
 }
 
