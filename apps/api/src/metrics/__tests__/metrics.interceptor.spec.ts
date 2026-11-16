@@ -15,6 +15,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { lastValueFrom, of, throwError } from 'rxjs';
+import { recordHttpRequest } from '../http-metrics';
 import { MetricsInterceptor } from '../metrics.interceptor';
 import { MetricsService } from '../metrics.service';
 
@@ -190,6 +191,43 @@ describe('MetricsInterceptor', () => {
 
     const values = await counterValues();
     expect(values[0].labels.status_code).toBe(201);
+  });
+
+  it('counts a request once when the handler emits several values', async () => {
+    const ctx = makeContext({
+      method: 'GET',
+      url: '/api/stream',
+      route: { path: '/api/stream' },
+    });
+    const multi: CallHandler = { handle: () => of(1, 2, 3) };
+    await lastValueFrom(interceptor.intercept(ctx, multi));
+
+    const values = await counterValues();
+    expect(values).toHaveLength(1);
+    expect(values[0].value).toBe(1);
+    const counts = await durationCounts();
+    expect(counts[0].value).toBe(1);
+  });
+
+  it('does not count the same request again when the exception filter records it', async () => {
+    const request: FakeRequest = {
+      method: 'GET',
+      url: '/api/jobs/zzz',
+      route: { path: '/api/jobs/:id' },
+    };
+    const ctx = makeContext(request);
+    await expect(
+      lastValueFrom(
+        interceptor.intercept(ctx, handlerThrows(new NotFoundException())),
+      ),
+    ).rejects.toBeInstanceOf(NotFoundException);
+
+    // The global exception filter sees the same error afterwards.
+    recordHttpRequest(service, request, 404);
+
+    const values = await counterValues();
+    expect(values).toHaveLength(1);
+    expect(values[0].value).toBe(1);
   });
 
   it('does not record the metrics endpoint itself', async () => {
