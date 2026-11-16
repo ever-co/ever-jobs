@@ -256,6 +256,74 @@ describe('searchJobs — wire contract', () => {
   });
 });
 
+describe('API key and unreachable API', () => {
+  const API_ENV = ['EVER_JOBS_API_KEY', 'EVER_JOBS_API_KEY_HEADER'];
+  let saved: Record<string, string | undefined>;
+
+  beforeEach(() => {
+    saved = Object.fromEntries(API_ENV.map((k) => [k, process.env[k]]));
+    for (const k of API_ENV) delete process.env[k];
+  });
+
+  afterEach(() => {
+    for (const k of API_ENV) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+  });
+
+  function sentHeaders(): Record<string, string> {
+    return createMock.mock.calls[0][0].headers;
+  }
+
+  it('sends EVER_JOBS_API_KEY under x-api-key by default', async () => {
+    process.env.EVER_JOBS_API_KEY = 'k';
+    mockClient({});
+    await searchJobs({ query: 'x' });
+    expect(sentHeaders()).toMatchObject({ 'x-api-key': 'k' });
+  });
+
+  it('uses EVER_JOBS_API_KEY_HEADER as the header name when set', async () => {
+    process.env.EVER_JOBS_API_KEY = 'k';
+    process.env.EVER_JOBS_API_KEY_HEADER = 'x-custom-key';
+    mockClient({});
+    await searchJobs({ query: 'x' });
+    expect(sentHeaders()).toMatchObject({ 'x-custom-key': 'k' });
+    expect(sentHeaders()).not.toHaveProperty('x-api-key');
+  });
+
+  it('sends the key on the details client too', async () => {
+    process.env.EVER_JOBS_API_KEY = 'k';
+    mockClient({});
+    await getJobDetails({ jobId: 'j1' });
+    expect(sentHeaders()).toMatchObject({ 'x-api-key': 'k' });
+  });
+
+  it('sends no key header when EVER_JOBS_API_KEY is unset or blank', async () => {
+    mockClient({});
+    await searchJobs({ query: 'x' });
+    expect(sentHeaders()).toEqual({ 'Content-Type': 'application/json' });
+
+    createMock.mockReset();
+    process.env.EVER_JOBS_API_KEY = '   ';
+    mockClient({});
+    await searchJobs({ query: 'x' });
+    expect(sentHeaders()).toEqual({ 'Content-Type': 'application/json' });
+  });
+
+  it('rejects with an error naming the API URL when the connection is refused', async () => {
+    const client = mockClient({});
+    client.post.mockRejectedValue({ code: 'ECONNREFUSED', message: 'connect ECONNREFUSED' });
+    await expect(searchJobs({ query: 'x' })).rejects.toThrow(/unreachable.*http:\/\/localhost:3001|http:\/\/localhost:3001.*unreachable/);
+  });
+
+  it('still reports other failures as "Search failed"', async () => {
+    const client = mockClient({});
+    client.post.mockRejectedValue({ code: 'ERR_BAD_REQUEST', message: 'Request failed with status code 403' });
+    await expect(searchJobs({ query: 'x' })).rejects.toThrow('Search failed: Request failed with status code 403');
+  });
+});
+
 describe('getJobDetails — location contract', () => {
   it('renders a city-less location as a string', async () => {
     mockClient({ get: apiJob({ state: 'VA', country: 'United States' }) });

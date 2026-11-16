@@ -64,11 +64,30 @@ export function readLocationFormat(
   return raw === 'city' ? 'city' : 'full';
 }
 
+export const MCP_API_KEY_ENV_VAR = 'EVER_JOBS_API_KEY';
+export const MCP_API_KEY_HEADER_ENV_VAR = 'EVER_JOBS_API_KEY_HEADER';
+const DEFAULT_API_KEY_HEADER = 'x-api-key';
+
+/**
+ * Headers for every API request. When `EVER_JOBS_API_KEY` is set the key is
+ * sent under `EVER_JOBS_API_KEY_HEADER` (default `x-api-key`, matching the
+ * API's `API_KEY_HEADER_NAME` default); with no key, no key header is sent.
+ */
+function buildHeaders(env: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  const apiKey = env[MCP_API_KEY_ENV_VAR]?.trim();
+  if (apiKey) {
+    const headerName = env[MCP_API_KEY_HEADER_ENV_VAR]?.trim() || DEFAULT_API_KEY_HEADER;
+    headers[headerName] = apiKey;
+  }
+  return headers;
+}
+
 function getClient(): AxiosInstance {
   return axios.create({
     baseURL: API_URL,
     timeout: 60_000,
-    headers: { 'Content-Type': 'application/json' },
+    headers: buildHeaders(),
   });
 }
 
@@ -513,14 +532,12 @@ export async function searchJobs(params: JobSearchParams): Promise<SearchRespons
         : {}),
     };
   } catch (err: any) {
-    // If the API is unavailable, return a helpful error
+    // An unreachable API must not look like "no jobs found": fail loudly.
     if (err.code === 'ECONNREFUSED') {
-      return {
-        total: 0,
-        jobs: [],
-        sources_searched: [],
-        query: params.query,
-      };
+      throw new Error(
+        `Search failed: the Ever Jobs API at ${API_URL} is unreachable (connection refused). ` +
+          'Check that it is running and that EVER_JOBS_API_URL is correct.',
+      );
     }
     throw new Error(`Search failed: ${err.message}`);
   }

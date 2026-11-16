@@ -116,6 +116,11 @@ _No parameters required._
 | `EVER_JOBS_API_URL`             | `http://localhost:3001` | Ever Jobs API endpoint                                                                                                                                                       |
 | `EVER_JOBS_MCP_LOCATION_FORMAT` | `full`                  | How a job's `location` string is rendered: `full` = `city, state, country` (falling back to the site name, then its label text); `city` = the legacy city-only string        |
 | `EVER_JOBS_MCP_REQUEST_KEYS`    | `camel`                 | Search request key style sent to the API: `camel` (what `ScraperInputDto` accepts), `snake` (the legacy wire shape), `both`                                                  |
+| `EVER_JOBS_API_KEY`             | _(unset)_               | API key sent with every request when the API has `ENABLE_API_KEY_AUTH` on (one of its `API_KEYS`). No key header is sent when unset                                          |
+| `EVER_JOBS_API_KEY_HEADER`      | `x-api-key`             | Header name used for `EVER_JOBS_API_KEY`; set it to match the API's `API_KEY_HEADER_NAME`                                                                                    |
+
+If the API cannot be reached (connection refused), `search_jobs` and `search_remote_jobs` return an
+error naming `EVER_JOBS_API_URL` rather than an empty result.
 
 Remote-only jobs: whether their `location` reads `Remote` depends on the API's
 `EVER_JOBS_LOCATION_REMOTE_CITY` (default `false` — a bare `Remote` label gives
