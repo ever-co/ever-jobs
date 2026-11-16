@@ -23,7 +23,7 @@ async function bootstrap() {
     logger.log(`Trust proxy: ${JSON.stringify(trustProxy)}`);
     if (trustProxy === true) {
       logger.warn(
-        'TRUST_PROXY=true trusts every X-Forwarded-For hop: any client can spoof its IP. Prefer a hop count or the proxy addresses.',
+        'TRUST_PROXY=true trusts every X-Forwarded-For hop: any client can spoof its IP. Prefer the proxy addresses (a hop count only if clients cannot reach this port directly).',
       );
     }
   }
