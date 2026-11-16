@@ -10,6 +10,7 @@ import {
 import { Request, Response } from 'express';
 import { recordHttpRequest } from '../metrics/http-metrics';
 import { MetricsService } from '../metrics/metrics.service';
+import { serializeBodyForLog } from './log-safe-body';
 
 /**
  * Global exception filter returning structured JSON errors.
@@ -93,8 +94,10 @@ export class HttpExceptionFilter implements ExceptionFilter {
       this.logger.warn(
         `Validation errors: ${JSON.stringify(errorPayload.validationErrors)}`,
       );
+      // Never the raw body: it can carry per-request credentials (`auth`)
+      // and proxy passwords. See log-safe-body.ts.
       this.logger.warn(
-        `Request body: ${JSON.stringify(request.body)}`,
+        `Request body: ${serializeBodyForLog(request.body)}`,
       );
     }
 
