@@ -9,8 +9,8 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Reflector } from '@nestjs/core';
-import { Request } from 'express';
 import { ADMIN_AUTH_METADATA_KEY } from './admin-auth.decorator';
+import { getRequestFromContext } from './context-request';
 
 /**
  * Guard that validates the `x-api-key` header against a configured allow-list.
@@ -78,8 +78,10 @@ export class ApiKeyGuard implements CanActivate {
       );
     }
 
-    const request = context.switchToHttp().getRequest<Request>();
-    const providedKey = request.headers[headerName.toLowerCase()] as
+    // REST and GraphQL expose the request differently; a missing request is
+    // treated as a missing key.
+    const request = getRequestFromContext(context);
+    const providedKey = request?.headers?.[headerName.toLowerCase()] as
       | string
       | undefined;
 
