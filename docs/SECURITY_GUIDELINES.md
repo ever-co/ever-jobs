@@ -26,7 +26,7 @@ The API supports passing source-specific credentials (e.g., Upwork OAuth2 tokens
 - **Always use HTTPS** when sending credentials in request bodies to prevent interception
 - **Prefer environment variables** for server deployments to avoid credentials appearing in request logs or network traces
 - The API controller does **not** log auth credentials (only search term, sites, and location are logged)
-- When a request fails validation (HTTP 400), the global exception filter logs a **redacted** copy of the body, never the raw body: every value under `auth` and under a secret-looking key (`apiKey`, `clientSecret`, `accessToken`, `password`, …) at any depth becomes `[REDACTED]`, `user:password@` in proxy URLs (and any other string) becomes `***@`, and the logged body is cut to about 2 KB (`apps/api/src/filters/log-safe-body.ts`)
+- When a request fails validation (HTTP 400), the global exception filter logs a **redacted** copy of the body, never the raw body: every value under `auth` and under a secret-looking key (`apiKey`, `clientSecret`, `accessToken`, `password`, …) at any depth becomes `[REDACTED]`, everything before the last `@` of a proxy URL (under `proxies`) becomes `***`, `user:password@` in any other string becomes `***@`, and the logged body is cut to about 2 KB (`apps/api/src/filters/log-safe-body.ts`)
 - Auth data **is included in cache keys** — this is by design since different credentials may return different results
 - Per-request credentials are held in memory only for the duration of the request and are not persisted
 - See [Authentication](./AUTHENTICATION.md) for full details on per-request auth

@@ -13,8 +13,11 @@ import { redactCredentials } from '../utils/redact-credentials';
  *   (the keys stay, so the log still shows which source sent credentials);
  * - every value under a key that looks secret (`apiKey`, `clientSecret`,
  *   `accessToken`, `password`, …) at any depth is replaced the same way;
+ * - every string under a `proxies` (or `proxy`) key goes through
+ *   `redactProxyUrl`, which hides everything before the last `@`, so a
+ *   username or password with `@`, a quote or a space is hidden too;
  * - every other string goes through `redactCredentials`, which hides
- *   `user:password@` (proxy URLs in `proxies`, or anywhere else);
+ *   `user:password@` anywhere else;
  * - the serialised result is capped at `LOG_SAFE_BODY_MAX_CHARS`.
  *
  * Nothing here throws: odd input (a string, a number, `undefined`, a circular
@@ -42,6 +45,15 @@ const CREDENTIAL_BAG_KEY = /^auth$/i;
 const SECRET_KEY =
   /api[-_]?key|app[-_]?key|secret|token|passw(?:or)?d|passphrase|pwd|authori[sz]ation|cookie|credential|private[-_]?key|signature|session/i;
 
+/** A key whose values are proxy URLs (`ScraperInputDto.proxies`). */
+const PROXY_KEY = /^prox(?:y|ies)$/i;
+
+/** `scheme://` at the start of a URL. */
+const URL_SCHEME = /^[a-z][a-z0-9+.-]*:\/\//i;
+
+/** How a string is cleaned before it is logged. */
+type Mode = 'plain' | 'proxy' | 'redact';
+
 interface CopyState {
   nodes: number;
   /** Objects on the current path, to spot a cycle. */
@@ -52,12 +64,33 @@ function isSecretKey(key: string): boolean {
   return CREDENTIAL_BAG_KEY.test(key) || SECRET_KEY.test(key);
 }
 
+/** The mode for the value under `key`: `redact` is never relaxed further down. */
+function modeFor(key: string, parent: Mode): Mode {
+  if (parent === 'redact' || isSecretKey(key)) return 'redact';
+  if (PROXY_KEY.test(key)) return 'proxy';
+  return parent;
+}
+
+/**
+ * Hide the credentials of a proxy URL: everything before the last `@` (after
+ * any `scheme://`) becomes `***`. `redactCredentials` is a heuristic for free
+ * text and stops at the first `@`, a quote or a space, but the URL parser the
+ * HTTP client uses accepts all of them in a proxy username or password (for
+ * example `http://alice@example.com:secret@proxy.example:8080`).
+ */
+export function redactProxyUrl(value: string): string {
+  const at = value.lastIndexOf('@');
+  if (at === -1) return value;
+  const scheme = URL_SCHEME.exec(value)?.[0] ?? '';
+  return `${scheme}***${value.slice(at)}`;
+}
+
 /**
  * A deep copy of `body` that is safe to log (see the file comment). Never throws.
  */
 export function toLogSafeBody(body: unknown): unknown {
   try {
-    return copyForLog(body, 0, false, { nodes: 0, ancestors: new Set<object>() });
+    return copyForLog(body, 0, 'plain', { nodes: 0, ancestors: new Set<object>() });
   } catch {
     return '[Unserializable body]';
   }
@@ -83,14 +116,16 @@ export function serializeBodyForLog(
   return `${text.slice(0, maxChars)}… [truncated, ${text.length} chars in all]`;
 }
 
-function copyForLog(value: unknown, depth: number, redact: boolean, state: CopyState): unknown {
+function copyForLog(value: unknown, depth: number, mode: Mode, state: CopyState): unknown {
   state.nodes += 1;
   if (state.nodes > MAX_NODES) return TRUNCATED;
 
+  const redact = mode === 'redact';
   if (value === null || value === undefined) return redact ? REDACTED : value;
   switch (typeof value) {
     case 'string':
-      return redact ? REDACTED : redactCredentials(value);
+      if (redact) return REDACTED;
+      return mode === 'proxy' ? redactProxyUrl(value) : redactCredentials(value);
     case 'number':
     case 'boolean':
       return redact ? REDACTED : value;
@@ -123,7 +158,7 @@ function copyForLog(value: unknown, depth: number, redact: boolean, state: CopyS
           out.push(`${TRUNCATED} ${obj.length - i} more`);
           break;
         }
-        out.push(copyForLog(obj[i], depth + 1, redact, state));
+        out.push(copyForLog(obj[i], depth + 1, mode, state));
       }
       return out;
     }
@@ -136,7 +171,7 @@ function copyForLog(value: unknown, depth: number, redact: boolean, state: CopyS
         break;
       }
       const child = (obj as Record<string, unknown>)[key];
-      out[key] = copyForLog(child, depth + 1, redact || isSecretKey(key), state);
+      out[key] = copyForLog(child, depth + 1, modeFor(key, mode), state);
     }
     return out;
   } finally {

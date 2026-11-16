@@ -116,6 +116,24 @@ describe('HttpExceptionFilter — request body redaction', () => {
     }
   });
 
+  it('hides a proxy password when the proxy username has an @ in it', () => {
+    const { host } = makeHost(
+      searchRequest({
+        resultsWanted: 'x',
+        proxies: ['http://alice@example.com:proxy-secret@proxy.example:8080'],
+      }),
+    );
+
+    filter.catch(new BadRequestException(['resultsWanted must be a number']), host);
+
+    for (const line of logged()) {
+      expect(line).not.toContain('proxy-secret');
+      expect(line).not.toContain('alice');
+    }
+    const bodyLine = logged().find((line) => line.startsWith('Request body: '));
+    expect(bodyLine).toContain('http://***@proxy.example:8080');
+  });
+
   it('caps the logged body and survives a circular body', () => {
     const big: Record<string, unknown> = { resultsWanted: 'x', searchTerm: 'a'.repeat(50_000) };
     big.self = big;

@@ -98,6 +98,27 @@ describe('toLogSafeBody', () => {
     expect(text).toContain('http://open.example:3128');
   });
 
+  it.each([
+    ['an email-style username', 'http://alice@example.com:proxy-secret@proxy.example:8080', 'http://***@proxy.example:8080'],
+    ['an @ in the password', 'http://user:Ab@proxy-secret@proxy.example:8080', 'http://***@proxy.example:8080'],
+    ['an @ in the password, no scheme', 'user:Ab@proxy-secret@proxy.example:8080', '***@proxy.example:8080'],
+    ['a quote in the password, no scheme', 'user:pa"proxy-secret@proxy.example:8080', '***@proxy.example:8080'],
+    ['an apostrophe in the password, no scheme', "user:it'sproxy-secret@proxy.example:8080", '***@proxy.example:8080'],
+    ['a space in the password', 'http://user:pa proxy-secret@proxy.example:8080', 'http://***@proxy.example:8080'],
+    ['a SOCKS proxy with an @ in the password', 'socks5://user:Ab@proxy-secret@proxy.example:1080', 'socks5://***@proxy.example:1080'],
+  ])('hides a whole proxy credential with %s', (_label, proxy, expected) => {
+    for (const body of [{ proxies: [proxy] }, { crawl: { proxy } }]) {
+      const text = JSON.stringify(toLogSafeBody(body));
+      expect(text).not.toContain('proxy-secret');
+      expect(text).toContain(JSON.stringify(expected));
+    }
+  });
+
+  it('leaves a proxy URL without credentials and a proxy-like key alone', () => {
+    const body = { proxies: ['http://open.example:3128', 'localhost'], crawl: { proxyRotation: 'per-host' } };
+    expect(JSON.parse(JSON.stringify(toLogSafeBody(body)))).toEqual(body);
+  });
+
   it('copies a `__proto__` key as data without touching any prototype', () => {
     const body = JSON.parse('{"__proto__":{"apiKey":"pp-1"},"a":1}');
     const text = JSON.stringify(toLogSafeBody(body));
