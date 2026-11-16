@@ -84,6 +84,12 @@ export class AnalyticsService {
    * `avgSalary` (the mean of the low ends) are taken over the jobs in the most
    * common currency only, which `currency` reports. A compensation whose
    * interval is missing or unknown is used as given.
+   *
+   * Known limit: with `EVER_JOBS_SALARY_GRAMMAR=legacy` and
+   * `enforceAnnualSalary`, a salary parsed from the description keeps its
+   * source interval on amounts that are already yearly (the legacy rule,
+   * pinned in `packages/common/__tests__/salary.spec.ts`), so it is
+   * annualised a second time here. The default grammar is not affected.
    */
   summarize(jobs: JobPostDto[]): JobSummaryDto {
     const remoteCount = jobs.filter((j) => j.isRemote).length;
