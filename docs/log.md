@@ -5,6 +5,18 @@
 
 ---
 
+## 2026-11-16 — Fix: GraphQL queries work with API key auth and rate limiting on
+
+**Symptom.** With `ENABLE_API_KEY_AUTH=true` (and `API_KEYS` set) or `RATE_LIMIT_ENABLED=true`, every `/graphql` query failed with `Cannot read properties of undefined (reading 'headers')` (or `'ip'`), even with a valid key. GraphQL only broke in the hardened deployments.
+
+**Cause.** The global `ApiKeyGuard` and the stock `ThrottlerGuard` read the request through `switchToHttp().getRequest()`. Inside a resolver that is the resolver root (`undefined`); the request lives in the GraphQL context.
+
+**Fix.** New `getRequestFromContext()` (`apps/api/src/auth/context-request.ts`) takes `req` from the GraphQL context for GraphQL and from `switchToHttp()` otherwise. `ApiKeyGuard` uses it (a missing request counts as a missing key). New `GqlThrottlerGuard` (`apps/api/src/auth/gql-throttler.guard.ts`) extends `ThrottlerGuard` and overrides `getRequestResponse()` for GraphQL (response from `req.res`); `AppModule` registers it in place of `ThrottlerGuard`. REST is unchanged. Each top-level GraphQL field (aliases included) counts as one request against the limit. A throttled GraphQL call returns the error `ThrottlerException: Too Many Requests` with the `Retry-After` header.
+
+**Files:** `apps/api/src/auth/{context-request,gql-throttler.guard,api-key.guard}.ts`, `apps/api/src/app.module.ts`, `apps/api/src/auth/__tests__/{api-key.guard,gql-throttler.guard}.spec.ts`, `docs/ARCHITECTURE_OVERVIEW.md`, `docs/log.md`.
+
+**Validation:** the two auth specs pass (22 tests); 9 of the 11 new tests fail against develop's guards (the 2 that pass are the auth-off and REST controls). Both CI type-checks and `nest build` pass. A full-app HTTP probe with both features on (missing, wrong and valid keys, throttling, per-IP budgets, aliases, GET `/graphql`, REST `/ping`) passes on this change; on develop every GraphQL case fails with the `TypeError`.
+
 ## 2026-11-14 — Fix: the ambiguous `kr` currency symbol only matches as a stand-alone token
 
 **Symptom.** A salary text with no currency symbol or ISO code but a word that starts with the letters "kr" (`8.000 - 10.000, Kraków`, `Krefeld`, `Kroger`) was read as Swedish kronor. The wrong detection also hid the country currency (`confidence: 'symbol'` outranks `'country'`), so `extractSalary` found no range at all where a `country` hint should have given `PLN` / `EUR` / `GBP` and a bare-range match.
