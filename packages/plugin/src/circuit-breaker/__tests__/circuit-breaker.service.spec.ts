@@ -1,5 +1,5 @@
 import { Site, ERR_SOURCE_CIRCUIT_OPEN, DEFAULT_CIRCUIT_POLICY } from '@ever-jobs/models';
-import { CircuitBreakerService } from '../circuit-breaker.service';
+import { CircuitBreakerService, markCircuitNeutral } from '../circuit-breaker.service';
 
 /**
  * Spec 005 / T02 — state-machine acceptance:
@@ -226,6 +226,167 @@ describe('CircuitBreakerService', () => {
       // First probe fails → reopen.
       await expect(service.exec(SITE, fail)).rejects.toThrow('boom');
       expect(service.state(SITE)).toBe('open');
+    });
+
+    it('re-arms open with a fresh cooldown when no probe is in flight', async () => {
+      service.setPolicy(SITE, {
+        ...DEFAULT_CIRCUIT_POLICY,
+        failureThreshold: 1,
+        halfOpenProbes: 0,
+      });
+      await expect(service.exec(SITE, fail)).rejects.toThrow();
+      advance(DEFAULT_CIRCUIT_POLICY.cooldownMs + 1);
+      const fn = jest.fn(ok);
+      await expect(service.exec(SITE, fn)).rejects.toMatchObject({
+        code: ERR_SOURCE_CIRCUIT_OPEN,
+      });
+      expect(fn).not.toHaveBeenCalled();
+      expect(service.state(SITE)).toBe('open');
+      advance(DEFAULT_CIRCUIT_POLICY.cooldownMs - 1);
+      expect(service.state(SITE)).toBe('open');
+      advance(1);
+      expect(service.state(SITE)).toBe('half-open');
+    });
+  });
+
+  /**
+   * T-2547 — while the half-open probe is still running, a concurrent call
+   * used to pass the gate (it refused only when no probe was in flight), so
+   * every concurrent search hit a recovering site at once.
+   */
+  describe('concurrent calls while a half-open probe is in flight', () => {
+    /** A promise the test settles by hand. */
+    const deferred = <T>() => {
+      let resolve!: (value: T) => void;
+      let reject!: (reason: unknown) => void;
+      const promise = new Promise<T>((res, rej) => {
+        resolve = res;
+        reject = rej;
+      });
+      return { promise, resolve, reject };
+    };
+
+    /** Trip the breaker with one failure and advance past the cooldown. */
+    const tripAndCoolDown = async (halfOpenProbes: number) => {
+      service.setPolicy(SITE, {
+        ...DEFAULT_CIRCUIT_POLICY,
+        failureThreshold: 1,
+        halfOpenProbes,
+      });
+      await expect(service.exec(SITE, fail)).rejects.toThrow('boom');
+      expect(service.state(SITE)).toBe('open');
+      advance(DEFAULT_CIRCUIT_POLICY.cooldownMs + 1);
+      expect(service.state(SITE)).toBe('half-open');
+    };
+
+    it('refuses a concurrent call while the only probe is pending', async () => {
+      await tripAndCoolDown(1);
+      const a = deferred<string>();
+      const fnA = jest.fn(() => a.promise);
+      const probeA = service.exec(SITE, fnA);
+      expect(fnA).toHaveBeenCalledTimes(1);
+
+      const fnB = jest.fn(ok);
+      await expect(service.exec(SITE, fnB)).rejects.toMatchObject({
+        code: ERR_SOURCE_CIRCUIT_OPEN,
+        site: SITE,
+      });
+      expect(fnB).not.toHaveBeenCalled();
+      // Later concurrent callers are refused too, and the refusals leave the
+      // state for the probe to settle.
+      const fnC = jest.fn(ok);
+      await expect(service.exec(SITE, fnC)).rejects.toMatchObject({
+        code: ERR_SOURCE_CIRCUIT_OPEN,
+      });
+      expect(fnC).not.toHaveBeenCalled();
+      expect(service.state(SITE)).toBe('half-open');
+
+      a.resolve('a');
+      await expect(probeA).resolves.toBe('a');
+    });
+
+    it('closes when the pending probe succeeds, and later calls run', async () => {
+      await tripAndCoolDown(1);
+      const a = deferred<string>();
+      const probeA = service.exec(SITE, () => a.promise);
+      const fnB = jest.fn(ok);
+      await expect(service.exec(SITE, fnB)).rejects.toMatchObject({
+        code: ERR_SOURCE_CIRCUIT_OPEN,
+      });
+      expect(fnB).not.toHaveBeenCalled();
+
+      a.resolve('a');
+      await expect(probeA).resolves.toBe('a');
+      expect(service.state(SITE)).toBe('closed');
+      const fnC = jest.fn(ok);
+      await expect(service.exec(SITE, fnC)).resolves.toBe('ok');
+      expect(fnC).toHaveBeenCalledTimes(1);
+    });
+
+    it('re-opens with a fresh cooldown when the pending probe fails', async () => {
+      await tripAndCoolDown(1);
+      const a = deferred<string>();
+      const probeA = service.exec(SITE, () => a.promise);
+      const fnB = jest.fn(ok);
+      await expect(service.exec(SITE, fnB)).rejects.toMatchObject({
+        code: ERR_SOURCE_CIRCUIT_OPEN,
+      });
+      expect(fnB).not.toHaveBeenCalled();
+
+      advance(500);
+      a.reject(Object.assign(new Error('probe boom'), { code: 'ERR_TEST_BOOM' }));
+      await expect(probeA).rejects.toThrow('probe boom');
+      expect(service.state(SITE)).toBe('open');
+      advance(DEFAULT_CIRCUIT_POLICY.cooldownMs - 1);
+      expect(service.state(SITE)).toBe('open');
+      advance(1);
+      expect(service.state(SITE)).toBe('half-open');
+    });
+
+    it('with halfOpenProbes: 2, two concurrent probes run and the third is refused', async () => {
+      await tripAndCoolDown(2);
+      const a = deferred<string>();
+      const b = deferred<string>();
+      const fnA = jest.fn(() => a.promise);
+      const fnB = jest.fn(() => b.promise);
+      const probeA = service.exec(SITE, fnA);
+      const probeB = service.exec(SITE, fnB);
+      expect(fnA).toHaveBeenCalledTimes(1);
+      expect(fnB).toHaveBeenCalledTimes(1);
+
+      const fnC = jest.fn(ok);
+      await expect(service.exec(SITE, fnC)).rejects.toMatchObject({
+        code: ERR_SOURCE_CIRCUIT_OPEN,
+      });
+      expect(fnC).not.toHaveBeenCalled();
+      expect(service.state(SITE)).toBe('half-open');
+
+      a.resolve('a');
+      b.resolve('b');
+      await expect(probeA).resolves.toBe('a');
+      await expect(probeB).resolves.toBe('b');
+      expect(service.state(SITE)).toBe('closed');
+    });
+
+    it('a circuit-neutral probe error still hands its slot back', async () => {
+      await tripAndCoolDown(1);
+      const a = deferred<string>();
+      const probeA = service.exec(SITE, () => a.promise);
+      const fnB = jest.fn(ok);
+      await expect(service.exec(SITE, fnB)).rejects.toMatchObject({
+        code: ERR_SOURCE_CIRCUIT_OPEN,
+      });
+      expect(fnB).not.toHaveBeenCalled();
+
+      const neutral = markCircuitNeutral(new Error('search deadline'));
+      a.reject(neutral);
+      await expect(probeA).rejects.toBe(neutral);
+      // Nothing recorded: still half-open, and the slot is free again.
+      expect(service.state(SITE)).toBe('half-open');
+      const fnC = jest.fn(ok);
+      await expect(service.exec(SITE, fnC)).resolves.toBe('ok');
+      expect(fnC).toHaveBeenCalledTimes(1);
+      expect(service.state(SITE)).toBe('closed');
     });
   });
 });
