@@ -6,6 +6,7 @@ import {
 } from './search-config';
 import { resolvePersistSearch } from './store-config';
 import { resolveShutdownDrainTimeoutMs } from './shutdown-config';
+import { resolveTrustProxy } from './trust-proxy-config';
 import {
   crawlBuiltinHostsDisabled,
   crawlFleetSize,
@@ -58,6 +59,11 @@ export default () => {
       maxRequests: parseInt(process.env.RATE_LIMIT_REQUESTS, 100),
       timeframeSec: parseInt(process.env.RATE_LIMIT_TIMEFRAME, 3600),
     },
+
+    // Express `trust proxy` (T-2521): which reverse proxies may set
+    // X-Forwarded-For, so `req.ip` (the rate limit key without a valid API key)
+    // is the real client. `undefined` (unset) = not applied, as before.
+    trustProxy: resolveTrustProxy(process.env),
 
     // Proxy
     proxy: {

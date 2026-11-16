@@ -34,6 +34,7 @@ The API supports passing source-specific credentials (e.g., Upwork OAuth2 tokens
 ## Network Security
 
 - Deploy behind a reverse proxy (nginx, Caddy) with TLS/HTTPS
+- Behind that proxy, set `TRUST_PROXY` to its addresses or CIDRs, so rate limiting sees each client's IP instead of the proxy's. Use a hop count (`1`) only when clients cannot reach the API port except through the proxy, and never `true` on a port clients can reach: with either, a client that connects directly can spoof `X-Forwarded-For` and pick its own rate limit bucket. With API key auth on, a valid key is limited per key
 - Restrict `CORS_ORIGINS` to trusted domains in production
 - Use firewall rules to limit access to the API port
 
