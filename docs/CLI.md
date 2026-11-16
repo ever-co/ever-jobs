@@ -107,7 +107,7 @@ ever-jobs search -s linkedin -s indeed -q "Backend" --analyze
 | `--format`                     | `-f`  | `<format>`   | json     | `json`, `csv`, `table`, `summary`                |
 | `--output`                     | `-o`  | `<file>`     | stdout   | Write output to file                             |
 | `--verbose`                    | `-v`  | —            | false    | Enable verbose debug output                      |
-| `--no-description`             | —     | —            | false    | Omit descriptions (reduces size for LLMs)        |
+| `--no-description`             | —     | —            | false    | Omit descriptions from `json` / `csv` output (reduces size for LLMs); `--exclude-keyword` still matches them |
 | `--analyze`                    | —     | —            | false    | Append analytics after results                   |
 | `--bd`                         | —     | —            | false    | BD intelligence mode (company analysis)          |
 | `--stdin`                      | —     | —            | false    | Read JSON input from stdin                       |
@@ -216,6 +216,9 @@ positions. They are empty unless the source gives the posting time: `datePostedA
 UTC instant (precision `exact`, `minute` or `hour`), `datePostedPrecision` is one of
 `exact | minute | hour | day | week | month | year` and `datePostedBasis` one of
 `timestamp | date | relative` (`relative` = estimated from an age label at fetch time).
+
+With `--no-description` the `description` column is left out, so `datePostedAt`,
+`datePostedPrecision` and `datePostedBasis` move one place to the left; read columns by header name.
 
 Job fields come from third-party boards, so a text cell that starts with `=`, `+`, `-`, `@`, a
 tab or a carriage return gets a leading `'` and opens in a spreadsheet as text, not a formula.
