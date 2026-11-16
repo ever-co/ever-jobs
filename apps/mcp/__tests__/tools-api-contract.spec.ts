@@ -257,7 +257,7 @@ describe('searchJobs — wire contract', () => {
 });
 
 describe('API key and unreachable API', () => {
-  const API_ENV = ['EVER_JOBS_API_KEY', 'EVER_JOBS_API_KEY_HEADER'];
+  const API_ENV = ['EVER_JOBS_API_KEY', 'EVER_JOBS_API_KEY_HEADER', 'EVER_JOBS_API_URL'];
   let saved: Record<string, string | undefined>;
 
   beforeEach(() => {
@@ -312,9 +312,21 @@ describe('API key and unreachable API', () => {
   });
 
   it('rejects with an error naming the API URL when the connection is refused', async () => {
+    process.env.EVER_JOBS_API_URL = 'http://api.test:4000';
     const client = mockClient({});
     client.post.mockRejectedValue({ code: 'ECONNREFUSED', message: 'connect ECONNREFUSED' });
-    await expect(searchJobs({ query: 'x' })).rejects.toThrow(/unreachable.*http:\/\/localhost:3001|http:\/\/localhost:3001.*unreachable/);
+    await expect(searchJobs({ query: 'x' })).rejects.toThrow(
+      /http:\/\/api\.test:4000 is unreachable/,
+    );
+    expect(createMock.mock.calls[0][0].baseURL).toBe('http://api.test:4000');
+  });
+
+  it('names the default API URL when EVER_JOBS_API_URL is unset', async () => {
+    const client = mockClient({});
+    client.post.mockRejectedValue({ code: 'ECONNREFUSED', message: 'connect ECONNREFUSED' });
+    await expect(searchJobs({ query: 'x' })).rejects.toThrow(
+      /http:\/\/localhost:3001 is unreachable/,
+    );
   });
 
   it('still reports other failures as "Search failed"', async () => {

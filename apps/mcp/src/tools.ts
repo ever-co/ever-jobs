@@ -9,7 +9,10 @@ import axios, { AxiosInstance } from 'axios';
 
 // ── Configuration ──────────────────────────────────────────────────────
 
-const API_URL = process.env.EVER_JOBS_API_URL ?? 'http://localhost:3001';
+/** Read per call (not at import) so the configured URL is always the one reported. */
+function getApiUrl(env: NodeJS.ProcessEnv = process.env): string {
+  return env.EVER_JOBS_API_URL ?? 'http://localhost:3001';
+}
 
 /**
  * Which key spelling `searchJobs` uses in the `POST /api/jobs/search` body
@@ -85,7 +88,7 @@ function buildHeaders(env: NodeJS.ProcessEnv = process.env): Record<string, stri
 
 function getClient(): AxiosInstance {
   return axios.create({
-    baseURL: API_URL,
+    baseURL: getApiUrl(),
     timeout: 60_000,
     headers: buildHeaders(),
   });
@@ -535,7 +538,7 @@ export async function searchJobs(params: JobSearchParams): Promise<SearchRespons
     // An unreachable API must not look like "no jobs found": fail loudly.
     if (err.code === 'ECONNREFUSED') {
       throw new Error(
-        `Search failed: the Ever Jobs API at ${API_URL} is unreachable (connection refused). ` +
+        `Search failed: the Ever Jobs API at ${getApiUrl()} is unreachable (connection refused). ` +
           'Check that it is running and that EVER_JOBS_API_URL is correct.',
       );
     }
