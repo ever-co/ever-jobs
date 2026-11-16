@@ -427,6 +427,7 @@ All settings are configurable via environment variables. Copy `.env.example` to 
 | `RATE_LIMIT_ENABLED`   | `false`     | Enable request throttling      |
 | `RATE_LIMIT_REQUESTS`  | `100`       | Max requests per window        |
 | `RATE_LIMIT_TIMEFRAME` | `3600`      | Window size in seconds         |
+| `TRUST_PROXY`          | (unset)     | Reverse proxies whose `X-Forwarded-For` sets the client IP: a hop count (`1`), or comma-separated addresses / CIDRs / `loopback`, `linklocal`, `uniquelocal`. Unset: the header is ignored, so behind a proxy every caller without a valid API key shares the proxy's rate limit bucket. **`true` lets any client spoof `X-Forwarded-For`** and so its rate limit bucket; prefer a hop count or the proxy's addresses. An invalid address stops the API at startup. Requests with a valid API key (auth on) are limited per key whatever their IP |
 | `ENABLE_CACHE`         | `false`     | Enable response caching        |
 | `CACHE_EXPIRY`         | `3600`      | Cache TTL in seconds           |
 | `CORS_ORIGINS`         | `*`         | Allowed CORS origins           |

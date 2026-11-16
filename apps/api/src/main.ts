@@ -7,11 +7,26 @@ import { AppModule } from './app.module';
 import { requestContextMiddleware } from './middleware/request-context.middleware';
 import { createGlobalValidationPipe } from './pipes/global-validation.pipe';
 import { installGracefulShutdown } from './shutdown/graceful-shutdown';
+import { TrustProxySetting } from './config/trust-proxy-config';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   const config = app.get(ConfigService);
   const logger = new Logger('Bootstrap');
+
+  // ── Trusted reverse proxy (T-2521) ─────
+  // Opt-in via TRUST_PROXY. Unset, Express ignores X-Forwarded-For and req.ip
+  // is the socket peer (behind a proxy: the proxy, for every caller).
+  const trustProxy = config.get<TrustProxySetting>('trustProxy');
+  if (trustProxy !== undefined) {
+    app.getHttpAdapter().getInstance().set('trust proxy', trustProxy);
+    logger.log(`Trust proxy: ${JSON.stringify(trustProxy)}`);
+    if (trustProxy === true) {
+      logger.warn(
+        'TRUST_PROXY=true trusts every X-Forwarded-For hop: any client can spoof its IP. Prefer a hop count or the proxy addresses.',
+      );
+    }
+  }
 
   // ── Request correlation id ─────────────
   app.use(requestContextMiddleware);
@@ -64,7 +79,7 @@ When API key authentication is enabled, include your key in the \`x-api-key\` he
 
 ## Rate Limiting
 
-Requests are limited based on your API key or IP address. Default: 100 requests per hour.
+Requests are limited per API key when API key authentication is enabled and the key is valid, otherwise per client IP address. Default: 100 requests per hour.
 
 ## Caching
 

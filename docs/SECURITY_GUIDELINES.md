@@ -33,6 +33,7 @@ The API supports passing source-specific credentials (e.g., Upwork OAuth2 tokens
 ## Network Security
 
 - Deploy behind a reverse proxy (nginx, Caddy) with TLS/HTTPS
+- Behind that proxy, set `TRUST_PROXY` to its hop count (`1`) or its addresses, so rate limiting sees each client's IP instead of the proxy's; never `true` on a port clients can reach directly (any client could then spoof `X-Forwarded-For`). With API key auth on, a valid key is limited per key
 - Restrict `CORS_ORIGINS` to trusted domains in production
 - Use firewall rules to limit access to the API port
 
