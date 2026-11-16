@@ -14,7 +14,7 @@ import {
   HttpException,
   NotFoundException,
 } from '@nestjs/common';
-import { lastValueFrom, of, throwError } from 'rxjs';
+import { concat, defer, EMPTY, lastValueFrom, of, throwError } from 'rxjs';
 import { recordHttpRequest } from '../http-metrics';
 import { MetricsInterceptor } from '../metrics.interceptor';
 import { MetricsService } from '../metrics.service';
@@ -29,8 +29,8 @@ function makeContext(
   request: FakeRequest,
   statusCode = 200,
   type = 'http',
+  response: { statusCode: number } = { statusCode },
 ): ExecutionContext {
-  const response = { statusCode };
   return {
     getType: () => type,
     switchToHttp: () => ({
@@ -207,6 +207,70 @@ describe('MetricsInterceptor', () => {
     expect(values[0].value).toBe(1);
     const counts = await durationCounts();
     expect(counts[0].value).toBe(1);
+  });
+
+  describe('exactly one counter increment and one duration sample', () => {
+    const request = (): FakeRequest => ({
+      method: 'GET',
+      url: '/api/stream?x=1',
+      route: { path: '/api/stream' },
+    });
+
+    const expectOnce = async (statusCode: number) => {
+      expect(await counterValues()).toEqual([
+        {
+          value: 1,
+          labels: { method: 'GET', path: '/api/stream', status_code: statusCode },
+        },
+      ]);
+      const counts = await durationCounts();
+      expect(counts).toHaveLength(1);
+      expect(counts[0].value).toBe(1);
+    };
+
+    it('for several emissions, using the status at completion', async () => {
+      const response = { statusCode: 200 };
+      const ctx = makeContext(request(), 200, 'http', response);
+      const handler: CallHandler = {
+        handle: () =>
+          concat(
+            of('a'),
+            defer(() => {
+              response.statusCode = 202; // status settled after the first emission
+              return of('b', 'c');
+            }),
+          ),
+      };
+
+      await lastValueFrom(interceptor.intercept(ctx, handler));
+
+      await expectOnce(202);
+    });
+
+    it('for an empty completion', async () => {
+      const ctx = makeContext(request(), 204);
+      const handler: CallHandler = { handle: () => EMPTY };
+
+      await lastValueFrom(interceptor.intercept(ctx, handler), {
+        defaultValue: undefined,
+      });
+
+      await expectOnce(204);
+    });
+
+    it('for an emission followed by an error, using the error status', async () => {
+      const ctx = makeContext(request(), 200);
+      const handler: CallHandler = {
+        handle: () =>
+          concat(of('partial'), throwError(() => new NotFoundException())),
+      };
+
+      await expect(
+        lastValueFrom(interceptor.intercept(ctx, handler)),
+      ).rejects.toBeInstanceOf(NotFoundException);
+
+      await expectOnce(404);
+    });
   });
 
   it('does not count the same request again when the exception filter records it', async () => {
