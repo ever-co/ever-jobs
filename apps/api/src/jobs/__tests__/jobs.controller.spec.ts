@@ -238,6 +238,30 @@ describe('JobsController', () => {
       expect(result).toBeDefined();
     });
 
+    it('neutralises formula titles and keeps object array items readable', async () => {
+      const jobs = [
+        makeJob({
+          title: '=HYPERLINK("x")',
+          locations: [{ city: 'A' }, { city: 'B' }] as any,
+        }),
+      ];
+      const { controller } = createController({ jobs });
+      const file = await controller.searchJobs(
+        new ScraperInputDto({ searchTerm: 'node' }),
+        'csv',
+        undefined, undefined, undefined, undefined, undefined, undefined,
+        { setHeader: jest.fn() } as any,
+      ) as StreamableFile;
+
+      const chunks: Buffer[] = [];
+      for await (const chunk of file.getStream()) chunks.push(Buffer.from(chunk));
+      const csv = Buffer.concat(chunks).toString('utf8');
+
+      expect(csv).toContain('"\'=HYPERLINK(""x"")"');
+      expect(csv).not.toContain('[object Object]');
+      expect(csv).toContain('{""city"":""A""}; {""city"":""B""}');
+    });
+
     it('carries the Spec 1696 posted-time columns, empty for a job without them', async () => {
       const jobs = [
         makeJob({

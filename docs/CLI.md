@@ -217,6 +217,11 @@ UTC instant (precision `exact`, `minute` or `hour`), `datePostedPrecision` is on
 `exact | minute | hour | day | week | month | year` and `datePostedBasis` one of
 `timestamp | date | relative` (`relative` = estimated from an age label at fetch time).
 
+Job fields come from third-party boards, so a text cell that starts with `=`, `+`, `-`, `@`, a
+tab or a carriage return gets a leading `'` and opens in a spreadsheet as text, not a formula.
+Cells holding `,` `"` or a line break are quoted. Numbers are written as-is. Import the file with
+comma as the separator: a spreadsheet that splits it on `;` can still cut a value at a `;` it contains.
+
 ### Table
 
 ```

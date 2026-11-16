@@ -5,7 +5,21 @@
 
 ---
 
-## 2026-11-16 — Fix: GraphQL queries work with API key auth and rate limiting on
+## 2026-11-16 — Lane-scan fixes (T-2459–T-2462)
+
+One dated entry for the day; each fix has its own section.
+
+### Fix: CSV exports neutralise spreadsheet formulas and keep object list items readable (PR #136)
+
+**Symptom.** Titles, company names and descriptions are scraped from third-party boards. In the API `?format=csv` and the CLI `--format csv` exports, a cell starting with `=`, `+`, `-`, `@`, a tab or a carriage return ran as a formula when the file was opened in a spreadsheet, a bare `\r` was not quoted and could split a row, and in the API export object items in lists (`locations`, `offices`) came out as `[object Object]`.
+
+**Fix.** New `toCsvCell` (`packages/common/src/utils/csv.ts`) is used by both exports. Formula-leading text gets a leading `'`; numbers stay raw (`-5`). Cells holding `,` `"` `\n` or `\r` are quoted. Object list items and nested objects are written as JSON, dates as ISO-8601 strings. Known limit: a spreadsheet that opens the comma-separated file with `;` as its separator (the default in many European locales) can still split a value at a `;` inside it, and quoting does not stop that, because such a reader honours a quote only at the start of its own field. `docs/API_CHANGELOG.md` and `docs/CLI.md` say so.
+
+**Files:** `packages/common/src/utils/{csv,index}.ts`, `packages/common/__tests__/csv.spec.ts`, `apps/api/src/jobs/jobs.controller.ts`, `apps/api/src/jobs/__tests__/jobs.controller.spec.ts`, `apps/cli/src/commands/search.command.ts`, `apps/cli/__tests__/search-csv.command.spec.ts`, `docs/API_CHANGELOG.md`, `docs/CLI.md`, `docs/log.md`.
+
+**Validation:** the new specs and the API controller, CLI and `packages/common` suites pass; the `tsconfig.typecheck.json` type-check shows no error in the touched files. Against develop's sources, all 7 new tests of the first commit fail.
+
+### Fix: GraphQL queries work with API key auth and rate limiting on (PR #137)
 
 **Symptom.** With `ENABLE_API_KEY_AUTH=true` (and `API_KEYS` set) or `RATE_LIMIT_ENABLED=true`, every `/graphql` query failed with `Cannot read properties of undefined (reading 'headers')` (or `'ip'`), even with a valid key. GraphQL only broke in the hardened deployments.
 
