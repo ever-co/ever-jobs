@@ -5,6 +5,16 @@
 
 ---
 
+## 2026-11-16 — Fix: CSV exports neutralise spreadsheet formulas and keep object list items readable (PR #136)
+
+**Symptom.** Titles, company names and descriptions are scraped from third-party boards. In the API `?format=csv` and the CLI `--format csv` exports, a cell starting with `=`, `+`, `-`, `@`, a tab or a carriage return ran as a formula when the file was opened in a spreadsheet, a bare `\r` was not quoted and could split a row, and in the API export object items in lists (`locations`, `offices`) came out as `[object Object]`.
+
+**Fix.** New `toCsvCell` (`packages/common/src/utils/csv.ts`) is used by both exports. Formula-leading text gets a leading `'`; numbers stay raw (`-5`). Cells holding `,` `"` `\n` or `\r` are quoted. Object list items and nested objects are written as JSON, dates as ISO-8601 strings. Known limit: a spreadsheet that opens the comma-separated file with `;` as its separator (the default in many European locales) can still split a value at a `;` inside it, and quoting does not stop that, because such a reader honours a quote only at the start of its own field. `docs/API_CHANGELOG.md` and `docs/CLI.md` say so.
+
+**Files:** `packages/common/src/utils/{csv,index}.ts`, `packages/common/__tests__/csv.spec.ts`, `apps/api/src/jobs/jobs.controller.ts`, `apps/api/src/jobs/__tests__/jobs.controller.spec.ts`, `apps/cli/src/commands/search.command.ts`, `apps/cli/__tests__/search-csv.command.spec.ts`, `docs/API_CHANGELOG.md`, `docs/CLI.md`, `docs/log.md`.
+
+**Validation:** the new specs and the API controller, CLI and `packages/common` suites pass; the `tsconfig.typecheck.json` type-check shows no error in the touched files. Against develop's sources, all 7 new tests of the first commit fail.
+
 ## 2026-11-14 — Fix: the ambiguous `kr` currency symbol only matches as a stand-alone token
 
 **Symptom.** A salary text with no currency symbol or ISO code but a word that starts with the letters "kr" (`8.000 - 10.000, Kraków`, `Krefeld`, `Kroger`) was read as Swedish kronor. The wrong detection also hid the country currency (`confidence: 'symbol'` outranks `'country'`), so `extractSalary` found no range at all where a `country` hint should have given `PLN` / `EUR` / `GBP` and a bare-range match.

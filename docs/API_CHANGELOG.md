@@ -1,5 +1,11 @@
 # API Changelog
 
+### [Unreleased] - 2026-11-16
+
+#### Changed
+
+- **CSV export (`?format=csv`, and the CLI's `--format csv`) neutralises spreadsheet formulas.** A text cell that starts with `=`, `+`, `-`, `@`, a tab or a carriage return now gets a leading `'`, so a scraped title such as `=HYPERLINK(...)` opens as text. A consumer that reads the CSV programmatically sees that `'` too (for example `'+1 555 0100`). A cell holding `,` `"` `\n` or `\r` is quoted; a bare `\r` used to be written unquoted and could split a row. Numbers are written as-is (`-5` stays `-5`). Object items in lists (`locations`, `offices`) are written as JSON instead of `[object Object]`, and a date is written as an ISO-8601 string. Known limit: a spreadsheet that opens this comma-separated file with `;` as the separator (the default in many European locales) can still split a value at a `;` it contains; import the file with comma as the separator.
+
 ### [Unreleased] - 2026-11-12
 
 #### Changed
