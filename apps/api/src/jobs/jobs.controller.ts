@@ -38,6 +38,7 @@ import {
   exclusionSpecFromInput,
   hasExclusionInput,
   runWithScrapeContext,
+  toCsvCell,
 } from '@ever-jobs/common';
 import {
   LIVENESS_CRAWL_SITE,
@@ -974,22 +975,30 @@ export class JobsController {
     if (jobs.length === 0) return 'No results\n';
 
     // Flatten nested objects for CSV
+    // Arrays are joined with "; "; object items (e.g. `locations`, `offices`)
+    // are written as JSON so they do not print as "[object Object]".
+    const joinList = (items: unknown[]): string =>
+      items
+        .map((item) =>
+          item !== null && typeof item === 'object' ? JSON.stringify(item) : String(item ?? ''),
+        )
+        .join('; ');
+
+    // Cells stay raw here; `toCsvCell` guards and quotes them at write time.
     const flatJobs = jobs.map((job) => {
-      const flat: Record<string, string> = {};
+      const flat: Record<string, unknown> = {};
       for (const [key, value] of Object.entries(job)) {
         if (value === null || value === undefined) {
           flat[key] = '';
-        } else if (typeof value === 'object' && !Array.isArray(value)) {
+        } else if (Array.isArray(value)) {
+          flat[key] = joinList(value);
+        } else if (typeof value === 'object' && !(value instanceof Date)) {
           for (const [subKey, subVal] of Object.entries(value as Record<string, any>)) {
             // Nested arrays (e.g. `legitimacy.reasons`) read like top-level ones.
-            flat[`${key}.${subKey}`] = Array.isArray(subVal)
-              ? subVal.join('; ')
-              : String(subVal ?? '');
+            flat[`${key}.${subKey}`] = Array.isArray(subVal) ? joinList(subVal) : (subVal ?? '');
           }
-        } else if (Array.isArray(value)) {
-          flat[key] = value.join('; ');
         } else {
-          flat[key] = String(value);
+          flat[key] = value;
         }
       }
       return flat;
@@ -1004,16 +1013,9 @@ export class JobsController {
     }
     const headerArr = [...headers];
 
-    const escape = (v: string) => {
-      if (v.includes(',') || v.includes('"') || v.includes('\n')) {
-        return `"${v.replace(/"/g, '""')}"`;
-      }
-      return v;
-    };
-
-    const lines = [headerArr.map(escape).join(',')];
+    const lines = [headerArr.map(toCsvCell).join(',')];
     for (const row of flatJobs) {
-      lines.push(headerArr.map((h) => escape(row[h] ?? '')).join(','));
+      lines.push(headerArr.map((h) => toCsvCell(row[h])).join(','));
     }
     return lines.join('\n') + '\n';
   }

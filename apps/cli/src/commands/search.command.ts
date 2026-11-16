@@ -6,7 +6,7 @@ import {
   DescriptionFormat, JobType, ExclusionPreset, DatePostedBasis,
 } from '@ever-jobs/models';
 import {
-  applyJobExclusions, exclusionSpecFromInput, hasExclusionInput,
+  applyJobExclusions, exclusionSpecFromInput, hasExclusionInput, toCsvCell,
 } from '@ever-jobs/common';
 import { AnalyticsService } from '@ever-jobs/analytics';
 import {
@@ -303,12 +303,7 @@ export class SearchCommand extends CommandRunner {
       'datePostedAt', 'datePostedPrecision', 'datePostedBasis',
     ];
 
-    const escape = (val: any): string => {
-      if (val == null) return '';
-      const str = typeof val === 'object' ? JSON.stringify(val) : String(val);
-      return str.includes(',') || str.includes('"') || str.includes('\n')
-        ? `"${str.replace(/"/g, '""')}"` : str;
-    };
+    const escape = (val: any): string => toCsvCell(val);
 
     const rows = jobs.map((job) =>
       headers.map((h) => {
