@@ -9,7 +9,10 @@ import axios, { AxiosInstance } from 'axios';
 
 // ── Configuration ──────────────────────────────────────────────────────
 
-const API_URL = process.env.EVER_JOBS_API_URL ?? 'http://localhost:3001';
+/** Read per call (not at import) so the configured URL is always the one reported. */
+function getApiUrl(env: NodeJS.ProcessEnv = process.env): string {
+  return env.EVER_JOBS_API_URL ?? 'http://localhost:3001';
+}
 
 /**
  * Which key spelling `searchJobs` uses in the `POST /api/jobs/search` body
@@ -64,11 +67,55 @@ export function readLocationFormat(
   return raw === 'city' ? 'city' : 'full';
 }
 
+export const MCP_API_KEY_ENV_VAR = 'EVER_JOBS_API_KEY';
+export const MCP_API_KEY_HEADER_ENV_VAR = 'EVER_JOBS_API_KEY_HEADER';
+const DEFAULT_API_KEY_HEADER = 'x-api-key';
+
+/**
+ * Headers for every API request. When `EVER_JOBS_API_KEY` is set the key is
+ * sent under `EVER_JOBS_API_KEY_HEADER` (default `x-api-key`, matching the
+ * API's `API_KEY_HEADER_NAME` default); with no key, no key header is sent.
+ */
+function buildHeaders(env: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  const apiKey = env[MCP_API_KEY_ENV_VAR]?.trim();
+  if (apiKey) {
+    const headerName = env[MCP_API_KEY_HEADER_ENV_VAR]?.trim() || DEFAULT_API_KEY_HEADER;
+    headers[headerName] = apiKey;
+  }
+  return headers;
+}
+
+/**
+ * `EVER_JOBS_API_URL` as it may appear in a tool error: any `user:password@`
+ * part is dropped, so basic-auth credentials put in the URL are never echoed
+ * to the MCP client.
+ */
+export function displayApiUrl(url: string = getApiUrl()): string {
+  return url.replace(/^([a-z][a-z0-9+.-]*:\/\/)[^/?#]*@/i, '$1');
+}
+
+/**
+ * The reason text for a failed API request. A refused connection names the
+ * API URL, so an unreachable API never looks like "no jobs found". An error
+ * with no message (Node's AggregateError when every address of a dual-stack
+ * host such as `localhost` fails) falls back to its code.
+ */
+export function describeRequestError(err: any, url: string = getApiUrl()): string {
+  if (err?.code === 'ECONNREFUSED') {
+    return (
+      `the Ever Jobs API at ${displayApiUrl(url)} is unreachable (connection refused). ` +
+      'Check that it is running and that EVER_JOBS_API_URL is correct.'
+    );
+  }
+  return err?.message || err?.code || String(err);
+}
+
 function getClient(): AxiosInstance {
   return axios.create({
-    baseURL: API_URL,
+    baseURL: getApiUrl(),
     timeout: 60_000,
-    headers: { 'Content-Type': 'application/json' },
+    headers: buildHeaders(),
   });
 }
 
@@ -513,16 +560,8 @@ export async function searchJobs(params: JobSearchParams): Promise<SearchRespons
         : {}),
     };
   } catch (err: any) {
-    // If the API is unavailable, return a helpful error
-    if (err.code === 'ECONNREFUSED') {
-      return {
-        total: 0,
-        jobs: [],
-        sources_searched: [],
-        query: params.query,
-      };
-    }
-    throw new Error(`Search failed: ${err.message}`);
+    // An unreachable API must not look like "no jobs found": fail loudly.
+    throw new Error(`Search failed: ${describeRequestError(err)}`);
   }
 }
 
@@ -565,7 +604,7 @@ export async function getJobDetails(params: {
       application_url: job.applicationUrl ?? job.application_url ?? job.jobUrl ?? null,
     };
   } catch (err: any) {
-    throw new Error(`Failed to get job details: ${err.message}`);
+    throw new Error(`Failed to get job details: ${describeRequestError(err)}`);
   }
 }
 
