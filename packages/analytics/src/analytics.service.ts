@@ -1,8 +1,60 @@
 import { Injectable } from '@nestjs/common';
+import { convertToAnnual, hasSalaryAmount } from '@ever-jobs/common';
 import {
-  JobPostDto, JobSummaryDto, CompanyInsightDto,
+  CompensationDto, JobPostDto, JobSummaryDto, CompanyInsightDto,
   SiteComparisonDto, JobAnalysisDto,
 } from '@ever-jobs/models';
+
+/** Currency assumed when a compensation does not name one (the `CompensationDto` default). */
+const DEFAULT_CURRENCY = 'USD';
+
+/** A bound counts only when it is a finite number above zero, as in `hasSalaryAmount`. */
+function isUsableAmount(value: number | null | undefined): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0;
+}
+
+/** Upper-cased ISO code of a compensation, or the default when it names none. */
+function currencyOf(compensation: CompensationDto): string {
+  return compensation.currency?.trim().toUpperCase() || DEFAULT_CURRENCY;
+}
+
+/**
+ * T-2522 — the yearly low and high end of a compensation that has a usable
+ * amount. A copy is annualised (hourly × 2080, daily × 260, weekly × 52,
+ * monthly × 12); the job's own compensation is never changed. A missing
+ * (or unusable) bound falls back to the other one; callers pass only
+ * compensations for which `hasSalaryAmount` holds, so one bound is present.
+ */
+function annualRange(compensation: CompensationDto): { low: number; high: number } {
+  const annual = {
+    interval: compensation.interval,
+    minAmount: isUsableAmount(compensation.minAmount) ? compensation.minAmount : null,
+    maxAmount: isUsableAmount(compensation.maxAmount) ? compensation.maxAmount : null,
+  };
+  convertToAnnual(annual);
+  return {
+    low: (annual.minAmount ?? annual.maxAmount) as number,
+    high: (annual.maxAmount ?? annual.minAmount) as number,
+  };
+}
+
+/** The currency named most often; on a tie, the one that comes first. */
+function mostCommonCurrency(compensations: CompensationDto[]): string {
+  const counts = new Map<string, number>();
+  for (const compensation of compensations) {
+    const currency = currencyOf(compensation);
+    counts.set(currency, (counts.get(currency) ?? 0) + 1);
+  }
+  let best = DEFAULT_CURRENCY;
+  let bestCount = 0;
+  for (const [currency, count] of counts) {
+    if (count > bestCount) {
+      best = currency;
+      bestCount = count;
+    }
+  }
+  return best;
+}
 
 /**
  * Analytics service providing reusable job analysis functions.
@@ -25,24 +77,34 @@ export class AnalyticsService {
 
   /**
    * Compute summary statistics: totals, salary range, breakdowns by site/type/location.
+   *
+   * T-2522 — salary stats are yearly figures in one currency. A job counts in
+   * `withSalaryCount` when its compensation has a usable amount (min or max).
+   * Each amount is annualised on a copy, and `minSalary`, `maxSalary` and
+   * `avgSalary` (the mean of the low ends) are taken over the jobs in the most
+   * common currency only, which `currency` reports. A compensation whose
+   * interval is missing or unknown is used as given.
    */
   summarize(jobs: JobPostDto[]): JobSummaryDto {
     const remoteCount = jobs.filter((j) => j.isRemote).length;
-    const withSalary = jobs.filter((j) => j.compensation?.minAmount);
+    const withSalary = jobs.filter((j) => hasSalaryAmount(j.compensation));
 
     // Salary stats
     let salaryStats: JobSummaryDto['salaryStats'] = null;
     if (withSalary.length > 0) {
-      const amounts = withSalary.map((j) => j.compensation!.minAmount!);
-      const maxAmounts = withSalary
-        .map((j) => j.compensation!.maxAmount ?? j.compensation!.minAmount!)
-        .filter((a) => a != null);
+      const compensations = withSalary.map((j) => j.compensation!);
+      const currency = mostCommonCurrency(compensations);
+      const ranges = compensations
+        .filter((c) => currencyOf(c) === currency)
+        .map(annualRange);
+      const lows = ranges.map((r) => r.low);
+      const highs = ranges.map((r) => r.high);
 
       salaryStats = {
-        minSalary: Math.min(...amounts),
-        maxSalary: Math.max(...maxAmounts),
-        avgSalary: Math.round(amounts.reduce((a, b) => a + b, 0) / amounts.length),
-        currency: withSalary[0].compensation?.currency ?? 'USD',
+        minSalary: Math.min(...lows),
+        maxSalary: Math.max(...highs),
+        avgSalary: Math.round(lows.reduce((a, b) => a + b, 0) / lows.length),
+        currency,
       };
     }
 
@@ -150,7 +212,7 @@ export class AnalyticsService {
     return [...sites.entries()].map(([site, siteJobs]) => new SiteComparisonDto({
       site,
       totalJobs: siteJobs.length,
-      withSalary: siteJobs.filter((j) => j.compensation?.minAmount).length,
+      withSalary: siteJobs.filter((j) => hasSalaryAmount(j.compensation)).length,
       remoteJobs: siteJobs.filter((j) => j.isRemote).length,
       uniqueCompanies: new Set(siteJobs.map((j) => j.companyName).filter(Boolean)).size,
     }));

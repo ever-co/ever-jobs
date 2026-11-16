@@ -249,7 +249,8 @@ export class SearchCommand extends CommandRunner {
       console.error(`With salary: ${analysis.summary.withSalaryCount}`);
       if (analysis.summary.salaryStats) {
         const s = analysis.summary.salaryStats;
-        console.error(`Salary range: $${s.minSalary.toLocaleString()} - $${s.maxSalary.toLocaleString()} (avg $${s.avgSalary.toLocaleString()})`);
+        // T-2522 — annualised figures in the currency the analysis reports, not a fixed "$".
+        console.error(`Salary range (${s.currency}): ${s.minSalary.toLocaleString()} - ${s.maxSalary.toLocaleString()} (avg ${s.avgSalary.toLocaleString()})`);
       }
       console.error('');
       console.error('--- By Site ---');
