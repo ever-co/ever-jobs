@@ -37,6 +37,7 @@ function makeContext(headers: Record<string, string | undefined> = {}): {
 
   const req: FakeRequest = { headers };
   const ctx = {
+    getType: () => 'http',
     switchToHttp: () => ({
       getRequest: <T>() => req as unknown as T,
     }),
@@ -138,6 +139,74 @@ describe('ApiKeyGuard — Spec 005 / T07 / Q-017', () => {
           'auth.apiKeys': ['secret'],
           'auth.headerName': 'X-Custom',
         }),
+        makeReflector(new Set()),
+      );
+      expect(guard.canActivate(ctx)).toBe(true);
+    });
+  });
+
+  describe('GraphQL context (request lives in the GraphQL context, not switchToHttp)', () => {
+    function makeGqlContext(
+      gqlContext: unknown,
+    ): { ctx: ExecutionContext; handler: () => void } {
+      const handler = (): void => undefined;
+      class FakeResolver {}
+      const ctx = {
+        getType: () => 'graphql',
+        // [root, args, context, info] — the root is undefined for queries.
+        getArgs: () => [undefined, {}, gqlContext, {}],
+        // switchToHttp().getRequest() is undefined here; the old code crashed on it.
+        switchToHttp: () => ({ getRequest: () => undefined }),
+        getHandler: () => handler,
+        getClass: () => FakeResolver,
+      } as unknown as ExecutionContext;
+      return { ctx, handler };
+    }
+
+    const enabledConfig = () =>
+      makeConfig({ 'auth.enabled': true, 'auth.apiKeys': ['secret'] });
+
+    it('passes for a valid key', () => {
+      const { ctx } = makeGqlContext({
+        req: { headers: { 'x-api-key': 'secret' } },
+      });
+      const guard = new ApiKeyGuard(enabledConfig(), makeReflector(new Set()));
+      expect(guard.canActivate(ctx)).toBe(true);
+    });
+
+    it('throws 403 ForbiddenException for a missing key', () => {
+      const { ctx } = makeGqlContext({ req: { headers: {} } });
+      const guard = new ApiKeyGuard(enabledConfig(), makeReflector(new Set()));
+      expect(() => guard.canActivate(ctx)).toThrow(ForbiddenException);
+    });
+
+    it('throws 403 ForbiddenException for an invalid key', () => {
+      const { ctx } = makeGqlContext({
+        req: { headers: { 'x-api-key': 'wrong' } },
+      });
+      const guard = new ApiKeyGuard(enabledConfig(), makeReflector(new Set()));
+      expect(() => guard.canActivate(ctx)).toThrow(ForbiddenException);
+    });
+
+    it('treats a GraphQL context without a request as a missing key', () => {
+      const { ctx } = makeGqlContext({});
+      const guard = new ApiKeyGuard(enabledConfig(), makeReflector(new Set()));
+      expect(() => guard.canActivate(ctx)).toThrow(ForbiddenException);
+    });
+
+    it('throws 401 UnauthorizedException on an @AdminAuth handler without a key', () => {
+      const { ctx, handler } = makeGqlContext({ req: { headers: {} } });
+      const guard = new ApiKeyGuard(
+        enabledConfig(),
+        makeReflector(new Set([handler])),
+      );
+      expect(() => guard.canActivate(ctx)).toThrow(UnauthorizedException);
+    });
+
+    it('allows everything when auth is disabled, without touching the request', () => {
+      const { ctx } = makeGqlContext(undefined);
+      const guard = new ApiKeyGuard(
+        makeConfig({ 'auth.enabled': false }),
         makeReflector(new Set()),
       );
       expect(guard.canActivate(ctx)).toBe(true);

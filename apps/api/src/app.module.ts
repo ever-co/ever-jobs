@@ -1,6 +1,6 @@
 import { Module } from '@nestjs/common';
 import { APP_GUARD, APP_INTERCEPTOR, APP_FILTER } from '@nestjs/core';
-import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
+import { ThrottlerModule } from '@nestjs/throttler';
 import { GraphQLModule } from '@nestjs/graphql';
 import { ApolloDriver, ApolloDriverConfig } from '@nestjs/apollo';
 import { ConfigModule, ConfigService } from '@nestjs/config';
@@ -13,6 +13,7 @@ import { MetricsInterceptor } from './metrics/metrics.interceptor';
 import { HealthModule } from './health/health.module';
 import { JobsModule } from './jobs/jobs.module';
 import { ApiKeyGuard } from './auth/api-key.guard';
+import { GqlThrottlerGuard } from './auth/gql-throttler.guard';
 import { LoggingInterceptor } from './interceptors/logging.interceptor';
 import { HttpExceptionFilter } from './filters/http-exception.filter';
 import { resolveStoreBootstrap, resolveStoreProviders } from './jobs/store-bootstrap.factory';
@@ -126,7 +127,7 @@ const ACTIVE_STORE_PROVIDERS = resolveStoreProviders(ACTIVE_STORE.id);
     // Global rate limit guard
     {
       provide: APP_GUARD,
-      useClass: ThrottlerGuard,
+      useClass: GqlThrottlerGuard,
     },
     // Global metrics tracking
     {
