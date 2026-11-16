@@ -5,6 +5,18 @@
 
 ---
 
+## 2026-11-16 — Fix: GraphQL queries work with API key auth and rate limiting on
+
+**Symptom.** With `ENABLE_API_KEY_AUTH=true` (and `API_KEYS` set) or `RATE_LIMIT_ENABLED=true`, every `/graphql` query failed with `Cannot read properties of undefined (reading 'headers')` (or `'ip'`), even with a valid key. GraphQL only broke in the hardened deployments.
+
+**Cause.** The global `ApiKeyGuard` and the stock `ThrottlerGuard` read the request through `switchToHttp().getRequest()`. Inside a resolver that is the resolver root (`undefined`); the request lives in the GraphQL context.
+
+**Fix.** New `getRequestFromContext()` (`apps/api/src/auth/context-request.ts`) takes `req` from the GraphQL context for GraphQL and from `switchToHttp()` otherwise. `ApiKeyGuard` uses it (a missing request counts as a missing key). New `GqlThrottlerGuard` (`apps/api/src/auth/gql-throttler.guard.ts`) extends `ThrottlerGuard` and overrides `getRequestResponse()` for GraphQL (response from `req.res`); `AppModule` registers it in place of `ThrottlerGuard`. REST is unchanged. Each top-level GraphQL field (aliases included) counts as one request against the limit. A throttled GraphQL call returns the error `ThrottlerException: Too Many Requests` with the `Retry-After` header.
+
+**Files:** `apps/api/src/auth/{context-request,gql-throttler.guard,api-key.guard}.ts`, `apps/api/src/app.module.ts`, `apps/api/src/auth/__tests__/{api-key.guard,gql-throttler.guard}.spec.ts`, `docs/ARCHITECTURE_OVERVIEW.md`, `docs/log.md`.
+
+**Validation:** the two auth specs pass (22 tests); 9 of the 11 new tests fail against develop's guards (the 2 that pass are the auth-off and REST controls). Both CI type-checks and `nest build` pass. A full-app HTTP probe with both features on (missing, wrong and valid keys, throttling, per-IP budgets, aliases, GET `/graphql`, REST `/ping`) passes on this change; on develop every GraphQL case fails with the `TypeError`.
+
 ## 2026-11-15 — CLI: numeric flags are parsed strictly and bounded (PR #135)
 
 **Symptom.** `search --results abc` (also `--offset`, `--hours-old`, `--distance`, `--timeout`, `--rate-delay-min/-max`, `--linkedin-company-ids`, and the same flags of `compare`) ran the search with `resultsWanted: NaN` and no message. The flags used `parseInt` / `parseFloat`, and `NaN ?? 15` stays `NaN`, so the default never applied and the `EVER_JOBS_MAX_RESULTS_WANTED` clamp in `JobsService` ignores `NaN` too. `5x`, `1e3` and `20.7` were silently read as `5`, `1` and `20`, and the CLI had no upper bound of its own (`-n 100000000` reached `JobsService`, which clamps it to `EVER_JOBS_MAX_RESULTS_WANTED`, default 1000).

@@ -3,6 +3,8 @@ import {
   MCP_LOCATION_FORMAT_ENV_VAR,
   MCP_REQUEST_KEYS_ENV_VAR,
   buildSearchRequestBody,
+  describeRequestError,
+  displayApiUrl,
   formatJobLocation,
   getJobDetails,
   readLocationFormat,
@@ -253,6 +255,122 @@ describe('searchJobs — wire contract', () => {
     });
     const result = await searchJobs({ query: 'x' });
     expect(result.jobs.map((j) => j.location)).toEqual(['San Francisco', 'United States']);
+  });
+});
+
+describe('API key and unreachable API', () => {
+  const API_ENV = ['EVER_JOBS_API_KEY', 'EVER_JOBS_API_KEY_HEADER', 'EVER_JOBS_API_URL'];
+  let saved: Record<string, string | undefined>;
+
+  beforeEach(() => {
+    saved = Object.fromEntries(API_ENV.map((k) => [k, process.env[k]]));
+    for (const k of API_ENV) delete process.env[k];
+  });
+
+  afterEach(() => {
+    for (const k of API_ENV) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+  });
+
+  function sentHeaders(): Record<string, string> {
+    return createMock.mock.calls[0][0].headers;
+  }
+
+  it('sends EVER_JOBS_API_KEY under x-api-key by default', async () => {
+    process.env.EVER_JOBS_API_KEY = 'k';
+    mockClient({});
+    await searchJobs({ query: 'x' });
+    expect(sentHeaders()).toMatchObject({ 'x-api-key': 'k' });
+  });
+
+  it('uses EVER_JOBS_API_KEY_HEADER as the header name when set', async () => {
+    process.env.EVER_JOBS_API_KEY = 'k';
+    process.env.EVER_JOBS_API_KEY_HEADER = 'x-custom-key';
+    mockClient({});
+    await searchJobs({ query: 'x' });
+    expect(sentHeaders()).toMatchObject({ 'x-custom-key': 'k' });
+    expect(sentHeaders()).not.toHaveProperty('x-api-key');
+  });
+
+  it('sends the key on the details client too', async () => {
+    process.env.EVER_JOBS_API_KEY = 'k';
+    mockClient({});
+    await getJobDetails({ jobId: 'j1' });
+    expect(sentHeaders()).toMatchObject({ 'x-api-key': 'k' });
+  });
+
+  it('sends no key header when EVER_JOBS_API_KEY is unset or blank', async () => {
+    mockClient({});
+    await searchJobs({ query: 'x' });
+    expect(sentHeaders()).toEqual({ 'Content-Type': 'application/json' });
+
+    createMock.mockReset();
+    process.env.EVER_JOBS_API_KEY = '   ';
+    mockClient({});
+    await searchJobs({ query: 'x' });
+    expect(sentHeaders()).toEqual({ 'Content-Type': 'application/json' });
+  });
+
+  it('rejects with an error naming the API URL when the connection is refused', async () => {
+    process.env.EVER_JOBS_API_URL = 'http://api.test:4000';
+    const client = mockClient({});
+    client.post.mockRejectedValue({ code: 'ECONNREFUSED', message: 'connect ECONNREFUSED' });
+    await expect(searchJobs({ query: 'x' })).rejects.toThrow(
+      /http:\/\/api\.test:4000 is unreachable/,
+    );
+    expect(createMock.mock.calls[0][0].baseURL).toBe('http://api.test:4000');
+  });
+
+  it('names the default API URL when EVER_JOBS_API_URL is unset', async () => {
+    const client = mockClient({});
+    client.post.mockRejectedValue({ code: 'ECONNREFUSED', message: 'connect ECONNREFUSED' });
+    await expect(searchJobs({ query: 'x' })).rejects.toThrow(
+      /http:\/\/localhost:3001 is unreachable/,
+    );
+  });
+
+  const UNREACHABLE = /the Ever Jobs API at \S+ is unreachable \(connection refused\)/;
+
+  it('rejects with an "unreachable" error when the connection is refused', async () => {
+    const client = mockClient({});
+    client.post.mockRejectedValue({ code: 'ECONNREFUSED', message: 'connect ECONNREFUSED' });
+    await expect(searchJobs({ query: 'x' })).rejects.toThrow(UNREACHABLE);
+    await expect(searchJobs({ query: 'x' })).rejects.toThrow(/^Search failed: /);
+  });
+
+  it('reports a refused connection the same way from get_job_details', async () => {
+    const client = mockClient({});
+    client.get.mockRejectedValue({ code: 'ECONNREFUSED', message: '' });
+    await expect(getJobDetails({ jobId: 'j1' })).rejects.toThrow(UNREACHABLE);
+  });
+
+  it('falls back to the error code when the error has no message', async () => {
+    const client = mockClient({});
+    client.get.mockRejectedValue({ code: 'ETIMEDOUT', message: '' });
+    await expect(getJobDetails({ jobId: 'j1' })).rejects.toThrow('Failed to get job details: ETIMEDOUT');
+  });
+
+  it('names the API URL in the unreachable error', () => {
+    expect(describeRequestError({ code: 'ECONNREFUSED' }, 'http://localhost:3001')).toContain(
+      'the Ever Jobs API at http://localhost:3001 is unreachable',
+    );
+  });
+
+  it('never echoes credentials from EVER_JOBS_API_URL', () => {
+    const text = describeRequestError({ code: 'ECONNREFUSED' }, 'https://user:s3cr@t@api.example.com:8443/base');
+    expect(text).toContain('https://api.example.com:8443/base');
+    expect(text).not.toContain('s3cr');
+    expect(text).not.toContain('user');
+    expect(displayApiUrl('http://api.example.com/a@b')).toBe('http://api.example.com/a@b');
+    expect(displayApiUrl('http://localhost:3001')).toBe('http://localhost:3001');
+  });
+
+  it('still reports other failures as "Search failed"', async () => {
+    const client = mockClient({});
+    client.post.mockRejectedValue({ code: 'ERR_BAD_REQUEST', message: 'Request failed with status code 403' });
+    await expect(searchJobs({ query: 'x' })).rejects.toThrow('Search failed: Request failed with status code 403');
   });
 });
 
