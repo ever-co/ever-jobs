@@ -2,7 +2,13 @@
 
 ### [Unreleased] - 2026-11-16
 
+#### Added
+
+- **`TRUST_PROXY`** (default unset: `X-Forwarded-For` is ignored, as before): the reverse proxies Express trusts to give the client IP, as their addresses / CIDRs / `loopback`, a hop count, or `true`. Behind a proxy it lets the rate limit see each client instead of the proxy. A hop count or `true` lets a client that reaches the API port directly spoof its IP; see the README.
+
 #### Changed
+
+- **Rate limiting counts a request with a valid API key per key, not per IP** (`RATE_LIMIT_ENABLED=true` with API key auth on). Callers behind one reverse proxy no longer share one bucket. A key used by several clients now shares one budget wherever they connect from: give each client its own key, or raise `RATE_LIMIT_REQUESTS`. Requests without a valid key are still limited per client IP, and the limit still applies per route.
 
 - **CSV export (`?format=csv`, and the CLI's `--format csv`) neutralises spreadsheet formulas.** A text cell that starts with `=`, `+`, `-`, `@`, a tab or a carriage return now gets a leading `'`, so a scraped title such as `=HYPERLINK(...)` opens as text. A consumer that reads the CSV programmatically sees that `'` too (for example `'+1 555 0100`). A cell holding `,` `"` `\n` or `\r` is quoted; a bare `\r` used to be written unquoted and could split a row. Numbers are written as-is (`-5` stays `-5`). Object items in lists (`locations`, `offices`) are written as JSON instead of `[object Object]`, and a date is written as an ISO-8601 string. Known limit: a spreadsheet that opens this comma-separated file with `;` as the separator (the default in many European locales) can still split a value at a `;` it contains; import the file with comma as the separator.
 
