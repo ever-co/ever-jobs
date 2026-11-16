@@ -5,8 +5,11 @@ import {
   HttpException,
   HttpStatus,
   Logger,
+  Optional,
 } from '@nestjs/common';
 import { Request, Response } from 'express';
+import { recordHttpRequest } from '../metrics/http-metrics';
+import { MetricsService } from '../metrics/metrics.service';
 
 /**
  * Global exception filter returning structured JSON errors.
@@ -15,6 +18,10 @@ import { Request, Response } from 'express';
 @Catch()
 export class HttpExceptionFilter implements ExceptionFilter {
   private readonly logger = new Logger(HttpExceptionFilter.name);
+
+  // Optional so the filter still works in apps/tests that do not load the
+  // metrics module.
+  constructor(@Optional() private readonly metricsService?: MetricsService) {}
 
   catch(exception: unknown, host: ArgumentsHost) {
     // GraphQL requests don't have an Express request/response — let Apollo
@@ -89,6 +96,17 @@ export class HttpExceptionFilter implements ExceptionFilter {
       this.logger.warn(
         `Request body: ${JSON.stringify(request.body)}`,
       );
+    }
+
+    // Guards (API key 401, rate limit 429) reject before any interceptor
+    // runs, so this is the only place those requests can be counted. A
+    // request the interceptor already recorded is skipped.
+    if (this.metricsService) {
+      try {
+        recordHttpRequest(this.metricsService, request, status);
+      } catch (err) {
+        this.logger.warn(`Could not record HTTP metrics: ${String(err)}`);
+      }
     }
 
     response.status(status).json({
