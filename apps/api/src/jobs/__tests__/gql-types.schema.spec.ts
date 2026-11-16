@@ -1,6 +1,6 @@
 import 'reflect-metadata';
 import { Test } from '@nestjs/testing';
-import { ValidationPipe } from '@nestjs/common';
+import { BadRequestException, ValidationPipe } from '@nestjs/common';
 import { GraphQLSchemaBuilderModule, GraphQLSchemaFactory } from '@nestjs/graphql';
 import { GraphQLObjectType, GraphQLSchema, graphql, printType } from 'graphql';
 import {
@@ -283,4 +283,20 @@ describe('SearchJobsInput under the global ValidationPipe (Spec 1689)', () => {
     const out = await pipe.transform({ searchTerm: 'x', bogus: 1 }, meta);
     expect(out).not.toHaveProperty('bogus');
   });
+
+  // T-2523 — descriptionFormat is checked against the values the sources know
+  // (plus the documented alias 'text'), as the REST DTO's @IsEnum does.
+  it.each(['markdown', 'html', 'plain', 'text'])('accepts descriptionFormat %j (T-2523)', async (format) => {
+    const out = await pipe.transform({ searchTerm: 'x', descriptionFormat: format }, meta);
+    expect(out.descriptionFormat).toBe(format);
+  });
+
+  it.each(['bogus', 'PLAIN', 'md', ''])(
+    'rejects descriptionFormat %j with a BadRequestException (T-2523)',
+    async (format) => {
+      await expect(
+        pipe.transform({ searchTerm: 'x', descriptionFormat: format }, meta),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    },
+  );
 });
