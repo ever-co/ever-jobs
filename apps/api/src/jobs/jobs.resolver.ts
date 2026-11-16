@@ -1,7 +1,7 @@
 import { Resolver, Query, Args } from '@nestjs/graphql';
 import { BadRequestException, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { CAREER_LEVELS, CrawlPolicyDto, isCareerLevel, JobPostDto, Site } from '@ever-jobs/models';
+import { CAREER_LEVELS, CrawlPolicyDto, DescriptionFormat, isCareerLevel, JobPostDto, Site } from '@ever-jobs/models';
 import { exclusionSpecFromInput, hasExclusionInput } from '@ever-jobs/common';
 import { JobsService, readMaxSearchLocations } from './jobs.service';
 import { JobsAggregator } from './jobs.aggregator';
@@ -95,6 +95,13 @@ export class JobsResolver {
       throw new BadRequestException(
         `careerLevels: unknown value(s) ${unknownLevels.join(', ')}; expected any of ${CAREER_LEVELS.join(', ')}`,
       );
+    }
+
+    // T-2523 — the schema documents 'text' as a format; the sources know it as 'plain'
+    // (anything else they pass through as HTML). Mapped before the cache key, so both
+    // spellings share one entry and JobsService receives 'plain'.
+    if (input.descriptionFormat === 'text') {
+      input.descriptionFormat = DescriptionFormat.PLAIN;
     }
 
     // Cache stores RAW fan-out — dedup runs per-request.
