@@ -127,6 +127,11 @@ export interface JobSearchParams {
   /** Spec 1700 — several locations; each source is searched once per location. */
   locations?: string[];
   source?: string;
+  /**
+   * Several sources to search (sent as `siteType`). Used only when `source` is
+   * not set; with neither, the API searches its default catalogue.
+   */
+  sources?: string[];
   company?: string;
   limit?: number;
   remoteOnly?: boolean;
@@ -553,7 +558,7 @@ export async function searchJobs(params: JobSearchParams): Promise<SearchRespons
     return {
       total: filteredJobs.length,
       jobs: filteredJobs,
-      sources_searched: params.source ? [params.source] : ['all'],
+      sources_searched: requestedSites(params) ?? ['all'],
       query: params.query,
       ...(hasExclusions(params)
         ? { excluded: Number(data.exclusion_metrics?.excluded_count ?? 0) || 0 }
@@ -626,7 +631,10 @@ export function listSources(
 }
 
 /**
- * Convenience: search remote jobs across all remote-first boards.
+ * Convenience: search remote jobs across all remote-first boards. A `source`
+ * that is a remote board narrows the search to it; without one (or with a
+ * source that is not a remote board) every remote board is sent as `siteType`,
+ * so the API never falls back to its whole-catalogue fan-out.
  */
 export async function searchRemoteJobs(params: {
   query: string;
@@ -642,6 +650,7 @@ export async function searchRemoteJobs(params: {
     query: params.query,
     location: 'Remote',
     source: targetSource,
+    ...(targetSource ? {} : { sources: remoteSources }),
     limit: params.limit ?? 25,
     remoteOnly: true,
   });
@@ -773,8 +782,10 @@ export function compareSources(): {
  * {@link SearchRequestKeyStyle} for why camelCase is the default (Specs 1689,
  * 1690 §4.9).
  *
- * An absent source or company is omitted, not sent as an `undefined` key, so an
- * unfiltered search stays exactly `{ searchTerm, location, resultsWanted }`. The
+ * The source filter is `[source]` when `source` is set, else a non-empty
+ * `sources` list (see {@link requestedSites}). An absent source filter or
+ * company is omitted, not sent as an `undefined` key, so an unfiltered search
+ * stays exactly `{ searchTerm, location, resultsWanted }`. The
  * per-request `crawl` object (Spec 1690) is added unchanged when given — its key
  * is spelled the same in every style, and its own keys are the camelCase ones
  * the API's `CrawlPolicyDto` declares. `locations` and the exclusion lists
@@ -784,7 +795,7 @@ export function buildSearchRequestBody(
   params: JobSearchParams,
   style: SearchRequestKeyStyle = readSearchRequestKeyStyle(),
 ): Record<string, unknown> {
-  const siteType = params.source ? [params.source] : undefined;
+  const siteType = requestedSites(params);
   const resultsWanted = Math.min(params.limit ?? 20, 100);
   const location = params.location ?? '';
 
@@ -825,6 +836,16 @@ export function buildSearchRequestBody(
   if (style === 'snake') return { ...snake, ...crawl };
   if (style === 'both') return { ...snake, ...camel, ...crawl };
   return { ...camel, ...crawl };
+}
+
+/**
+ * The sources a search sends as `siteType` (and reports in `sources_searched`):
+ * `[source]` when `source` is set, else a copy of `sources` when it is
+ * non-empty, else `undefined` (no source filter; the API's default fan-out).
+ */
+function requestedSites(params: JobSearchParams): string[] | undefined {
+  if (params.source) return [params.source];
+  return params.sources && params.sources.length > 0 ? [...params.sources] : undefined;
 }
 
 /**

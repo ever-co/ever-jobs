@@ -9,6 +9,16 @@
 
 One dated entry for the day; each fix has its own section.
 
+### Fix: MCP `search_remote_jobs` searches the remote boards, not the whole catalogue (T-2546)
+
+**Symptom.** `search_remote_jobs({ query })` (`apps/mcp/src/tools.ts`) built the list of remote boards but used it only to check `source`. With no `source`, or one that is not a remote board (e.g. `linkedin`, which was dropped without a word), it called `searchJobs` with no source, so `buildSearchRequestBody` sent no `siteType` and the API (`apps/api/src/jobs/jobs.service.ts`, default selection) fanned out over every non-ATS source. The call often hit the MCP client's 60 s timeout (the API's fan-out deadline defaults to 120 s), the jobs that did come back were not from the remote-first boards the tool describes, and `sources_searched` said `['all']`.
+
+**Fix.** `JobSearchParams` gets an optional `sources?: string[]`. `buildSearchRequestBody` sends it as `siteType` (`site_type` in the snake style) when `source` is not set; with neither, the body is unchanged (no source key). `searchRemoteJobs` passes every `type: 'remote'` id of the MCP source catalogue (12 boards, all valid `Site` values) as `sources` when no remote `source` is given; a remote `source` still narrows the search to that one board. `sources_searched` now reports the list that was sent (`['all']` only when none was). The `search_jobs` tool does not expose `sources`.
+
+**Files:** `apps/mcp/src/tools.ts`, `apps/mcp/__tests__/tools-api-contract.spec.ts`, `apps/mcp/README.md`, `docs/log.md`.
+
+**Validation:** 4 of the 8 new tests fail against develop's `tools.ts` (no `siteType` for `{ query: 'backend' }`, for `source: 'linkedin'`, for the snake style, and for a body built with `sources`); the controls (`source: 'remotive'` posts `['remotive']`, no source and no sources sends no `siteType`, `source` wins over `sources`, the catalogue lists remote boards) pass before and after. `jest --testPathPatterns apps/mcp/__tests__` passes (6 suites, 104 tests), and `tsc --project tsconfig.typecheck.json --noEmit` and `npm run lint:docs` pass.
+
 ### Fix: a request that fails validation no longer logs its credentials (T-2520)
 
 **Symptom.** On a 400 with validation errors, the global `HttpExceptionFilter` (`apps/api/src/filters/http-exception.filter.ts`) logged `Request body: ${JSON.stringify(request.body)}` at warn level. A search that sends per-request source credentials (`ScraperInputDto.auth`, e.g. a Greenhouse `apiKey` or Upwork `clientSecret` / `accessToken` / `refreshToken`) or proxy URLs with `user:password@` (`proxies`) and has one bad field (e.g. `resultsWanted: "x"`) wrote those secrets in plain text to the server log and any log shipper, against `docs/SECURITY_GUIDELINES.md`. A circular body also made the filter itself throw (`Converting circular structure to JSON`), so no error response was sent.
