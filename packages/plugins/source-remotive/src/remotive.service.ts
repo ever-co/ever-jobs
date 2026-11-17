@@ -12,9 +12,10 @@ import {
   Site,
   DescriptionFormat,
   CompensationInterval,
+  Country,
   JobType,
 } from '@ever-jobs/models';
-import { createHttpClient, extractEmails, htmlToPlainText, markdownConverter, parseLocationList } from '@ever-jobs/common';
+import { createHttpClient, extractEmails, extractSalary, htmlToPlainText, markdownConverter, parseLocationList, parseSalaryCurrency } from '@ever-jobs/common';
 import { REMOTIVE_API_URL, REMOTIVE_HEADERS } from './remotive.constants';
 import { RemotiveApiResponse, RemotiveJob } from './remotive.types';
 
@@ -29,15 +30,6 @@ const JOB_TYPE_MAP: Record<string, JobType> = {
   volunteer: JobType.VOLUNTEER,
   other: JobType.OTHER,
 };
-
-/**
- * Regex to parse salary strings like "$60,000 - $80,000".
- * Numbers are matched with the character class [\d,]+ which cannot backtrack
- * (character classes are atomic). The surrounding structure has no nested
- * quantifiers, so the overall pattern runs in linear time. Input length is
- * capped in parseSalary() as additional ReDoS defence-in-depth.
- */
-const SALARY_REGEX = /\$?([\d,]+)\s*[-\u2013]\s*\$?([\d,]+)/;
 
 @SourcePlugin({
   site: Site.REMOTIVE,
@@ -164,30 +156,41 @@ export class RemotiveService implements IScraper {
   }
 
   /**
-   * Parse a salary string like "$60,000 - $80,000" into a CompensationDto.
+   * Parse a Remotive salary string ("$60,000 - $80,000", "$170k - $200k",
+   * "$14 - $20/hour", ...) into a CompensationDto with the shared
+   * extractSalary, keeping the interval and currency it finds. The currency
+   * falls back to USD only when none was found. Input length is capped as
+   * ReDoS defence-in-depth.
+   *
+   * Remotive's salary field is often written with no currency at all
+   * ("70K-80K", "60,000 - 80,000"). extractSalary reads a range with no
+   * currency next to it only under a country hint, so text with no currency
+   * signal is read again with the USA hint: USD, as this plugin always
+   * assumed. The bare-range guard of extractSalary still drops prose such as
+   * "5 - 7 years experience".
    */
   private parseSalary(salary: string | null | undefined): CompensationDto | null {
     if (!salary || salary.length > 200) {
       return null;
     }
 
-    const match = salary.match(SALARY_REGEX);
-    if (!match) {
-      return null;
+    let parsed = extractSalary(salary);
+    if (
+      parsed.minAmount == null &&
+      parsed.maxAmount == null &&
+      parseSalaryCurrency(salary).confidence === 'default'
+    ) {
+      parsed = extractSalary(salary, { country: Country.USA });
     }
-
-    const minAmount = parseInt(match[1].replace(/,/g, ''), 10);
-    const maxAmount = parseInt(match[2].replace(/,/g, ''), 10);
-
-    if (isNaN(minAmount) || isNaN(maxAmount) || minAmount <= 0 || maxAmount <= 0) {
+    if (parsed.minAmount == null && parsed.maxAmount == null) {
       return null;
     }
 
     return new CompensationDto({
-      interval: CompensationInterval.YEARLY,
-      minAmount,
-      maxAmount,
-      currency: 'USD',
+      interval: parsed.interval as CompensationInterval | null,
+      minAmount: parsed.minAmount,
+      maxAmount: parsed.maxAmount,
+      currency: parsed.currency ?? 'USD',
     });
   }
 

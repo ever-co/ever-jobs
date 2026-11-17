@@ -66,12 +66,25 @@ them (the API sorts by site name, so a plain cut would keep only the first site'
 
 ### `get_job_details`
 
-Get detailed information about a specific job posting.
+Get the full details of a job that a recent search returned: the untruncated description
+(`full_description`; search results cut `description` at 500 characters), salary and application link.
 
-| Parameter | Type   | Required | Description                 |
-| --------- | ------ | -------- | --------------------------- |
-| `job_url` | string | ❌       | Full URL of the job posting |
-| `job_id`  | string | ❌       | Ever Jobs internal job ID   |
+| Parameter | Type   | Required | Description                          |
+| --------- | ------ | -------- | ------------------------------------ |
+| `job_url` | string | ❌       | The job's `url` from a search result |
+| `job_id`  | string | ❌       | The job's `id` from a search result  |
+
+Give one of the two, or both from the same result: a few sources reuse an id across searches, and
+with both the job that has both is returned. The API has no endpoint that returns a single job, so
+`get_job_details` makes no API request: it answers from the last 1000 jobs that `search_jobs`,
+`search_remote_jobs` and `get_salary_insights` received in this server process (the oldest are
+dropped first; a search that returns more than 1000 jobs keeps its first 1000). Any other job gets
+the error `job not found in recent search results; call search_jobs first`.
+
+Details therefore work for jobs found by the same server process. The memory is lost when the
+process restarts, and it is shared by every client of that process. In HTTP mode
+(`MCP_TRANSPORT=http`) each replica keeps its own, so behind a load balancer a details call can
+reach a replica that did not run the search and get that error.
 
 ### `list_sources`
 
@@ -126,9 +139,9 @@ _No parameters required._
 | `EVER_JOBS_API_KEY`             | _(unset)_               | API key sent with every request when the API has `ENABLE_API_KEY_AUTH` on (one of its `API_KEYS`). No key header is sent when unset                                          |
 | `EVER_JOBS_API_KEY_HEADER`      | `x-api-key`             | Header name used for `EVER_JOBS_API_KEY`; set it to match the API's `API_KEY_HEADER_NAME`                                                                                    |
 
-If the API cannot be reached (connection refused), `search_jobs`, `search_remote_jobs`,
-`get_salary_insights` and `get_job_details` return an error naming `EVER_JOBS_API_URL` (without any
-`user:password@` part) rather than an empty result.
+If the API cannot be reached (connection refused), `search_jobs`, `search_remote_jobs` and
+`get_salary_insights` return an error naming `EVER_JOBS_API_URL` (without any `user:password@`
+part) rather than an empty result. `get_job_details` makes no API request (see above).
 
 Remote-only jobs: whether their `location` reads `Remote` depends on the API's
 `EVER_JOBS_LOCATION_REMOTE_CITY` (default `false` — a bare `Remote` label gives
