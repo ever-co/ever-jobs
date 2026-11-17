@@ -73,6 +73,75 @@ describe('AnalyticsService', () => {
       expect(result.salaryStats!.avgSalary).toBe(90000); // (80000+100000)/2
     });
 
+    // T-2522 — amounts are annualised before they are compared.
+    it('annualises an hourly salary before it is compared with a yearly one', () => {
+      const hourly = new CompensationDto({ interval: CompensationInterval.HOURLY, minAmount: 25, maxAmount: 35, currency: 'USD' });
+      const jobs = [
+        makeJob({ compensation: hourly }),
+        makeJob({ compensation: new CompensationDto({ interval: CompensationInterval.YEARLY, minAmount: 90000, maxAmount: 120000, currency: 'USD' }) }),
+      ];
+      const result = service.summarize(jobs);
+      expect(result.withSalaryCount).toBe(2);
+      expect(result.salaryStats).toEqual({
+        minSalary: 52000, // 25 * 2080
+        maxSalary: 120000,
+        avgSalary: 71000, // (52000 + 90000) / 2
+        currency: 'USD',
+      });
+      // The job itself is not changed.
+      expect(jobs[0].compensation).toBe(hourly);
+      expect(hourly).toMatchObject({ interval: CompensationInterval.HOURLY, minAmount: 25, maxAmount: 35 });
+    });
+
+    // T-2522 — one currency: the most common one among the jobs with a salary.
+    it('reports the most common currency and leaves other currencies out of the figures', () => {
+      const jobs = [
+        makeJob({ compensation: new CompensationDto({ interval: CompensationInterval.YEARLY, minAmount: 10000, maxAmount: 500000, currency: 'EUR' }) }),
+        makeJob({ compensation: new CompensationDto({ interval: CompensationInterval.YEARLY, minAmount: 80000, maxAmount: 120000, currency: 'USD' }) }),
+        makeJob({ compensation: new CompensationDto({ interval: CompensationInterval.YEARLY, minAmount: 100000, maxAmount: 150000, currency: 'USD' }) }),
+      ];
+      const result = service.summarize(jobs);
+      expect(result.withSalaryCount).toBe(3);
+      expect(result.salaryStats).toEqual({
+        minSalary: 80000,
+        maxSalary: 150000,
+        avgSalary: 90000,
+        currency: 'USD',
+      });
+    });
+
+    // T-2522 — a compensation with only an upper bound is a salary too.
+    it('counts a compensation that has only a maxAmount', () => {
+      const jobs = [
+        makeJob({ compensation: new CompensationDto({ interval: CompensationInterval.YEARLY, maxAmount: 100000, currency: 'USD' }) }),
+        makeJob(),
+      ];
+      const result = service.summarize(jobs);
+      expect(result.withSalaryCount).toBe(1);
+      expect(result.salaryStats).toEqual({
+        minSalary: 100000,
+        maxSalary: 100000,
+        avgSalary: 100000,
+        currency: 'USD',
+      });
+    });
+
+    // T-2522 — a 0 bound is a "not disclosed" placeholder (as in hasSalaryAmount), not the low end.
+    it('does not take a 0 minAmount as the low end', () => {
+      const jobs = [
+        makeJob({ compensation: new CompensationDto({ interval: CompensationInterval.MONTHLY, minAmount: 0, maxAmount: 5000, currency: 'USD' }) }),
+        makeJob({ compensation: new CompensationDto({ interval: CompensationInterval.YEARLY, minAmount: 0, maxAmount: 0, currency: 'USD' }) }),
+      ];
+      const result = service.summarize(jobs);
+      expect(result.withSalaryCount).toBe(1);
+      expect(result.salaryStats).toEqual({
+        minSalary: 60000, // 5000 * 12
+        maxSalary: 60000,
+        avgSalary: 60000,
+        currency: 'USD',
+      });
+    });
+
     it('should break down by site', () => {
       const jobs = [
         makeJob({ site: 'linkedin' }),
@@ -163,6 +232,15 @@ describe('AnalyticsService', () => {
       expect(indeed.totalJobs).toBe(1);
       expect(indeed.withSalary).toBe(1);
       expect(indeed.remoteJobs).toBe(1);
+    });
+
+    // T-2522 — same rule as summarize(): a max-only compensation counts.
+    it('counts a compensation that has only a maxAmount', () => {
+      const jobs = [
+        makeJob({ site: 'indeed', compensation: new CompensationDto({ interval: CompensationInterval.MONTHLY, maxAmount: 6000, currency: 'EUR' }) }),
+      ];
+      const [indeed] = service.compareSites(jobs);
+      expect(indeed.withSalary).toBe(1);
     });
   });
 
