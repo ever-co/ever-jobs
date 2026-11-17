@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { Site } from '@ever-jobs/models';
 import {
   MCP_DEFAULT_SEARCH_LIMIT,
   MCP_LOCATION_FORMAT_ENV_VAR,
@@ -11,6 +12,7 @@ import {
   getJobDetails,
   getSalaryInsights,
   normalizeSearchLimit,
+  listSources,
   readLocationFormat,
   readSearchRequestKeyStyle,
   searchJobs,
@@ -195,6 +197,100 @@ describe('buildSearchRequestBody', () => {
     expect(Object.keys(buildSearchRequestBody({ query: 'x' }, 'snake')).sort()).toEqual(
       ['location', 'results_wanted', 'search_term'],
     );
+  });
+
+  // T-2546 — `sources` is a list of boards, sent only when `source` is not set.
+  it('sends no siteType key when there is neither a source nor sources', () => {
+    for (const style of ['camel', 'snake', 'both'] as const) {
+      const body = buildSearchRequestBody({ query: 'x' }, style);
+      expect(body).not.toHaveProperty('siteType');
+      expect(body).not.toHaveProperty('site_type');
+    }
+    expect(buildSearchRequestBody({ query: 'x', sources: [] })).not.toHaveProperty('siteType');
+  });
+
+  it('sends sources as siteType / site_type when no single source is given', () => {
+    const sources = ['remotive', 'remoteok'];
+    expect(buildSearchRequestBody({ query: 'x', sources }, 'camel')).toEqual({
+      searchTerm: 'x',
+      location: '',
+      siteType: ['remotive', 'remoteok'],
+      resultsWanted: 20,
+    });
+    expect(buildSearchRequestBody({ query: 'x', sources }, 'snake')).toEqual({
+      search_term: 'x',
+      location: '',
+      site_type: ['remotive', 'remoteok'],
+      results_wanted: 20,
+    });
+  });
+
+  it('lets a single source win over sources', () => {
+    expect(
+      buildSearchRequestBody({ query: 'x', source: 'lever', sources: ['remotive', 'remoteok'] }).siteType,
+    ).toEqual(['lever']);
+  });
+});
+
+/**
+ * T-2546 — search_remote_jobs must search the remote-first boards, not the
+ * whole catalogue. Before the fix it sent no siteType unless `source` named a
+ * remote board, so the API fanned out over every non-ATS source.
+ */
+describe('searchRemoteJobs — searches the remote boards', () => {
+  const REMOTE_IDS = listSources('remote').sources.map((s) => s.id);
+
+  it('the catalogue lists remote boards', () => {
+    expect(REMOTE_IDS.length).toBeGreaterThan(0);
+    expect(REMOTE_IDS).toEqual(expect.arrayContaining(['remotive', 'remoteok', 'weworkremotely']));
+  });
+
+  // Every remote id is now always sent, and the API checks siteType with
+  // `@IsEnum(Site, { each: true })`: one id that is not a `Site` value would
+  // turn every search_remote_jobs call into a 400.
+  it('every remote board is a Site value the API accepts', () => {
+    const sites = new Set<string>(Object.values(Site));
+    expect(REMOTE_IDS.filter((id) => !sites.has(id))).toEqual([]);
+  });
+
+  it('posts every remote board as siteType when no source is given', async () => {
+    const client = mockClient({ post: { jobs: [] } });
+    const result = await searchRemoteJobs({ query: 'backend' });
+
+    expect(client.post).toHaveBeenCalledTimes(1);
+    const [path, body] = client.post.mock.calls[0];
+    expect(path).toBe('/api/jobs/search');
+    expect(body.siteType).toEqual(REMOTE_IDS);
+    expect(body).toMatchObject({ searchTerm: 'backend', location: 'Remote', resultsWanted: 25 });
+    expect(result.sources_searched).toEqual(REMOTE_IDS);
+  });
+
+  it('posts the remote boards, not the whole catalogue, when source is not a remote board', async () => {
+    const client = mockClient({ post: { jobs: [] } });
+    const result = await searchRemoteJobs({ query: 'backend', source: 'linkedin' });
+
+    const body = client.post.mock.calls[0][1];
+    expect(body.siteType).toEqual(REMOTE_IDS);
+    expect(body.siteType).not.toContain('linkedin');
+    expect(result.sources_searched).toEqual(REMOTE_IDS);
+  });
+
+  it('posts only the named board when source is a remote board', async () => {
+    const client = mockClient({ post: { jobs: [] } });
+    const result = await searchRemoteJobs({ query: 'backend', source: 'remotive' });
+
+    expect(client.post.mock.calls[0][1].siteType).toEqual(['remotive']);
+    expect(result.sources_searched).toEqual(['remotive']);
+  });
+
+  it('sends the remote boards as site_type with EVER_JOBS_MCP_REQUEST_KEYS=snake', async () => {
+    process.env[MCP_REQUEST_KEYS_ENV_VAR] = 'snake';
+    const client = mockClient({ post: { jobs: [] } });
+    await searchRemoteJobs({ query: 'backend' });
+
+    const body = client.post.mock.calls[0][1];
+    expect(body.site_type).toEqual(REMOTE_IDS);
+    expect(body).not.toHaveProperty('siteType');
   });
 });
 
