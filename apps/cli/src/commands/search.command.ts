@@ -48,6 +48,8 @@ interface SearchOptions extends CrawlCliOptions {
   format?: string;
   output?: string;
   verbose?: boolean;
+  /** `false` with `--no-description`: descriptions are left out of the output. */
+  description?: boolean;
   stdin?: boolean;
   analyze?: boolean;
   bd?: boolean;
@@ -74,6 +76,16 @@ export function applyCliExclusions(input: ScraperInputDto, jobs: JobPostDto[]): 
     console.error(`Ignored exclusion term "${ignored.term}" (${ignored.reason})`);
   }
   return kept;
+}
+
+/**
+ * A copy of `job` without `description`, for `--no-description` output. The
+ * job itself is not changed.
+ */
+function withoutDescription(job: JobPostDto): JobPostDto {
+  const copy: JobPostDto = { ...job };
+  delete copy.description;
+  return copy;
 }
 
 /**
@@ -234,9 +246,12 @@ export class SearchCommand extends CommandRunner {
       return;
     }
 
-    // Format job output
+    // Format job output. --no-description drops descriptions from the output only;
+    // exclusions above and --analyze below still see them.
     const format = options.format ?? 'json';
-    const content = this.formatOutput(jobs, format);
+    const withDescription = options.description !== false;
+    const outputJobs = withDescription ? jobs : jobs.map(withoutDescription);
+    const content = this.formatOutput(outputJobs, format, withDescription);
     this.writeOutput(content, options);
 
     // Append analysis if --analyze flag is set
@@ -281,12 +296,12 @@ export class SearchCommand extends CommandRunner {
     }
   }
 
-  private formatOutput(jobs: JobPostDto[], format: string): string {
+  private formatOutput(jobs: JobPostDto[], format: string, withDescription = true): string {
     switch (format) {
       case 'json':
         return JSON.stringify(jobs, null, 2);
       case 'csv':
-        return this.toCsv(jobs);
+        return this.toCsv(jobs, withDescription);
       case 'table':
         return this.toTable(jobs);
       case 'summary':
@@ -296,16 +311,18 @@ export class SearchCommand extends CommandRunner {
     }
   }
 
-  private toCsv(jobs: JobPostDto[]): string {
+  private toCsv(jobs: JobPostDto[], withDescription = true): string {
     if (jobs.length === 0) return '';
 
-    const headers = [
+    const allHeaders = [
       'id', 'site', 'title', 'companyName', 'location', 'jobUrl',
       'datePosted', 'jobType', 'isRemote', 'minAmount', 'maxAmount',
       'currency', 'interval', 'description',
       // Spec 1696 — appended, so every column above keeps its position.
       'datePostedAt', 'datePostedPrecision', 'datePostedBasis',
     ];
+    // --no-description leaves the column out (the columns after it move one to the left).
+    const headers = withDescription ? allHeaders : allHeaders.filter((h) => h !== 'description');
 
     const escape = (val: any): string => toCsvCell(val);
 
@@ -528,8 +545,9 @@ export class SearchCommand extends CommandRunner {
   @Option({ flags: '-v, --verbose', description: 'Enable verbose debug output' })
   parseVerbose(): boolean { return true; }
 
+  // A --no-* flag sets `description`; it must be false so the flag differs from its absence (true).
   @Option({ flags: '--no-description', description: 'Omit job descriptions from output (reduces size for LLMs)' })
-  parseNoDescription(): boolean { return true; }
+  parseNoDescription(): boolean { return false; }
 
   @Option({ flags: '--analyze', description: 'Append summary analysis (salary, remote %, top companies) after results' })
   parseAnalyze(): boolean { return true; }
