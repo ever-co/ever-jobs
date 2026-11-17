@@ -115,7 +115,9 @@ describe('search_jobs / get_job_details carry the detail (Spec 1696)', () => {
   });
 
   it('get_job_details: carries the detail, and omits it for a date-only job', async () => {
-    mockClient(DETAILED);
+    // get_job_details answers from the jobs a search returned (T-2586).
+    const client = mockClient({ jobs: [DETAILED, DATE_ONLY] });
+    await searchJobs({ query: 'engineer' });
     expect(await getJobDetails({ jobId: 'li-1' })).toMatchObject({
       date_posted: '2026-09-24',
       date_posted_at: '2026-09-24T19:34:00.000Z',
@@ -123,10 +125,10 @@ describe('search_jobs / get_job_details carry the detail (Spec 1696)', () => {
       date_posted_basis: 'relative',
     });
 
-    mockClient(DATE_ONLY);
     const plain = await getJobDetails({ jobId: 'lever-1' });
     expect(plain).not.toHaveProperty('date_posted_at');
     expect(plain).not.toHaveProperty('date_posted_precision');
     expect(plain).not.toHaveProperty('date_posted_basis');
+    expect(client.get).not.toHaveBeenCalled();
   });
 });
