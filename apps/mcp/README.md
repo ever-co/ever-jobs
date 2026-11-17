@@ -91,7 +91,7 @@ List all available job sources.
 
 ### `search_remote_jobs`
 
-Search for remote-only positions across all remote-first job boards (RemoteOK, Remotive, We Work Remotely, Jobicy, Himalayas, Arbeitnow).
+Search for remote-only positions across every remote-first job board (the sources that `list_sources` reports with type `remote`).
 
 Without `source`, or with a `source` that is not a remote board, every board that `list_sources` reports with type `remote` is searched, and `sources_searched` lists them. A remote `source` searches that board alone.
 
@@ -153,7 +153,7 @@ label such as "3 hours ago" at fetch time). A job without that detail has none o
 ## Source Coverage
 
 - **21** Job Boards (LinkedIn, Indeed, Glassdoor, Dice, Monster, Upwork, Exa, BuiltIn, Snagajob, Dribbble, ...)
-- **6** Remote Job Boards (RemoteOK, Remotive, We Work Remotely, Jobicy, Himalayas, Arbeitnow)
+- **13** Remote Job Boards (RemoteOK, Remotive, We Work Remotely, Jobicy, Himalayas, Arbeitnow, 4 Day Week, ...)
 - **4** Aggregator APIs (Adzuna, Reed, Jooble, CareerJet)
 - **22** ATS Platforms (Greenhouse, Lever, Ashby, Workable, SmartRecruiters, Rippling, Workday, ...)
 - **12** Company Career Pages (Google, Meta, Netflix, Stripe, OpenAI, Amazon, Apple, Microsoft, NVIDIA, TikTok, Uber, Cursor)
