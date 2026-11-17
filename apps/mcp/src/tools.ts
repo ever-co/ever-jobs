@@ -609,8 +609,9 @@ export function recentJobCount(): number {
 // ── Tool Implementations ───────────────────────────────────────────────
 
 /**
- * Search for jobs via the Ever Jobs API. Every job received is remembered for
- * {@link getJobDetails}.
+ * Search for jobs via the Ever Jobs API. Every job it returns, and the first
+ * other jobs received up to {@link MCP_RECENT_JOBS_LIMIT} in all, are
+ * remembered for {@link getJobDetails}.
  */
 export async function searchJobs(params: JobSearchParams): Promise<SearchResponse> {
   const client = getClient();
@@ -619,10 +620,6 @@ export async function searchJobs(params: JobSearchParams): Promise<SearchRespons
     const response = await client.post('/api/jobs/search', buildSearchRequestBody(params));
 
     const data = response.data;
-    // A search across the whole catalogue can return more jobs than the memory
-    // holds. Remember the first ones (the ones a client reads first), so the
-    // tail of this response cannot push them out.
-    for (const job of (data.jobs ?? []).slice(0, MCP_RECENT_JOBS_LIMIT)) rememberJob(job);
     const locationFormat = readLocationFormat();
     const jobs: JobResult[] = (data.jobs ?? []).map((job: any) => ({
       id: job.id ?? '',
@@ -648,6 +645,23 @@ export async function searchJobs(params: JobSearchParams): Promise<SearchRespons
     // answer can be far longer than `limit`: cut it here, after the
     // remote_only filter, keeping jobs from every source (T-2585).
     const returnedJobs = takeJobsAcrossSources(filteredJobs, normalizeSearchLimit(params.limit));
+
+    // A search across the whole catalogue can return more jobs than the memory
+    // holds, and the cut takes each source's jobs in turn, so it can return jobs
+    // listed past the first MCP_RECENT_JOBS_LIMIT. Remember, in the API's order,
+    // every returned job and as many of the others as there is room for, first
+    // ones first: at most MCP_RECENT_JOBS_LIMIT jobs, so this response cannot
+    // push its own returned jobs out.
+    const returned = new Set(returnedJobs);
+    let room = MCP_RECENT_JOBS_LIMIT - returnedJobs.length;
+    jobs.forEach((job, index) => {
+      if (returned.has(job)) {
+        rememberJob(data.jobs[index]);
+      } else if (room > 0) {
+        room--;
+        rememberJob(data.jobs[index]);
+      }
+    });
 
     return {
       total: returnedJobs.length,

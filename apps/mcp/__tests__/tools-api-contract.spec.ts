@@ -758,6 +758,35 @@ describe('getJobDetails — answers from recent search results (T-2586)', () => 
     await expect(getJobDetails({ jobId: `one-${MCP_RECENT_JOBS_LIMIT}` })).rejects.toThrow(NOT_FOUND);
   });
 
+  it('remembers every job a wide search returns, even ones listed past the first MCP_RECENT_JOBS_LIMIT', async () => {
+    // 20 sources x 100 jobs, sorted by site name as the API does: the cut to
+    // `limit` takes 5 jobs from each source, so half of them sit past index 1000.
+    const sites = Array.from({ length: 20 }, (_, s) => `site${String(s).padStart(2, '0')}`);
+    const jobs = sites.flatMap((site) =>
+      Array.from({ length: 100 }, (_, i) => ({
+        id: `wide-${site}-${i}`,
+        title: `Wide ${site} ${i}`,
+        jobUrl: `https://acme.example.com/wide-${site}-${i}`,
+        site,
+      })),
+    );
+    mockClient({ post: { jobs } });
+    const search = await searchJobs({ query: 'x', limit: 100 });
+
+    expect(search.jobs).toHaveLength(100);
+    expect(search.total_found).toBe(2000);
+    expect(new Set(search.jobs.map((j) => j.source))).toEqual(new Set(sites));
+    expect(recentJobCount()).toBeLessThanOrEqual(MCP_RECENT_JOBS_LIMIT);
+
+    const missing: string[] = [];
+    for (const job of search.jobs) {
+      const byId = await getJobDetails({ jobId: job.id }).catch(() => null);
+      const byUrl = await getJobDetails({ jobUrl: job.url }).catch(() => null);
+      if (byId?.id !== job.id || byUrl?.id !== job.id) missing.push(job.id);
+    }
+    expect(missing).toEqual([]);
+  });
+
   it('given job_id and job_url, answers the job that has both when a later search reused the id', async () => {
     // Working Nomads numbers its jobs per search (`workingnomads-<index>`).
     const roleA = { id: 'workingnomads-0', title: 'Role A', jobUrl: 'https://wn.example.com/a', site: 'workingnomads' };
