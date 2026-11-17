@@ -330,7 +330,7 @@ export class CircuitBreakerService implements ICircuitBreakerService {
    * Implementation order:
    *   1. transition `open → half-open` if cooldown elapsed (probe gate);
    *   2. short-circuit when still `open` (or already-issued half-open probe
-   *      quota is spent);
+   *      quota is spent, including while those probes are still in flight);
    *   3. invoke `fn`, time it, record outcome. A resolved value that is a
    *      *refused empty result* ({@link refusedEmptyResult}: jobs `[]` and a
    *      `rate_limited` / `blocked` diagnostic) is recorded as a failure — and
@@ -357,14 +357,18 @@ export class CircuitBreakerService implements ICircuitBreakerService {
     }
     if (
       entry.state === 'half-open' &&
-      entry.halfOpenAttempts >= entry.policy.halfOpenProbes &&
-      entry.halfOpenInFlight === 0
+      entry.halfOpenAttempts >= entry.policy.halfOpenProbes
     ) {
-      // Exhausted probes without a success → engineer's choice: stay
+      // Probe quota spent → refuse. While a probe is still in flight, leave
+      // the state alone: that probe's outcome closes or re-opens the breaker
+      // (a concurrent call used to run here too, T-2547). With no probe in
+      // flight, exhausted probes without a success → engineer's choice: stay
       // half-open until cooldown re-elapses. We prefer re-arming `open`
       // so the next call burns a fresh cooldown rather than spinning.
-      entry.state = 'open';
-      entry.openedAt = now;
+      if (entry.halfOpenInFlight === 0) {
+        entry.state = 'open';
+        entry.openedAt = now;
+      }
       throw this.shortCircuitError(site);
     }
 

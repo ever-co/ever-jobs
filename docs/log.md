@@ -9,6 +9,16 @@
 
 One dated entry for the day; each fix has its own section.
 
+### Fix: a half-open circuit breaker refuses concurrent calls while its probe is in flight (T-2547)
+
+**Symptom.** `CircuitBreakerService.exec()` (`packages/plugin/src/circuit-breaker/circuit-breaker.service.ts`) refused a half-open call only when the probe quota was spent **and** no probe was in flight (`halfOpenAttempts >= halfOpenProbes && halfOpenInFlight === 0`). After the cooldown the first call became the probe; a call that arrived while the probe was still running failed the `halfOpenInFlight === 0` test, was not refused, and ran too, and so did every later concurrent call. `JobsService` wraps every per-source dispatch in this breaker, so concurrent searches all hit a recovering site at once, against the contract in `packages/models/src/interfaces/circuit-breaker.interface.ts` ("a bounded number of probe calls (`halfOpenProbes`) flow through"; the default is 1).
+
+**Fix.** In half-open with the probe quota spent, `exec()` now always throws `ERR_SOURCE_CIRCUIT_OPEN`. It re-arms `open` with a fresh cooldown only when no probe is in flight; otherwise it leaves the state alone, so the in-flight probe's outcome settles it (success → `closed`, failure → `open` with a new cooldown, circuit-neutral → the slot is handed back and the breaker stays half-open). `onSuccess`, `onFailure` and `onNeutral` are unchanged.
+
+**Files:** `packages/plugin/src/circuit-breaker/circuit-breaker.service.ts`, `packages/plugin/src/circuit-breaker/__tests__/circuit-breaker.service.spec.ts`, `docs/log.md`.
+
+**Validation:** 6 new tests in `circuit-breaker.service.spec.ts` (a concurrent call is refused while the only probe is pending; the probe's success closes the breaker and later calls run; the probe's failure re-opens it with a fresh cooldown; with `halfOpenProbes: 2` two concurrent probes run and the third is refused; a circuit-neutral probe error still hands its slot back; with no probe in flight a spent quota still re-arms `open`). The first 5 fail against develop (the concurrent call resolves instead of being refused) and pass now; the last passes before and after. All 4 circuit-breaker suites pass (76 tests).
+
 ### Fix: GraphQL `descriptionFormat` is validated and its documented `text` value means plain (T-2523)
 
 **Symptom.** The GraphQL schema documented `SearchJobsInput.descriptionFormat` as `markdown, html, or text` (`apps/api/src/jobs/gql-types.ts`) and validated it only with `@IsString()`, and `JobsResolver.searchJobs` (`apps/api/src/jobs/jobs.resolver.ts`) forwarded it unchanged. The values the sources know are `markdown`, `html` and `plain` (`DescriptionFormat`), and the source plugins convert only for `plain` or `markdown`, passing anything else through as HTML. So a client that followed the schema and sent `"text"` got raw HTML descriptions, and typos such as `"PLAIN"` or `"md"` were accepted silently, where REST (`@IsEnum(DescriptionFormat)` on `ScraperInputDto`) answers 400.
@@ -248,19 +258,16 @@ The ladder nouns were red first (14 failing).
 - **Spec 1721 FR-1** says `201`, the status the POST search has always returned (the spec said `200`).
 - **docs/log.md** headings carry a unique `Spec NNNN` per date so `lint:docs` passes on the merged tree.
 
-
 ## 2026-09-26 — Spec 1720 — Bayt listed in list mode; develop's cache-key tests follow `search-v2`
 
 - Spec 1710 (develop) rebuilt Bayt's search URL: an empty term now lists `/en/<market>/jobs/` instead of the malformed `/jobs/-jobs/` that made Spec 1720 flag it. The flag is removed; `naukri`, `stepstone` and `careeronestop` keep it. The audit test asserts Bayt carries no flag.
 - Develop's Spec 1690/1700 tests asserted the REST cache key with `endpoint: 'search'`; since Spec 1721 FR-19 the entry is the `search-v2` envelope, so they now use `SEARCH_CACHE_ENDPOINT`.
-
 
 ## 2026-09-26 — Spec 1722 — merge: develop (Specs 1690-1713: crawl policy, multi-location search, exclusions, board fixes) into Specs 1720-1724
 
 - `searchJobsWithDiagnostics` runs both feature sets: list mode, `siteCategories`, the job ceiling, caller cancellation, NDJSON progress and the completeness record (Specs 1720/1721) now also cover multi-location searches (Spec 1700) and the crawl-policy scrape context with its deadline abort (Spec 1690). The deadline race rejects with `FanoutDeadlineError` and still calls the abort hook.
 - Completeness counts SOURCES in both modes: a multi-location source cut short by the deadline, or not started by a bound, counts once in `sourcesSkipped` and appears once in `problemSources` (`skipped`); a source that ran reports its first problem location. `mergeLocationOutcomes` returns each source's rows for this.
 - The shared REST/NDJSON `runSearch` keys the cache with `searchCacheParams` (exclusions blanked, `locations` keyed in order) and applies the exclusion filter, so NDJSON streams only the kept jobs. `requiresSearchTerm` and `minRequestIntervalMs` both stay on `IPluginMetadata`; Naukri declares both.
-
 
 ## 2026-09-26 — Spec 1721 (with 1720) — third review: list mode means NDJSON, a problemSources cap that fits the catalogue, two limits of the expiry rule
 
@@ -884,7 +891,6 @@ postings (deterministic rewrite: `api…/v1/companies/<Co>/postings/<id>` →
 [tasks](../.specify/specs/1750-smartrecruiters-public-job-url/tasks.md), `docs/index.md`,
 **Q-111** (the list endpoint carries no description).
 
-
 ## 2026-09-25 — Review fixup — Specs 1692-1713: salary benefit guard, multi-location memo, stop on refusal, opt-in identity changes
 
 **Change:** Salary (1695 D-10/D-11): the extended grammar scans every range instead of the leftmost, skips a `to` range or single bound whose nearest preceding keyword in its clause is a benefit word (bonus, stipend, relocation, commission, referral, 401(k), tuition, ...), and uses an unqualified `to` range only when nothing stronger is in the text; the API description fallback reads an upper-only figure only with a salary word in its clause (`upperBoundNeedsSalaryCue`). Multi-location search (1700 T13/T14): each source's location loop runs in a scoped response memo in the shared HTTP client (`runWithHttpMemo`, GET and POST, `EVER_JOBS_SEARCH_LOCATION_MEMO=off|get`), so whole-board sources cost one fetch for N locations; plugins declare `minRequestIntervalMs` (LinkedIn, Wellfound, Naukri 3 s; Glassdoor, ZipRecruiter 5 s) and the location pause is the larger of that and the operator interval. Refusals: InHire, Level (MCP details, listing pages, feed enrichment) and Internshala detail walks stop at the first 429 / 401 / 403 / 407 / challenge (shared `refusalFromScrapeError` / `isRefusalDiagnostics` in `@ever-jobs/models`), InHire and Internshala also after three failures in a row, Internshala `detail-all` is capped at 100, and Level no longer falls back to the feed after a refused MCP listing. Opt-in until the owner rules on Q-099: WTTJ board mode in `scrape()` (`WTTJ_BOARD_MODE=on`) and the app-shaped ZipRecruiter session event (`ZIPRECRUITER_SESSION_EVENT=form`); the ZipRecruiter geo-block detail no longer suggests a way around the restriction. RemoteOK sends our identifying User-Agent (`EVER_JOBS_REMOTEOK_LEGACY=ua` restores the old one; one live request with it got HTTP 200). Google's page override is clamped to 30. Internshala keeps the `Apply by:` line when a card shows a deadline. The Bayt live test runs in CI again; the multi-location live check moved to `apps/api/__tests__/search-multi-location.e2e-spec.ts` so CI runs it. Docs: Q-099 rewritten (per-plugin request counts, WTTJ and ZipRecruiter rows, Spec 1690 dependency), API changelog (id table, exact legacy switches, country names), PERFORMANCE_TUNING multi-location section, MCP README inputs, `tool_manifest.json` job types, spec bookkeeping (1695 and 1701 done; 1700 T12/T13/T14; 1703 T16 split). Not changed, with reason: HK/MO display overrides (Spec 1699 F2 defers them; adding them would re-split the name and alpha-3 spellings that spec unified).
@@ -1247,7 +1253,6 @@ timers): 800 Greenhouse requests + a 100-wide fan-out to one host in 11.3 s vs t
 deadline, 0 failures, ≤ 16 / ≤ 3 in flight. Live UA A/B, 30 plugins / 166 requests: 18 work
 with the honest UA, 1 breaks only with it (SimplyHired), 7 broken either way, 4 inconclusive
 (Q-097). `lint:docs` clean.
-
 
 ---
 
@@ -1795,7 +1800,6 @@ cross-provider regression; `tsc --noEmit` clean for the package and for `tsconfi
 
 ---
 
-
 ## 2026-09-07 — Spec 5108 — `companyDomains` Inline-Array Lint & Checklist
 
 **Change:** Add `scripts/__tests__/company-domains-inline.spec.ts`, which scans every `source-company-*/src/*.service.ts` and fails when `companyDomains` is declared but is not an inline array of quoted string literals. Also rejects `www.` prefixes, which `normalizeCompanyHost` already strips. Fix `source-company-shinkei_systems` to use inline `companyDomains: ['shinkei.systems', 'shinkeisystems.com']` and remove the unused `SHINKEI_SYSTEMS_DOMAINS` constant from `shinkei_systems.constants.ts`. Update `.specify/templates/tasks.template.md` with a checklist reminder that `companyDomains` must be inline and must not include `www.`.
@@ -2045,7 +2049,6 @@ suites, `.specify/specs/1687-headful-plugin-navigation-allowlist/*`.
 
 ---
 
-
 ## 2026-08-30 — Spec 5089 — Source Company Plugin: Stratolaunch
 
 **Change:** Add a `source-company-stratolaunch` plugin backed by the Greenhouse Job Board API (`https://api.greenhouse.io/v1/boards/stratolaunch/jobs?content=true`). Registers `Site.STRATOLAUNCH = 'stratolaunch'`, declares `companyDomains: ['stratolaunch.com']`, and maps title, location, department, description, apply URL, and `first_published` date to `JobPostDto`. Supports `resultsWanted`, `searchTerm`, and `location` filters and handles fetch failures by returning an empty `JobResponseDto` with a diagnostic.
@@ -2110,7 +2113,6 @@ One defect caught mid-flight: the applier's first version indented the assignmen
 
 ---
 
-
 ## 2026-08-19 — Spec 1685 — the last mechanical diagnostics pass, and where the line was drawn
 
 **Change:** the final mechanical pass. Everything after this is hand work, so the job was to draw that line honestly rather than push a codemod past the point where it earns its keep.
@@ -2130,7 +2132,6 @@ Two anchor lessons, both from a failed first attempt: the common shape carries a
 **Final state of the sequence, stated plainly:** **1,801 of 1,839 services report a real reason, 5 are correct by design, and 33 are documented for hand review** — 30 in cluster B and 3 ambiguous. Not "done", but done to the point where a codemod stops being the right tool.
 
 ---
-
 
 ## 2026-08-19 — Spec 1684 — the tail cluster whose catch returns a bare empty result
 
@@ -2155,7 +2156,6 @@ Catches binding `error`/`e` are skipped rather than renaming someone's variable.
 **Partial results are untouched.** Plugins in this cluster discard whatever they accumulated when they fail, because the accumulator is declared inside the `try` and is out of scope in the catch. Recovering it needs a per-file hoist and its own review; this spec only makes the failure legible.
 
 ---
-
 
 ## 2026-08-19 — Spec 1683 — 822 services stop swallowing their errors
 
@@ -2185,7 +2185,6 @@ Now `return new JobResponseDto(jobs, classifyScrapeError(err))`, with `return ne
 
 ---
 
-
 ## 2026-08-19 — Spec 1682 — 699 delegating plugins report a registry miss as `not_registered`
 
 **Change:** PR 3 of 5, and the first at real scale — **1,398 files**.
@@ -2210,7 +2209,6 @@ Their generated specs were no better: the registry-miss test asserted only `expe
 
 ---
 
-
 ## 2026-08-19 — Spec 1681 — the generators stop minting the swallowed-error shape
 
 **Change:** PR 2 of 5, deliberately ahead of the codemods. Fixing 1,521 generated files while the generators still emit the defect would leave the tree correct only until the next scaffolded batch.
@@ -2230,7 +2228,6 @@ Six scaffolders build the company-source catalogue and share **no template modul
 
 ---
 
-
 ## 2026-08-18 — Spec 1680 — diagnostics semantics; the two backends that gated 300 wrappers
 
 **Change:** first of a five-PR sequence to make source plugins report a real reason instead of collapsing every outcome to `empty`. A census of all **1,839** plugin services found only **45** ever construct a `ScrapeDiagnostics` — 822 use the canonical swallow (`catch` → log → `return { jobs };`), 699 delegate to a backend ATS plugin, and 268 are a tail of other shapes. This PR touches none of them: it fixes the four things every later PR would otherwise hard-code the wrong answers to.
@@ -2249,7 +2246,6 @@ Six scaffolders build the company-source catalogue and share **no template modul
 **Next:** PR 2 the six scaffolders, PR 3 the 699 delegating specs, PR 4 the 822 canonical services, PR 5 the 268-file tail.
 
 ---
-
 
 ## 2026-08-17 — Spec 1679 — opt-in per-source diagnostics; a source-test suite that can finish
 
@@ -5985,7 +5981,6 @@ malformed body, empty board) degrades to an empty result — `scrape()` never th
 
 ---
 
-
 ## 2026-06-19 — Scheduled run #436 (**fourteen new Source Company Plugins** — Specs 742–755)
 
 **Scope:** Expand the corpus with **14 new Greenhouse-backed company-direct source plugins**,
@@ -6850,8 +6845,6 @@ replacement-function-based `wire-company-source.ts` helper (avoids the jest-conf
   used-car retailer (Toronto). `truebill` slug hosts the canonical **Rocket Money** board (displayName
   pinned to "Rocket Money", `enumKey ROCKET_MONEY`).
 - *Phase numbering:* enum Phases 629–645 map 1:1 to Specs 620–636.
-
-
 
 **Scope:** Direct continuation of the run-#424 company-direct Greenhouse direction. At run start the
 corpus held **470 `source-company-*` plugins / 753 source plugin packages total / 600 spec dirs / 753
@@ -37708,7 +37701,6 @@ ATS-scrapers project tracked outside this repo.
   - `003-deduplication-engine` — cross-source job dedup.
   - `004-persistence-storage-plugins` — pluggable storage adaptors.
   - `005-source-health-circuit-breaker` — per-plugin reliability.
-
 
 **Notes:**
 
