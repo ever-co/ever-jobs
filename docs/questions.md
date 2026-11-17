@@ -533,6 +533,11 @@ string, and an unknown one leaves descriptions unconverted. *Alternative (droppe
 integration):* validate both against the REST enums and answer `BAD_REQUEST`; stricter, but it
 breaks the `DE`-style codes GraphQL has always documented.
 
+**Update (2026-11-16, T-2523): the lenient `descriptionFormat` rule no longer holds.** GraphQL
+`descriptionFormat` now takes `markdown`, `html`, `plain` and the documented alias `text` (mapped
+to `plain` before the cache key); any other value is a `BAD_REQUEST`, as on REST. The lenient
+`country` rule above is unchanged. See Spec 1730 §12.7 and `docs/log.md` (2026-11-16).
+
 ---
 
 ## Q-105 — Career-level taxonomy boundaries (Spec 1730)
