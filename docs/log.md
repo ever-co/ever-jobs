@@ -5,6 +5,20 @@
 
 ---
 
+## 2026-11-17 — Lane-scan fixes (T-2606)
+
+One dated entry for the day; each fix has its own section.
+
+### Fix: CLI `--format summary` counts max-only salaries in "With salary data" (T-2606)
+
+**Symptom.** `toSummary()` in `apps/cli/src/commands/search.command.ts` counted a job as having salary data with `if (job.compensation?.minAmount) salaryCount++;`, and printed the count as `With salary data: N`. A compensation with only a `maxAmount` (the default salary grammar reads upper-only figures such as `"Compensation: up to $90,000"`), or with a `0` placeholder `minAmount` and a real `maxAmount`, was not counted, while a negative `minAmount` was. So `ever-jobs search … -f summary` reported fewer jobs with salary data than `withSalaryCount` of `--analyze` on the same jobs, which has used `hasSalaryAmount` since T-2522.
+
+**Fix.** `toSummary()` counts a job when `hasSalaryAmount(job.compensation)` holds (`@ever-jobs/common`: a finite bound above zero, min or max), the same rule `AnalyticsService` uses for `withSalaryCount` and `compareSites`' `withSalary`. A `0` / `0` placeholder, a negative amount and a job with no compensation are not counted. The rest of the summary is unchanged.
+
+**Files:** `apps/cli/src/commands/search.command.ts`, `apps/cli/__tests__/search-summary.command.spec.ts` (new), `docs/log.md`.
+
+**Validation:** 7 new tests run `SearchCommand` with a mocked `jobsService` and `format: 'summary'` and read the `With salary data` line from stdout. 4 fail against develop (a max-only salary and a `0` minimum with a real maximum give 0 instead of 1; a negative `minAmount` gives 1 instead of 0; a mix of six jobs gives 2 where `--analyze` reports 3) and pass now; the 3 controls (a `0` / `0` placeholder and a job without compensation are not counted, a yearly min-max salary is) pass before and after.
+
 ## 2026-11-16 — Lane-scan fixes (T-2459–T-2462)
 
 One dated entry for the day; each fix has its own section.
