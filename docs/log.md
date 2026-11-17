@@ -19,6 +19,16 @@ One dated entry for the day; each fix has its own section.
 
 **Validation:** all 6 new tests (hourly + yearly gives `minSalary` 52000; two USD jobs + one EUR job listed first gives `USD` and the EUR amounts do not move the figures; max-only counts in `summarize` and in `compareSites`; a `0` `minAmount` is not the low end; the CLI line names `EUR` and no `$`) fail against develop and pass now; the existing yearly USD test stays green.
 
+### Fix: a half-open circuit breaker refuses concurrent calls while its probe is in flight (T-2547)
+
+**Symptom.** `CircuitBreakerService.exec()` (`packages/plugin/src/circuit-breaker/circuit-breaker.service.ts`) refused a half-open call only when the probe quota was spent **and** no probe was in flight (`halfOpenAttempts >= halfOpenProbes && halfOpenInFlight === 0`). After the cooldown the first call became the probe; a call that arrived while the probe was still running failed the `halfOpenInFlight === 0` test, was not refused, and ran too, and so did every later concurrent call. `JobsService` wraps every per-source dispatch in this breaker, so concurrent searches all hit a recovering site at once, against the contract in `packages/models/src/interfaces/circuit-breaker.interface.ts` ("a bounded number of probe calls (`halfOpenProbes`) flow through"; the default is 1).
+
+**Fix.** In half-open with the probe quota spent, `exec()` now always throws `ERR_SOURCE_CIRCUIT_OPEN`. It re-arms `open` with a fresh cooldown only when no probe is in flight; otherwise it leaves the state alone, so the in-flight probe's outcome settles it (success → `closed`, failure → `open` with a new cooldown, circuit-neutral → the slot is handed back and the breaker stays half-open). `onSuccess`, `onFailure` and `onNeutral` are unchanged.
+
+**Files:** `packages/plugin/src/circuit-breaker/circuit-breaker.service.ts`, `packages/plugin/src/circuit-breaker/__tests__/circuit-breaker.service.spec.ts`, `docs/log.md`.
+
+**Validation:** 6 new tests in `circuit-breaker.service.spec.ts` (a concurrent call is refused while the only probe is pending; the probe's success closes the breaker and later calls run; the probe's failure re-opens it with a fresh cooldown; with `halfOpenProbes: 2` two concurrent probes run and the third is refused; a circuit-neutral probe error still hands its slot back; with no probe in flight a spent quota still re-arms `open`). The first 5 fail against develop (the concurrent call resolves instead of being refused) and pass now; the last passes before and after. All 4 circuit-breaker suites pass (76 tests).
+
 ### Fix: GraphQL `descriptionFormat` is validated and its documented `text` value means plain (T-2523)
 
 **Symptom.** The GraphQL schema documented `SearchJobsInput.descriptionFormat` as `markdown, html, or text` (`apps/api/src/jobs/gql-types.ts`) and validated it only with `@IsString()`, and `JobsResolver.searchJobs` (`apps/api/src/jobs/jobs.resolver.ts`) forwarded it unchanged. The values the sources know are `markdown`, `html` and `plain` (`DescriptionFormat`), and the source plugins convert only for `plain` or `markdown`, passing anything else through as HTML. So a client that followed the schema and sent `"text"` got raw HTML descriptions, and typos such as `"PLAIN"` or `"md"` were accepted silently, where REST (`@IsEnum(DescriptionFormat)` on `ScraperInputDto`) answers 400.
