@@ -132,7 +132,8 @@ function createServer(): Server {
         name: 'get_job_details',
         description:
           'Get the full details of a job that search_jobs, search_remote_jobs or get_salary_insights ' +
-          'returned, by its job_id or job_url. Returns the full (untruncated) description, salary info ' +
+          'returned, by its job_id or job_url (give both from the same result when you have them). ' +
+          'Returns the full (untruncated) description, salary info ' +
           'and application link. Answers from the last 1000 jobs this server found in its searches, ' +
           'without a new search; any other job is an error asking you to call search_jobs first.',
         inputSchema: {

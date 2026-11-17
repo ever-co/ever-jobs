@@ -397,7 +397,8 @@ describe('getJobDetails — answers from recent search results (T-2586)', () => 
       datePosted: '2026-11-10',
       department: 'Platform',
       compensation: { minAmount: 90000, maxAmount: 120000, currency: 'EUR' },
-      applicationUrl: 'https://acme.example.com/j1/apply',
+      // The API's field (`JobPostDto.applyUrl`), set apart from `jobUrl` by many sources.
+      applyUrl: 'https://acme.example.com/j1/apply',
     };
     const client = mockClient({ post: { jobs: [job] } });
     const search = await searchJobs({ query: 'engineer' });
@@ -490,5 +491,40 @@ describe('getJobDetails — answers from recent search results (T-2586)', () => 
     expect(recentJobCount()).toBe(MCP_RECENT_JOBS_LIMIT);
     await expect(getJobDetails({ jobId: 'bulk-250' })).resolves.toMatchObject({ title: 'Job 250' });
     await expect(getJobDetails({ jobId: 'bulk-251' })).rejects.toThrow(NOT_FOUND);
+  });
+
+  it('keeps the first MCP_RECENT_JOBS_LIMIT jobs of one search that returns more', async () => {
+    const total = MCP_RECENT_JOBS_LIMIT + 500;
+    const jobs = Array.from({ length: total }, (_, i) => ({
+      id: `one-${i}`,
+      title: `One ${i}`,
+      jobUrl: `https://acme.example.com/one-${i}`,
+      site: 'lever',
+    }));
+    mockClient({ post: { jobs } });
+    const search = await searchJobs({ query: 'x' });
+    expect(search.jobs).toHaveLength(total);
+    expect(recentJobCount()).toBe(MCP_RECENT_JOBS_LIMIT);
+
+    await expect(getJobDetails({ jobId: search.jobs[0].id })).resolves.toMatchObject({ title: 'One 0' });
+    await expect(getJobDetails({ jobId: `one-${MCP_RECENT_JOBS_LIMIT - 1}` })).resolves.toMatchObject({
+      title: `One ${MCP_RECENT_JOBS_LIMIT - 1}`,
+    });
+    await expect(getJobDetails({ jobId: `one-${MCP_RECENT_JOBS_LIMIT}` })).rejects.toThrow(NOT_FOUND);
+  });
+
+  it('given job_id and job_url, answers the job that has both when a later search reused the id', async () => {
+    // Working Nomads numbers its jobs per search (`workingnomads-<index>`).
+    const roleA = { id: 'workingnomads-0', title: 'Role A', jobUrl: 'https://wn.example.com/a', site: 'workingnomads' };
+    const roleB = { id: 'workingnomads-0', title: 'Role B', jobUrl: 'https://wn.example.com/b', site: 'workingnomads' };
+    mockClient({ post: { jobs: [roleA] } });
+    await searchJobs({ query: 'a' });
+    mockClient({ post: { jobs: [roleB] } });
+    await searchJobs({ query: 'b' });
+
+    await expect(getJobDetails({ jobId: roleA.id, jobUrl: roleA.jobUrl })).resolves.toMatchObject({ title: 'Role A' });
+    await expect(getJobDetails({ jobId: roleB.id, jobUrl: roleB.jobUrl })).resolves.toMatchObject({ title: 'Role B' });
+    // The id alone answers with the newest job that has it.
+    await expect(getJobDetails({ jobId: roleA.id })).resolves.toMatchObject({ title: 'Role B' });
   });
 });

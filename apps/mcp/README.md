@@ -69,10 +69,12 @@ Get the full details of a job that a recent search returned: the untruncated des
 | `job_url` | string | ❌       | The job's `url` from a search result |
 | `job_id`  | string | ❌       | The job's `id` from a search result  |
 
-Give one of the two. The API has no endpoint that returns a single job, so `get_job_details`
-makes no API request: it answers from the last 1000 jobs that `search_jobs`, `search_remote_jobs`
-and `get_salary_insights` received in this server process (the oldest are dropped first). Any other
-job gets the error `job not found in recent search results; call search_jobs first`.
+Give one of the two, or both from the same result: a few sources reuse an id across searches, and
+with both the job that has both is returned. The API has no endpoint that returns a single job, so
+`get_job_details` makes no API request: it answers from the last 1000 jobs that `search_jobs`,
+`search_remote_jobs` and `get_salary_insights` received in this server process (the oldest are
+dropped first; a search that returns more than 1000 jobs keeps its first 1000). Any other job gets
+the error `job not found in recent search results; call search_jobs first`.
 
 Details therefore work for jobs found by the same server process. The memory is lost when the
 process restarts, and it is shared by every client of that process. In HTTP mode
