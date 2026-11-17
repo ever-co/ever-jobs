@@ -564,6 +564,11 @@ Spec 1689 fork sync). An integration check of the two branches merged together f
 | `country` / `descriptionFormat`: this branch had made GraphQL reject values outside the REST enums; `develop` resolves country codes and names and accepts any format string. | `develop`'s lenient rules are kept (§12.6, Q-106); the pipe suite pins them. |
 | CI: both branches added a plugin to the *Feature Plugins* pattern, and `develop`'s new *Test (Core)* job already runs every career-level API suite. | One pattern with both (`…|liveness-http|legitimacy-detector|career-level-classifier`); the separate *career-level API* step was dropped rather than run the same suites twice. |
 
+> **Note (2026-11-16, T-2523):** the lenient `descriptionFormat` rule above no longer holds.
+> GraphQL `descriptionFormat` now takes `markdown`, `html`, `plain` and the documented alias
+> `text` (mapped to `plain` before the cache key); anything else is a `BAD_REQUEST`, as on REST.
+> The lenient `country` rule is unchanged. See `docs/log.md` (2026-11-16).
+
 `aggregateRaw` keeps one public entry point in the order T18 asked for: dedup and persistence,
 then the `dedupKey` stamp (Spec 1721), then career level. T19 (classify only the paginated
 window) stayed open here; it is done in §12.8.

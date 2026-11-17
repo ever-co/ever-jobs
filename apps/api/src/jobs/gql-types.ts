@@ -11,6 +11,7 @@ import {
   CrawlPolicyDto,
   DatePostedBasis,
   DatePostedPrecision,
+  DescriptionFormat,
   ExclusionPreset,
   MAX_CRAWL_RETRIES,
   SITE_CATEGORIES,
@@ -157,6 +158,13 @@ export class CrawlPolicyGqlInput extends CrawlPolicyDto {
 }
 
 /**
+ * Values `SearchJobsInput.descriptionFormat` accepts (T-2523): the
+ * `DescriptionFormat` values the sources understand, plus `'text'`, which the
+ * schema has always documented and the resolver maps to `plain`.
+ */
+const GQL_DESCRIPTION_FORMATS: readonly string[] = [...Object.values(DescriptionFormat), 'text'];
+
+/**
  * GraphQL search input.
  *
  * 🛑 Every field carries a class-validator decorator (Spec 1689). The API
@@ -166,9 +174,11 @@ export class CrawlPolicyGqlInput extends CrawlPolicyDto {
  * class-validator metadata, so without these decorators the resolver received
  * an EMPTY input — no search term, no source filter — and every GraphQL search
  * shared one cache key. The decorators mirror the GraphQL types, so nothing the
- * schema accepts is rejected, except the two enumerated lists, whose values are
- * checked exactly like the REST DTO: `siteCategories` (`SITE_CATEGORIES`,
- * Spec 1720) and `careerLevels` (`CAREER_LEVELS`, Spec 1730).
+ * schema accepts is rejected, except the enumerated fields, whose values are
+ * checked like the REST DTO: `siteCategories` (`SITE_CATEGORIES`, Spec 1720),
+ * `careerLevels` (`CAREER_LEVELS`, Spec 1730) and `descriptionFormat` (the
+ * `DescriptionFormat` values plus the alias `'text'`, which the resolver maps
+ * to `plain`; T-2523).
  * The nested `crawl` input is validated by `CrawlPolicyDto`'s own rules
  * (Spec 1690).
  * `apps/api/__tests__/integration/search-input-pipe.integration.spec.ts`
@@ -250,9 +260,15 @@ export class SearchJobsInput {
   @IsString()
   companySlug?: string;
 
-  @Field({ nullable: true, defaultValue: 'markdown', description: 'Description format: markdown, html, or text' })
+  @Field({
+    nullable: true,
+    defaultValue: 'markdown',
+    description: "Description format: markdown, html or plain ('text' is an alias of plain)",
+  })
   @IsOptional()
-  @IsString()
+  @IsIn(GQL_DESCRIPTION_FORMATS, {
+    message: `descriptionFormat must be one of: ${GQL_DESCRIPTION_FORMATS.join(', ')}`,
+  })
   descriptionFormat?: string;
 
   @Field({
