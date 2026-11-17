@@ -5,6 +5,20 @@
 
 ---
 
+## 2026-11-17 — Lane-scan fixes
+
+One dated entry for the day; each fix has its own section.
+
+### Fix: MCP `get_job_details` answers from recent search results instead of a missing API route (T-2586)
+
+**Symptom.** `getJobDetails` (`apps/mcp/src/tools.ts:582`) called `GET /api/jobs/details`, but the API registers only `POST /api/jobs/search` and `POST /api/jobs/analyze` under `api/jobs` (`apps/api/src/jobs/jobs.controller.ts:111,146,489`) and has no single-job route anywhere in `apps/api/src`. Every `get_job_details` call therefore failed with a 404 (a 401 when API-key auth is on), so the documented flow (`search_jobs`, then `get_job_details` with the returned `id`, advertised in `apps/mcp/src/index.ts:132-148`) never returned the full description or the application link. The MCP tests mocked axios, so they passed against the missing route. Spec 1689 (§ known gaps) had listed it without fixing it.
+
+**Fix.** `searchJobs` now remembers every raw API job it receives in a bounded module-level memory: the last `MCP_RECENT_JOBS_LIMIT` (1000) jobs, oldest dropped first, looked up by `id` and by `jobUrl` (a job found again becomes the newest; when two jobs share a URL the URL answers with the newer one and both stay reachable by id). `search_remote_jobs` and `get_salary_insights` go through `searchJobs`, so their jobs are remembered too. `getJobDetails` answers from that memory (id first, then URL) with the same fields as before, `full_description` being the untruncated description, and makes no API request. An unknown job throws `job not found in recent search results; call search_jobs first`. The memory is per process: it is lost on restart and, in HTTP mode (`MCP_TRANSPORT=http`), not shared between replicas, so details work for jobs found by the same server process. The tool's description in `index.ts` and `apps/mcp/README.md` say so; the README no longer lists `get_job_details` among the tools that report an unreachable API.
+
+**Files:** `apps/mcp/src/{tools,index}.ts`, `apps/mcp/__tests__/{tools-api-contract,tools-posted-time}.spec.ts`, `apps/mcp/README.md`, `.specify/specs/1689-fork-sync-hardening/spec.md` (a dated note on the known gap), `docs/log.md`.
+
+**Validation:** 7 tests fail against develop and pass now: 5 new ones in `tools-api-contract.spec.ts` (a searched job with a 2000-character description comes back whole by `job_id` and by `job_url` with no `GET` and no second API client; details still answer once the API refuses connections; an unknown id or URL rejects with "call search_jobs first"; a shared URL answers with the newer job while both ids still answer; 1250 jobs over 13 searches never leave more than 1000 remembered, the oldest 250 are gone, and a job searched again outlives the rest) and 2 of the 3 tests that had mocked `GET /api/jobs/details` for the location and posted-time contracts, now driven through `searchJobs` (the remote-only location test passes either way). Two tests that only exercised the old API request were removed (the API key on the details client, a refused connection from `get_job_details`), and the error-code fallback test now goes through `searchJobs`. `jest --testPathPatterns apps/mcp/__tests__` passes (6 suites, 99 tests; 96 on develop); `tsc -p apps/mcp/tsconfig.json --noEmit` is clean.
+
 ## 2026-11-16 — Lane-scan fixes (T-2459–T-2462)
 
 One dated entry for the day; each fix has its own section.
