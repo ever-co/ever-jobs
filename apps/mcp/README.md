@@ -48,13 +48,16 @@ Search for jobs across all sources.
 | `location`    | string  | ❌       | Location filter (e.g. "San Francisco", "Remote")   |
 | `source`      | string  | ❌       | Specific source id (use `list_sources` to see all) |
 | `company`     | string  | ❌       | Company slug for ATS sources (e.g. "stripe")       |
-| `limit`       | number  | ❌       | Max results (default: 20, max: 100)                |
+| `limit`       | number  | ❌       | Most jobs returned in total (default: 20, max: 100; a value that is not a number counts as 20). The API applies it to each source and location, and the server then returns at most this many, after `remote_only` |
 | `remote_only` | boolean | ❌       | Filter to remote positions only                    |
 | `locations`   | string[] | ❌      | Several locations in one call (schema limit 10 items; the server searches the first `EVER_JOBS_SEARCH_MAX_LOCATIONS`, default 10). Each source runs once per location; same-source duplicates are removed; `location`, when also set, is searched first |
 | `exclude_title_terms` | string[] | ❌ | Drop jobs whose title contains any of these words or phrases (up to 50; literal, whole-word, trailing `*` = prefix, never a regex) |
 | `exclude_keywords` | string[] | ❌ | Drop jobs whose title or description contains any of these words or phrases (up to 50; same rules) |
 | `exclude_presets` | string[] | ❌ | Curated exclusion lists; `security_clearance` drops roles that require a security clearance or vetting |
 | `crawl`       | object  | ❌       | Per-request crawl policy (Spec 1690), camelCase    |
+
+The response's `total` is the number of jobs in `jobs`. When the list was cut to `limit`,
+`total_found` gives how many jobs were found (after `remote_only`).
 
 `crawl` is forwarded to the API unchanged as the `crawl` field (same key in every
 `EVER_JOBS_MCP_REQUEST_KEYS` style); see [`docs/CRAWL_POLICY.md`](../../docs/CRAWL_POLICY.md).
@@ -84,7 +87,7 @@ Search for remote-only positions across all remote-first job boards (RemoteOK, R
 | --------- | ------ | -------- | -------------------------------- |
 | `query`   | string | ✅       | Job search query                 |
 | `source`  | string | ❌       | Specific remote source to target |
-| `limit`   | number | ❌       | Max results (default: 25)        |
+| `limit`   | number | ❌       | Most jobs returned (default: 25, max: 100) |
 
 ### `get_salary_insights`
 
@@ -94,7 +97,7 @@ Aggregate salary data from job search results. Returns min, max, median, P25, an
 | ---------- | ------ | -------- | -------------------------------------- |
 | `query`    | string | ✅       | Job title/role to research             |
 | `location` | string | ❌       | Location to focus on                   |
-| `limit`    | number | ❌       | Number of jobs to sample (default: 50) |
+| `limit`    | number | ❌       | Number of jobs to sample (default: 50, max: 100) |
 
 ### `compare_sources`
 

@@ -1,15 +1,20 @@
 import axios from 'axios';
 import {
+  MCP_DEFAULT_SEARCH_LIMIT,
   MCP_LOCATION_FORMAT_ENV_VAR,
+  MCP_MAX_SEARCH_LIMIT,
   MCP_REQUEST_KEYS_ENV_VAR,
   buildSearchRequestBody,
   describeRequestError,
   displayApiUrl,
   formatJobLocation,
   getJobDetails,
+  getSalaryInsights,
+  normalizeSearchLimit,
   readLocationFormat,
   readSearchRequestKeyStyle,
   searchJobs,
+  searchRemoteJobs,
 } from '../src/tools';
 
 jest.mock('axios', () => ({
@@ -255,6 +260,101 @@ describe('searchJobs — wire contract', () => {
     });
     const result = await searchJobs({ query: 'x' });
     expect(result.jobs.map((j) => j.location)).toEqual(['San Francisco', 'United States']);
+  });
+});
+
+/**
+ * T-2585 — `limit` is the most jobs a search tool returns. The API applies
+ * `resultsWanted` per source (and per location when `locations` is set), so an
+ * unfiltered search can answer with far more jobs than were asked for.
+ */
+describe('search tools — limit caps the jobs returned (T-2585)', () => {
+  function apiJobs(count: number, isRemote: boolean, idPrefix: string) {
+    return Array.from({ length: count }, (_, i) => ({
+      id: `${idPrefix}${i}`,
+      title: 'Engineer',
+      companyName: 'Acme',
+      jobUrl: `https://acme.example.com/${idPrefix}${i}`,
+      site: 'lever',
+      isRemote,
+      location: null,
+      compensation: { minAmount: 90_000 + i, maxAmount: 120_000 + i, currency: 'USD' },
+    }));
+  }
+
+  it('returns at most `limit` jobs, in API order, and reports how many were found', async () => {
+    mockClient({ post: { jobs: apiJobs(150, false, 'j') } });
+    const result = await searchJobs({ query: 'x', limit: 20 });
+
+    expect(result.jobs).toHaveLength(20);
+    expect(result.jobs.map((j) => j.id)).toEqual(Array.from({ length: 20 }, (_, i) => `j${i}`));
+    expect(result.total).toBe(20);
+    expect(result.total_found).toBe(150);
+  });
+
+  it('applies remote_only before the cut, so remote jobs listed after the others are kept', async () => {
+    mockClient({ post: { jobs: [...apiJobs(100, false, 'onsite'), ...apiJobs(50, true, 'remote')] } });
+    const result = await searchJobs({ query: 'x', limit: 20, remoteOnly: true });
+
+    expect(result.jobs).toHaveLength(20);
+    expect(result.jobs.every((j) => j.is_remote)).toBe(true);
+    expect(result.jobs.map((j) => j.id)).toEqual(Array.from({ length: 20 }, (_, i) => `remote${i}`));
+    expect(result.total).toBe(20);
+    expect(result.total_found).toBe(50);
+  });
+
+  it('treats a limit that is not a number as the default 20 (sent and returned)', async () => {
+    const client = mockClient({ post: { jobs: apiJobs(150, false, 'j') } });
+    const result = await searchJobs({ query: 'x', limit: 'abc' as unknown as number });
+
+    expect(client.post.mock.calls[0][1]).toHaveProperty('resultsWanted', 20);
+    expect(result.jobs).toHaveLength(20);
+    expect(result.total_found).toBe(150);
+  });
+
+  it('leaves a response within the limit as it was, with no total_found', async () => {
+    mockClient({ post: { jobs: apiJobs(5, false, 'j') } });
+    const result = await searchJobs({ query: 'x', limit: 20 });
+
+    expect(result.jobs).toHaveLength(5);
+    expect(result.total).toBe(5);
+    expect(result).not.toHaveProperty('total_found');
+  });
+
+  it('search_remote_jobs returns at most its default of 25 jobs', async () => {
+    mockClient({ post: { jobs: apiJobs(150, true, 'r') } });
+    const result = await searchRemoteJobs({ query: 'x' });
+
+    expect(result.jobs).toHaveLength(25);
+    expect(result.total_found).toBe(150);
+  });
+
+  it('get_salary_insights samples at most `limit` jobs', async () => {
+    mockClient({ post: { jobs: apiJobs(150, false, 'j') } });
+    const insights = await getSalaryInsights({ query: 'x', limit: 30 });
+
+    expect(insights.totalJobsSearched).toBe(30);
+    expect(insights.jobsWithSalary).toBe(30);
+  });
+});
+
+describe('normalizeSearchLimit (T-2585)', () => {
+  it('gives the default 20 for a missing, non-numeric or below-1 limit', () => {
+    for (const input of [undefined, null, 'abc', '', '  ', NaN, -Infinity, 0, -5, 0.5, true, [5], {}]) {
+      expect(normalizeSearchLimit(input)).toBe(MCP_DEFAULT_SEARCH_LIMIT);
+    }
+    expect(MCP_DEFAULT_SEARCH_LIMIT).toBe(20);
+  });
+
+  it('rounds down to a whole number and caps it at 100', () => {
+    expect(normalizeSearchLimit(1)).toBe(1);
+    expect(normalizeSearchLimit(30)).toBe(30);
+    expect(normalizeSearchLimit(2.7)).toBe(2);
+    expect(normalizeSearchLimit('30')).toBe(30);
+    expect(normalizeSearchLimit(100)).toBe(100);
+    expect(normalizeSearchLimit(500)).toBe(MCP_MAX_SEARCH_LIMIT);
+    expect(normalizeSearchLimit(Infinity)).toBe(MCP_MAX_SEARCH_LIMIT);
+    expect(MCP_MAX_SEARCH_LIMIT).toBe(100);
   });
 });
 

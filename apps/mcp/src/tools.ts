@@ -253,6 +253,10 @@ export const MCP_MAX_LOCATION_LENGTH = 200;
 export const MCP_MAX_EXCLUSION_TERMS = 50;
 /** Longest accepted exclusion term (Spec 1700). */
 export const MCP_MAX_EXCLUSION_TERM_LENGTH = 100;
+/** A search tool's `limit` when none, or no usable one, is given (T-2585). */
+export const MCP_DEFAULT_SEARCH_LIMIT = 20;
+/** Most jobs one search tool call returns, and the largest `resultsWanted` sent (T-2585). */
+export const MCP_MAX_SEARCH_LIMIT = 100;
 
 /**
  * Posting-time detail (Spec 1696). Each key is present only when the API sent
@@ -283,7 +287,14 @@ export interface JobResult extends PostedTimeDetail {
 }
 
 export interface SearchResponse {
+  /** Jobs returned in `jobs`: at most the search's `limit` (T-2585). */
   total: number;
+  /**
+   * Jobs found (after `remote_only`) before the list was cut to `limit`
+   * (T-2585). Present only when jobs were cut, so a response within the limit
+   * keeps its previous shape.
+   */
+  total_found?: number;
   jobs: JobResult[];
   sources_searched: string[];
   query: string;
@@ -550,9 +561,15 @@ export async function searchJobs(params: JobSearchParams): Promise<SearchRespons
       ? jobs.filter((j) => j.is_remote)
       : jobs;
 
+    // The API applies resultsWanted per source (and per location), so its
+    // answer can be far longer than `limit`: cut it here, after the
+    // remote_only filter (T-2585).
+    const returnedJobs = filteredJobs.slice(0, normalizeSearchLimit(params.limit));
+
     return {
-      total: filteredJobs.length,
-      jobs: filteredJobs,
+      total: returnedJobs.length,
+      ...(filteredJobs.length > returnedJobs.length ? { total_found: filteredJobs.length } : {}),
+      jobs: returnedJobs,
       sources_searched: params.source ? [params.source] : ['all'],
       query: params.query,
       ...(hasExclusions(params)
@@ -769,6 +786,27 @@ export function compareSources(): {
 // ── Helpers ────────────────────────────────────────────────────────────
 
 /**
+ * A search tool's `limit` as a whole number of jobs, 1 to
+ * {@link MCP_MAX_SEARCH_LIMIT} (T-2585). A number, or a numeric string (some
+ * clients stringify arguments), is rounded down and capped at 100; anything
+ * else, and anything below 1, gives {@link MCP_DEFAULT_SEARCH_LIMIT}.
+ *
+ * It is both the `resultsWanted` sent to the API and the most jobs
+ * {@link searchJobs} returns: the API applies `resultsWanted` per source (and
+ * per location when `locations` is set), so its answer can be far longer.
+ */
+export function normalizeSearchLimit(limit: unknown): number {
+  const n =
+    typeof limit === 'number'
+      ? limit
+      : typeof limit === 'string' && limit.trim() !== ''
+        ? Number(limit)
+        : NaN;
+  if (!(n >= 1)) return MCP_DEFAULT_SEARCH_LIMIT;
+  return Math.min(Math.floor(n), MCP_MAX_SEARCH_LIMIT);
+}
+
+/**
  * Build the `POST /api/jobs/search` body for {@link searchJobs}. See
  * {@link SearchRequestKeyStyle} for why camelCase is the default (Specs 1689,
  * 1690 §4.9).
@@ -785,7 +823,7 @@ export function buildSearchRequestBody(
   style: SearchRequestKeyStyle = readSearchRequestKeyStyle(),
 ): Record<string, unknown> {
   const siteType = params.source ? [params.source] : undefined;
-  const resultsWanted = Math.min(params.limit ?? 20, 100);
+  const resultsWanted = normalizeSearchLimit(params.limit);
   const location = params.location ?? '';
 
   const camel: Record<string, unknown> = {
