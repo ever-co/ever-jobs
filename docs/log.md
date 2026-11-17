@@ -19,7 +19,7 @@ One dated entry for the day; each fix has its own section.
 
 **Validation:** the 2 new tests (a two-page scrape and a scrape whose request fails with a 500, both with `AUTHENTICJOBS_API_KEY=test-key-123` and a spy on every `Logger.prototype` level) fail against develop, because the `Fetching …` lines hold `api_key=test-key-123`, and pass now. The paging test also checks that every request still sends `api_key`, `method`, `format`, `page`, `count` and `keyword`; the failure test checks that `api_key` was sent. The package's e2e suite still passes (3 tests; it returns early without a key). Both CI type-checks are clean and `npm run lint:docs` passes.
 
-## 2026-11-17 — Lane-scan fixes
+### Lane-scan fixes
 
 One dated entry for the day; each fix has its own section.
 
