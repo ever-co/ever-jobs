@@ -10,7 +10,7 @@
  *
  * Tools:
  *   - search_jobs: Search for jobs across all sources
- *   - get_job_details: Get detailed information about a specific job
+ *   - get_job_details: Full details of a job a recent search returned
  *   - list_sources: List all available job sources
  *   - search_remote_jobs: Convenience tool for remote job search
  *   - get_salary_insights: Salary analysis for a given role
@@ -131,18 +131,21 @@ function createServer(): Server {
       {
         name: 'get_job_details',
         description:
-          'Get detailed information about a specific job posting by its URL. ' +
-          'Returns the full job description, requirements, salary info, and application link.',
+          'Get the full details of a job that search_jobs, search_remote_jobs or get_salary_insights ' +
+          'returned, by its job_id or job_url (give both from the same result when you have them). ' +
+          'Returns the full (untruncated) description, salary info ' +
+          'and application link. Answers from the last 1000 jobs this server found in its searches, ' +
+          'without a new search; any other job is an error asking you to call search_jobs first.',
         inputSchema: {
           type: 'object' as const,
           properties: {
             job_url: {
               type: 'string',
-              description: 'The full URL of the job posting to get details for',
+              description: 'The job URL (the url field of a search_jobs result)',
             },
             job_id: {
               type: 'string',
-              description: 'The Ever Jobs internal job ID (returned from search_jobs)',
+              description: 'The job ID (the id field of a search_jobs result)',
             },
           },
           required: [],

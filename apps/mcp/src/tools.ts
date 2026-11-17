@@ -522,10 +522,84 @@ const SOURCES: SourceInfo[] = [
   { name: 'EcoJobs', id: 'ecojobs', type: 'job_board', requires_company_slug: false, description: 'Environmental and conservation job board' },
 ];
 
+// ── Recent search results (get_job_details) ───────────────────────────
+//
+// The API has no route that returns one job (it serves `POST /api/jobs/search`
+// and `POST /api/jobs/analyze` only), so `getJobDetails` answers from the raw
+// API jobs that this process's `searchJobs` calls received (T-2586). The memory
+// is per process: in HTTP mode (`MCP_TRANSPORT=http`) each replica keeps its
+// own, so details work for jobs found by the same server process.
+
+/** How many jobs `searchJobs` remembers for `getJobDetails`; the oldest are dropped first. */
+export const MCP_RECENT_JOBS_LIMIT = 1000;
+
+const JOB_NOT_FOUND = 'job not found in recent search results; call search_jobs first';
+
+interface RecentJob {
+  /** The job object exactly as `POST /api/jobs/search` returned it. */
+  job: Record<string, unknown>;
+  /** The lookup keys (`id:<id>`, `url:<jobUrl>`) that point at this job. */
+  keys: string[];
+}
+
+/** Remembered jobs, oldest first (a Set keeps insertion order). */
+const recentJobs = new Set<RecentJob>();
+/** Lookup by `id:<id>` and `url:<jobUrl>`: at most two keys per remembered job. */
+const recentJobsByKey = new Map<string, RecentJob>();
+
+function lookupKey(kind: 'id' | 'url', value: unknown): string | null {
+  const text = nonEmpty(value);
+  return text ? `${kind}:${text}` : null;
+}
+
+/** The lookup keys of a raw API job: `id:<id>` and `url:<jobUrl>`, when present. */
+function jobKeys(raw: Record<string, unknown>): string[] {
+  return [lookupKey('id', raw.id), lookupKey('url', raw.jobUrl ?? raw.job_url)].filter(
+    (key): key is string => key !== null,
+  );
+}
+
+/**
+ * Remember one raw API job under its id and its job URL. A job found again
+ * becomes the newest. A key that pointed at another job now points at this one;
+ * the other job stays reachable by its remaining key, and is dropped when it
+ * has none left. Past {@link MCP_RECENT_JOBS_LIMIT} jobs the oldest is dropped.
+ */
+function rememberJob(job: unknown): void {
+  if (!job || typeof job !== 'object') return;
+  const raw = job as Record<string, unknown>;
+  const keys = jobKeys(raw);
+  if (keys.length === 0) return;
+
+  for (const key of keys) {
+    const previous = recentJobsByKey.get(key);
+    if (!previous) continue;
+    previous.keys = previous.keys.filter((k) => k !== key);
+    if (previous.keys.length === 0) recentJobs.delete(previous);
+  }
+
+  const entry: RecentJob = { job: raw, keys };
+  recentJobs.add(entry);
+  for (const key of keys) recentJobsByKey.set(key, entry);
+
+  while (recentJobs.size > MCP_RECENT_JOBS_LIMIT) {
+    const oldest = recentJobs.values().next().value;
+    if (!oldest) break;
+    recentJobs.delete(oldest);
+    for (const key of oldest.keys) recentJobsByKey.delete(key);
+  }
+}
+
+/** How many jobs `getJobDetails` can currently answer for (never above {@link MCP_RECENT_JOBS_LIMIT}). */
+export function recentJobCount(): number {
+  return recentJobs.size;
+}
+
 // ── Tool Implementations ───────────────────────────────────────────────
 
 /**
- * Search for jobs via the Ever Jobs API.
+ * Search for jobs via the Ever Jobs API. Every job received is remembered for
+ * {@link getJobDetails}.
  */
 export async function searchJobs(params: JobSearchParams): Promise<SearchResponse> {
   const client = getClient();
@@ -534,6 +608,10 @@ export async function searchJobs(params: JobSearchParams): Promise<SearchRespons
     const response = await client.post('/api/jobs/search', buildSearchRequestBody(params));
 
     const data = response.data;
+    // A search across the whole catalogue can return more jobs than the memory
+    // holds. Remember the first ones (the ones a client reads first), so the
+    // tail of this response cannot push them out.
+    for (const job of (data.jobs ?? []).slice(0, MCP_RECENT_JOBS_LIMIT)) rememberJob(job);
     const locationFormat = readLocationFormat();
     const jobs: JobResult[] = (data.jobs ?? []).map((job: any) => ({
       id: job.id ?? '',
@@ -571,46 +649,52 @@ export async function searchJobs(params: JobSearchParams): Promise<SearchRespons
 }
 
 /**
- * Get detailed information about a specific job.
+ * Get detailed information about a job that a recent search returned, by its
+ * id (looked up first) or its job URL; given both, the job that has both wins.
+ * Answers from the jobs {@link searchJobs} remembered and makes no API request;
+ * an unknown job is an error asking the caller to search first.
  */
 export async function getJobDetails(params: {
   jobUrl?: string;
   jobId?: string;
 }): Promise<JobDetailsResponse> {
-  if (!params.jobUrl && !params.jobId) {
+  const idKey = lookupKey('id', params.jobId);
+  const urlKey = lookupKey('url', params.jobUrl);
+  if (!idKey && !urlKey) {
     throw new Error('Either job_url or job_id must be provided');
   }
 
-  const client = getClient();
-
-  try {
-    const response = await client.get('/api/jobs/details', {
-      params: {
-        url: params.jobUrl,
-        id: params.jobId,
-      },
-    });
-
-    const job = response.data;
-    return {
-      id: job.id ?? '',
-      title: job.title ?? '',
-      company: job.companyName ?? job.company_name ?? '',
-      location: formatJobLocation(job.location, readLocationFormat()),
-      url: job.jobUrl ?? job.job_url ?? '',
-      description: truncateDescription(job.description),
-      full_description: job.description ?? null,
-      date_posted: job.datePosted ?? job.date_posted ?? null,
-      ...postedTimeDetail(job),
-      is_remote: job.isRemote ?? job.is_remote ?? false,
-      source: job.site ?? '',
-      salary: formatSalary(job.compensation),
-      department: job.department ?? null,
-      application_url: job.applicationUrl ?? job.application_url ?? job.jobUrl ?? null,
-    };
-  } catch (err: any) {
-    throw new Error(`Failed to get job details: ${describeRequestError(err)}`);
+  const byId = idKey ? recentJobsByKey.get(idKey) : undefined;
+  const byUrl = urlKey ? recentJobsByKey.get(urlKey) : undefined;
+  // Given both, answer with the job that has both. Some sources reuse an id
+  // across searches (Working Nomads numbers its jobs per search), so the id
+  // alone can point at a newer, different job while the URL still names the
+  // one the caller means.
+  const hasBoth = (entry: RecentJob | undefined): boolean =>
+    !!entry && !!idKey && !!urlKey && jobKeys(entry.job).includes(idKey) && jobKeys(entry.job).includes(urlKey);
+  const found = (hasBoth(byUrl) && !hasBoth(byId) ? byUrl : byId) ?? byUrl;
+  if (!found) {
+    throw new Error(JOB_NOT_FOUND);
   }
+
+  const job = found.job as any;
+  return {
+    id: job.id ?? '',
+    title: job.title ?? '',
+    company: job.companyName ?? job.company_name ?? '',
+    location: formatJobLocation(job.location, readLocationFormat()),
+    url: job.jobUrl ?? job.job_url ?? '',
+    description: truncateDescription(job.description),
+    full_description: job.description ?? null,
+    date_posted: job.datePosted ?? job.date_posted ?? null,
+    ...postedTimeDetail(job),
+    is_remote: job.isRemote ?? job.is_remote ?? false,
+    source: job.site ?? '',
+    salary: formatSalary(job.compensation),
+    department: job.department ?? null,
+    application_url:
+      job.applyUrl ?? job.apply_url ?? job.applicationUrl ?? job.application_url ?? job.jobUrl ?? null,
+  };
 }
 
 /**
