@@ -5,9 +5,19 @@
 
 ---
 
-## 2026-11-17 — Lane-scan fixes (T-2584)
+## 2026-11-17 — Lane-scan fixes
 
-One dated entry for the day; each fix has its own section.
+One dated entry for the day; each fix has its own section. (The day had two `## 2026-11-17` headings, from #147 and #149/#150, which `npm run lint:docs` reports as a duplicate entry; they are merged into this one.)
+
+### Fix: `extractSalary` reads a currency code written only after the second amount (T-2634)
+
+**Symptom.** In the extended grammar no range shape of `extractSalary` (`packages/common/src/utils/helpers.ts`) accepted a currency that comes only after the maximum. The prefix shape (`buildSalaryRegexPrefix`) starts with `(?:${symbolAlt})\s*(?<min>…`, so it needs a currency before the first amount; the suffix shape (`buildSalaryRegexSuffix`) is `(?<min>…)\s*(?<minK>[kK]?\b)…\s*(?:${symbolAlt})`, so it needs one right after the first amount; and the bare shape runs only when `detected.confidence === 'country'`. `60,000 - 80,000 USD`, `60K-80K USD`, `40,000 - 50,000 GBP` and `50.000 - 70.000 EUR` therefore gave the all-null envelope, while `USD 60,000 - 80,000` and `60,000 USD - 80,000 USD` parsed. Every plugin that calls `extractSalary` missed this form. Remotive (`packages/plugins/source-remotive/src/remotive.service.ts`) read `60,000 - 80,000 USD` with its own regex before #149; since then it gave no compensation, because the ISO code makes `parseSalaryCurrency` report `iso`, which blocks its retry with the USA hint.
+
+**Fix.** A fourth range shape, `buildSalaryRegexTrailing`, in the extended grammar only: number, optional `k`, optional pay-period token, dash, number, optional `k`, then the symbol or ISO code, then an optional pay-period token (`<num>K?\s*[<per>\s*]<dash>\s*<num>K?\s*<sym>[\s*<per>]`). It is tried after the prefix and suffix shapes; being a dash range, it comes before an unqualified `to` range, which the grammar uses only when no dash range exists. Like the bare shape it is dash-only, and it gets the bare path's prose guard (`selectTrailingCurrencyRange`): a match whose raw minimum is under `lowerLimit` is skipped unless a `k` suffix or a pay-period token is present, so `5 - 7 USD` and `team of 100 - 150 EUR` stay null while `20 - 25 USD/hr` reads hourly. A symbol followed on the same line by a number opens the next amount instead of closing this one (`2020 - 2023 $50,000 grant` stays null). A skipped match does not hide a later reading: the scan goes on, and with no match the `to`-range, single-bound and other fallbacks run as before. The legacy grammar is unchanged, and so is the reading of EUR amounts with comma thousands (`60,000 - 80,000 EUR` stays null; that is a separate locale question).
+
+**Files:** `packages/common/src/utils/helpers.ts`, `packages/common/__tests__/salary.spec.ts`, `packages/plugins/source-remotive/__tests__/remotive.service.spec.ts`, `docs/log.md`.
+
+**Validation:** 17 new tests; 10 fail against develop and pass now. In `salary.spec.ts` (new `describe` "a currency written only after the maximum (T-2634)", 16 tests) the four strings above give yearly 60000–80000 USD, 60000–80000 USD, 40000–50000 GBP and 50000–70000 EUR, as do `60,000 – 80,000 $` and `Salary: 90,000 - 110,000 USD, plus equity`; `20 - 25 USD/hr` and `25 - 30 USD per hour` read hourly (41600–52000 under `enforceAnnualSalary`); `5 - 7 USD` is null with the default `lowerLimit` and hourly 5–7 USD with `lowerLimit: 4`; a trailing-currency range beats an unqualified `to` range before it (develop read the hardware figure as monthly 10000–20000). The controls that pass before and after pin that `USD 60,000 - 80,000`, `60,000 USD - 80,000 USD` and an anchored range ahead of a trailing one keep their reading, that a skipped match leaves `from $40,000 per year` readable, that `60,000 - 80,000 EUR` and the legacy grammar stay null, and that two inputs with a 50,000-space run finish in under 500 ms. In `remotive.service.spec.ts` the new test expects yearly 60000–80000 USD for `60,000 - 80,000 USD` and `60K-80K USD`.
 
 ### Fix: Authentic Jobs no longer writes its API key to the log (T-2584)
 
@@ -18,10 +28,6 @@ One dated entry for the day; each fix has its own section.
 **Files:** `packages/plugins/source-authenticjobs/src/authenticjobs.service.ts`, `packages/plugins/source-authenticjobs/__tests__/authenticjobs.service.spec.ts` (new), `docs/log.md`.
 
 **Validation:** the 2 new tests (a two-page scrape and a scrape whose request fails with a 500, both with `AUTHENTICJOBS_API_KEY=test-key-123` and a spy on every `Logger.prototype` level) fail against develop, because the `Fetching …` lines hold `api_key=test-key-123`, and pass now. The paging test also checks that every request still sends `api_key`, `method`, `format`, `page`, `count` and `keyword`; the failure test checks that `api_key` was sent. The package's e2e suite still passes (3 tests; it returns early without a key). Both CI type-checks are clean and `npm run lint:docs` passes.
-
-## 2026-11-17 — Lane-scan fixes
-
-One dated entry for the day; each fix has its own section.
 
 ### Fix: MCP `get_job_details` answers from recent search results instead of a missing API route (T-2586)
 

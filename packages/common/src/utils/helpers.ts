@@ -566,6 +566,10 @@ export interface ExtractSalaryOptions {
  *   `"relocation up to $10,000"`) is never read as the salary, and a `to`
  *   range with neither a pay-period token nor a salary word before it is
  *   used only when no dash range or qualified `to` range exists in the text.
+ *   T-2634 — it also reads a dash range whose currency follows only the
+ *   maximum (`"60,000 - 80,000 USD"`, `"60K-80K USD"`), after the anchored
+ *   shapes; its raw minimum must reach `lowerLimit` unless a `k` suffix or a
+ *   pay-period token is present, so `"5 - 7 USD"` stays unread.
  * - `'legacy'` — the grammar before Spec 1695: dash separators only, no
  *   pay-period tokens (a token after the first amount breaks the match, one
  *   after the second is ignored), interval from magnitude unless
@@ -943,7 +947,7 @@ function periodFromTokens(
 }
 
 /**
- * Spec 1695 — the three range regexes are built from a handful of inputs
+ * Spec 1695 — the range regexes are built from a handful of inputs
  * (currency alternation × locale number shape × grammar), so each distinct
  * one is compiled once and reused. The plain ones carry no `g` / `y` flag, so
  * a shared instance holds no `lastIndex` state between calls; the global
@@ -1100,6 +1104,57 @@ function buildSalaryRegexBare(
       `(?<max>${numSrc})\\s*(?<maxK>[kK]?\\b)` +
       `(?:\\s*(?<maxPer>${SALARY_PERIOD_TOKEN_SRC}))?`,
   );
+}
+
+/**
+ * T-2634 — build the trailing-currency salary regex (extended grammar only):
+ * the currency symbol or ISO code follows ONLY the maximum, as in
+ * `"60,000 - 80,000 USD"`, `"60K-80K USD"` or `"50.000 - 70.000 EUR"`. Same
+ * named groups as the bare variant. Form:
+ *
+ *   <num>K?\s*[<per>\s*]<dash>\s*<num>K?\s*<sym>[\s*<per>]
+ *
+ * Dash-only, like the bare variant: the minimum carries no currency, so a
+ * word separator would turn prose (`"5 to 7 USD"`) into candidates. A symbol
+ * followed on the same line by a number opens the next amount rather than
+ * closing this one (`"2020 - 2023 $50,000 grant"`), so it does not count.
+ * Global: {@link selectTrailingCurrencyRange} scans every match.
+ */
+function buildSalaryRegexTrailing(symbolAlt: string, numSrc: string): RegExp {
+  return new RegExp(
+    `(?<min>${numSrc})\\s*(?<minK>[kK]?\\b)\\s*` +
+      `(?:(?<minPer>${SALARY_PERIOD_TOKEN_SRC})\\s*)?` +
+      `[-–—]\\s*` +
+      `(?<max>${numSrc})\\s*(?<maxK>[kK]?\\b)\\s*(?:${symbolAlt})(?![^\\S\\r\\n]*\\d)` +
+      `(?:\\s*(?<maxPer>${SALARY_PERIOD_TOKEN_SRC}))?`,
+    'g',
+  );
+}
+
+/**
+ * T-2634 — the first trailing-currency range in `text` that reads as pay.
+ * Its minimum carries no currency, so it gets the bare path's prose guard: a
+ * match whose raw minimum is under `lowerLimit` is skipped (`"5 - 7 USD"`)
+ * unless a `k` suffix or a pay-period token marks it as pay
+ * (`"60K-80K USD"`, `"20 - 25 USD/hr"`). A skipped match never hides a later
+ * reading: the scan goes on, and with no match the caller falls through to
+ * the `to` range, single-bound and other fallbacks as before.
+ */
+function selectTrailingCurrencyRange(
+  text: string,
+  pattern: RegExp,
+  locale: SalaryLocale,
+  lowerLimit: number,
+): RangeCandidate | null {
+  pattern.lastIndex = 0;
+  for (let found = pattern.exec(text); found !== null; found = pattern.exec(text)) {
+    const groups = found.groups ?? {};
+    const rawMin = parseSalaryNumber(groups.min ?? '', locale);
+    const kSuffixed = /k/i.test(`${groups.minK ?? ''}${groups.maxK ?? ''}`);
+    const marked = kSuffixed || Boolean(groups.minPer || groups.maxPer);
+    if (rawMin !== null && (marked || rawMin >= lowerLimit)) return { match: found, strong: true };
+  }
+  return null;
 }
 
 /**
@@ -1375,7 +1430,17 @@ export function extractSalary(
         salaryStr,
         cachedSalaryRegex(`suffix-g|${cacheKey}`, () => new RegExp(suffixPattern.source, 'g')),
       );
-      picked = fromSuffix?.strong ? fromSuffix : (fromPrefix ?? fromSuffix);
+      picked = fromSuffix?.strong ? fromSuffix : null;
+      // T-2634 — a dash range whose currency follows only the maximum
+      // ("60,000 - 80,000 USD"): tried after the anchored shapes and, being a
+      // dash range, before an unqualified `to` range.
+      picked ??= selectTrailingCurrencyRange(
+        salaryStr,
+        cachedSalaryRegex(`trailing-g|${cacheKey}`, () => buildSalaryRegexTrailing(symbolAlt, numSrc)),
+        locale,
+        lowerLimit,
+      );
+      picked ??= fromPrefix ?? fromSuffix;
     }
     match = picked?.match ?? null;
   }
