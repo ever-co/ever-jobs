@@ -5,6 +5,20 @@
 
 ---
 
+## 2026-11-17 — Lane-scan fixes
+
+One dated entry for the day; each fix has its own section.
+
+### Fix: `/api/jobs/analyze` no longer annualises a legacy-grammar description salary a second time (T-2605)
+
+**Symptom.** With `EVER_JOBS_SALARY_GRAMMAR=legacy` and `enforceAnnualSalary: true`, `postProcessCompensation` (`packages/common/src/utils/helpers.ts`, legacy path) parses a description salary already annualised but keeps its source interval, as the legacy rule always did (pinned in `packages/common/__tests__/salary.spec.ts`: `Pay: $20 - $25/hr` gives `hourly` 41,600 - 52,000 with `salarySource: 'description'`). `AnalyticsService.summarize()` (`packages/analytics/src/analytics.service.ts`) annualised every compensation by its interval and took no options, so that job counted as 86,528,000 - 108,160,000 in `summary.salaryStats` of `POST /api/jobs/analyze`, CLI `search --analyze` and CLI `compare`. T-2522 recorded this as a known limit. The default grammar was not affected.
+
+**Fix.** `@ever-jobs/common` exports `activeSalaryGrammar()`, the process-wide grammar in force (the existing `resolveSalaryGrammar` with no per-call option). `AnalyticsService.analyze()` and `summarize()` take an optional `{ enforceAnnualSalary?: boolean }` (new exported type `AnalyzeOptions`; default `false`). When the grammar is `legacy`, `enforceAnnualSalary` is true and a job's `salarySource` is `description`, `summarize()` takes its amounts as yearly and does not call `convertToAnnual`; every other case is annualised as before. `JobsController.analyzeJobs` passes `input.enforceAnnualSalary`; CLI `search --analyze` passes the scrape input's `enforceAnnualSalary` (the `--enforce-annual-salary` flag, or the `--stdin` JSON's value); CLI `compare` passes its base input's (compare has no flag for it, so `false`). The "Known limit" note in `summarize()` is gone. The `JobSummaryDto` shape is unchanged.
+
+**Files:** `packages/common/src/utils/helpers.ts`, `packages/analytics/src/analytics.service.ts`, `packages/analytics/__tests__/analytics.spec.ts`, `apps/api/src/jobs/jobs.controller.ts`, `apps/api/src/jobs/__tests__/{jobs.controller,search-filters.api}.spec.ts`, `apps/cli/src/commands/{search,compare}.command.ts`, `apps/cli/__tests__/search-analyze.command.spec.ts`, `docs/API_CHANGELOG.md`, `docs/log.md`.
+
+**Validation:** 8 new tests. Against develop, 5 fail: in `analytics.spec.ts` a description-sourced hourly 41,600 - 52,000 under legacy + `enforceAnnualSalary` gives `minSalary` 41,600 (develop: 86,528,000), the same job beside a yearly 90,000 - 120,000 gives 41,600 / 120,000 / avg 65,800, and `analyze(jobs, { enforceAnnualSalary: true })` passes the flag to the summary; in `jobs.controller.spec.ts` `/analyze` passes `enforceAnnualSalary: true` to `analyze()`; in `search-analyze.command.spec.ts` `search --analyze --enforce-annual-salary` under legacy prints `Salary range (USD): 41,600 - 52,000 (avg 41,600)`. The 3 controls pass before and after (annualised as today): a description-sourced hourly 20 - 25 without the flag, a `direct_data` hourly 20 - 25 under legacy with the flag, and the default grammar (unset and `extended`). Two existing controller assertions now expect the second `analyze()` argument. The env var is restored after each test.
+
 ## 2026-11-16 — Lane-scan fixes (T-2459–T-2462)
 
 One dated entry for the day; each fix has its own section.

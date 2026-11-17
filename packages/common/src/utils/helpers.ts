@@ -589,6 +589,15 @@ function resolveSalaryGrammar(option: SalaryGrammar | undefined): SalaryGrammar 
 }
 
 /**
+ * T-2605 — the process-wide {@link SalaryGrammar} in force right now: `legacy`
+ * when `EVER_JOBS_SALARY_GRAMMAR=legacy`, `extended` otherwise. This is the
+ * grammar {@link postProcessCompensation} applies when the caller passes none.
+ */
+export function activeSalaryGrammar(): SalaryGrammar {
+  return resolveSalaryGrammar(undefined);
+}
+
+/**
  * Spec 012 / T03 — `extractSalary` result envelope. Shape unchanged
  * from the original (FR-10), now exported as a public type so plugin
  * authors can write `Promise<ExtractSalaryResult>`-typed adapters.

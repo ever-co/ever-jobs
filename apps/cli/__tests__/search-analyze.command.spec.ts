@@ -1,6 +1,6 @@
 import 'reflect-metadata';
 import { AnalyticsService } from '@ever-jobs/analytics';
-import { CompensationDto, CompensationInterval, JobPostDto } from '@ever-jobs/models';
+import { CompensationDto, CompensationInterval, JobPostDto, SalarySource } from '@ever-jobs/models';
 import { SearchCommand } from '../src/commands/search.command';
 
 /**
@@ -45,5 +45,43 @@ describe('search --analyze: salary range', () => {
     expect(salaryLine).toBeDefined();
     expect(salaryLine).toContain('EUR');
     expect(salaryLine).not.toContain('$');
+  });
+});
+
+/**
+ * T-2605 — under `EVER_JOBS_SALARY_GRAMMAR=legacy`, `--enforce-annual-salary`
+ * leaves a description salary yearly but labelled with its source interval
+ * (`Pay: $20 - $25/hr` → hourly 41600-52000); `--analyze` must not annualise
+ * it a second time.
+ */
+describe('search --analyze --enforce-annual-salary: legacy description salary', () => {
+  const GRAMMAR_ENV = 'EVER_JOBS_SALARY_GRAMMAR';
+  const shellGrammar = process.env[GRAMMAR_ENV];
+
+  afterEach(() => {
+    if (shellGrammar === undefined) delete process.env[GRAMMAR_ENV];
+    else process.env[GRAMMAR_ENV] = shellGrammar;
+  });
+
+  it('prints the yearly amounts as they are', async () => {
+    process.env[GRAMMAR_ENV] = 'legacy';
+    const job = new JobPostDto({
+      id: 'd-1',
+      site: 'linkedin',
+      title: 'Engineer',
+      companyName: 'Acme',
+      jobUrl: 'https://example.com/d-1',
+      compensation: new CompensationDto({ interval: CompensationInterval.HOURLY, minAmount: 41600, maxAmount: 52000, currency: 'USD' }),
+      salarySource: SalarySource.DESCRIPTION,
+    });
+    const jobsService = { searchJobs: jest.fn().mockResolvedValue([job]) };
+    const cmd = new SearchCommand(jobsService as any, new AnalyticsService());
+
+    await cmd.run([], { searchTerm: 'engineer', analyze: true, enforceAnnualSalary: true } as any);
+
+    expect(jobsService.searchJobs.mock.calls[0][0].enforceAnnualSalary).toBe(true);
+    const lines = stderr.mock.calls.map((c) => String(c[0]));
+    const salaryLine = lines.find((l) => l.startsWith('Salary range'));
+    expect(salaryLine).toBe(`Salary range (USD): ${(41600).toLocaleString()} - ${(52000).toLocaleString()} (avg ${(41600).toLocaleString()})`);
   });
 });
