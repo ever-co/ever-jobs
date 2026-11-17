@@ -23,6 +23,16 @@ One dated entry for the day; each fix has its own section.
 
 One dated entry for the day; each fix has its own section.
 
+### Fix: MCP `search_remote_jobs` searches the remote boards, not the whole catalogue (T-2546)
+
+**Symptom.** `search_remote_jobs({ query })` (`apps/mcp/src/tools.ts`) built the list of remote boards but used it only to check `source`. With no `source`, or one that is not a remote board (e.g. `linkedin`, which was dropped without a word), it called `searchJobs` with no source, so `buildSearchRequestBody` sent no `siteType` and the API (`apps/api/src/jobs/jobs.service.ts`, default selection) fanned out over every non-ATS source. The call often hit the MCP client's 60 s timeout (the API's fan-out deadline defaults to 120 s), the jobs that did come back were not from the remote-first boards the tool describes, and `sources_searched` said `['all']`.
+
+**Fix.** `JobSearchParams` gets an optional `sources?: string[]`. `buildSearchRequestBody` sends it as `siteType` (`site_type` in the snake style) when `source` is not set; with neither, the body is unchanged (no source key). `searchRemoteJobs` passes every `type: 'remote'` id of the MCP source catalogue (12 boards, all valid `Site` values) as `sources` when no remote `source` is given; a remote `source` still narrows the search to that one board. `sources_searched` now reports the list that was sent (`['all']` only when none was). The `search_jobs` tool does not expose `sources`.
+
+**Files:** `apps/mcp/src/tools.ts`, `apps/mcp/__tests__/tools-api-contract.spec.ts`, `apps/mcp/README.md`, `docs/log.md`.
+
+**Validation:** 4 of the 8 new tests fail against develop's `tools.ts` (no `siteType` for `{ query: 'backend' }`, for `source: 'linkedin'`, for the snake style, and for a body built with `sources`); the controls (`source: 'remotive'` posts `['remotive']`, no source and no sources sends no `siteType`, `source` wins over `sources`, the catalogue lists remote boards) pass before and after. `jest --testPathPatterns apps/mcp/__tests__` passes (6 suites, 104 tests), and `tsc --project tsconfig.typecheck.json --noEmit` and `npm run lint:docs` pass.
+
 ### Fix: `/api/jobs/analyze` and CLI `--analyze` salary stats are annualised and in one currency (T-2522)
 
 **Symptom.** `AnalyticsService.summarize()` (`packages/analytics/src/analytics.service.ts`) took `minSalary`, `maxSalary` and `avgSalary` over the raw amounts and never read `compensation.interval`, so one job at 25–35 USD an hour plus one at 90,000–120,000 USD a year reported `minSalary: 25` and `avgSalary: 45013`. `enforceAnnualSalary` defaults to `false`, so hourly and monthly amounts reach the analysis as scraped. EUR or INR amounts were averaged into the same figures, and `currency` was whichever job came first. A job with only a `maxAmount` was not counted in `withSalaryCount` (nor in `compareSites`' `withSalary`), and a `0` placeholder `minAmount` with a real `maxAmount` was not counted either. The CLI printed the range with a fixed `$`. Used by `POST /api/jobs/analyze`, CLI `search --analyze` and the `summary` / `siteComparison` of CLI `compare`.
