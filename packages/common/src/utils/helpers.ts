@@ -952,7 +952,8 @@ function periodFromTokens(
  * one is compiled once and reused. The plain ones carry no `g` / `y` flag, so
  * a shared instance holds no `lastIndex` state between calls; the global
  * copies the extended grammar scans with are reset by {@link selectRangeMatch}
- * before every use (the scan is synchronous, so no two calls interleave).
+ * or {@link selectTrailingCurrencyRange} before every use (the scan is
+ * synchronous, so no two calls interleave).
  */
 const SALARY_REGEX_CACHE = new Map<string, RegExp>();
 
