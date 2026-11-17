@@ -5,9 +5,11 @@
 
 ---
 
-## 2026-11-17 — Lane-scan fixes
+## 2026-11-17 — Lane-scan fixes (T-2584, T-2586, T-2587, T-2606)
 
-One dated entry for the day; each fix has its own section. (The day had two `## 2026-11-17` headings, from #147 and #149/#150, which `npm run lint:docs` reports as a duplicate entry; they are merged into this one.)
+### Lane-scan fixes (T-2584, T-2586, T-2587, T-2607)
+
+One dated entry for the day; each fix has its own section.
 
 ### Fix: `extractSalary` reads a currency code written only after the second amount (T-2634)
 
@@ -50,6 +52,26 @@ One dated entry for the day; each fix has its own section. (The day had two `## 
 **Files:** `packages/plugins/source-remotive/src/remotive.service.ts`, `packages/plugins/source-remotive/__tests__/remotive.service.spec.ts` (new; the package had no unit test), `docs/log.md`.
 
 **Validation:** the new `remotive.service.spec.ts` (8 tests) mocks `createHttpClient` with jobs whose salary is `$170k - $200k`, `$14 - $20/hour`, `$60,000 - $80,000` and `''`, and expects yearly 170000–200000 USD, hourly 14–20 USD, yearly 60000–80000 USD and `null`, one job at a time and as one mixed feed. It also checks that `£60,000 - £80,000` and `€50k - €70k` keep GBP and EUR, that `60,000 - 80,000` and `70K-80K` are read as yearly USD, and that `5 - 7 years experience` gives `null`. Against develop 6 fail and 2 pass (the comma range and the empty salary); all 8 pass now.
+
+### Fix: CLI `--format summary` counts max-only salaries in "With salary data" (T-2606)
+
+**Symptom.** `toSummary()` in `apps/cli/src/commands/search.command.ts` counted a job as having salary data with `if (job.compensation?.minAmount) salaryCount++;`, and printed the count as `With salary data: N`. A compensation with only a `maxAmount` (the default salary grammar reads upper-only figures such as `"Compensation: up to $90,000"`), or with a `0` placeholder `minAmount` and a real `maxAmount`, was not counted, while a negative `minAmount` was. So `ever-jobs search … -f summary` reported fewer jobs with salary data than `withSalaryCount` of `--analyze` on the same jobs, which has used `hasSalaryAmount` since T-2522.
+
+**Fix.** `toSummary()` counts a job when `hasSalaryAmount(job.compensation)` holds (`@ever-jobs/common`: a finite bound above zero, min or max), the same rule `AnalyticsService` uses for `withSalaryCount` and `compareSites`' `withSalary`. A `0` / `0` placeholder, a negative amount and a job with no compensation are not counted. The rest of the summary is unchanged.
+
+**Files:** `apps/cli/src/commands/search.command.ts`, `apps/cli/__tests__/search-summary.command.spec.ts` (new), `docs/log.md`.
+
+**Validation:** 7 new tests run `SearchCommand` with a mocked `jobsService` and `format: 'summary'` and read the `With salary data` line from stdout. 4 fail against develop (a max-only salary and a `0` minimum with a real maximum give 0 instead of 1; a negative `minAmount` gives 1 instead of 0; a mix of six jobs gives 2 where `--analyze` reports 3) and pass now; the 3 controls (a `0` / `0` placeholder and a job without compensation are not counted, a yearly min-max salary is) pass before and after.
+
+### Test: the redirect-pacing red controls no longer depend on CI speed (T-2607)
+
+**Symptom.** Two red-control tests in `packages/common/__tests__/http-client-redirect-pacing.spec.ts` ended with a wall-clock upper bound across real loopback HTTP requests: `expect(hop.arrivedAt - softyGrants[0].at).toBeLessThan(1000)` ("red control: EVER_JOBS_CRAWL_PACE_REDIRECTS=false follows the hop inside the aggregator slot, at once") and `expect(paths[1].arrivedAt - grants[0].at).toBeLessThan(1000)` ("... both requests in one slot, back to back"). On a slow or busy CI pod the hop can reach the server more than 1 s after the first grant without ever waiting for a slot; the first test failed that way (about 3.1 s) on PR #144, which only changes `apps/mcp`. The file's own comment already said the gap between arrivals is not a valid bound.
+
+**Fix.** Test-only. `pacedClient()` now also records every `HostLimiter.acquire` call with its bucket and `grantedAtOnce` (whether the limiter granted the slot inside the call, as it does when the bucket is free and ready; a request held behind `maxConcurrent`, the interval, the idle gap or a cool-down is not). The two red controls drop the upper bound and assert on the limiter instead: the hop took no slot of its own (the grant count, already asserted) and never queued behind the Softy bucket (the only acquires are the requests the test makes, each granted at once). The positive tests keep their `>= 1000` lower bounds, which are safe on slow machines. No product code changes.
+
+**Files:** `packages/common/__tests__/http-client-redirect-pacing.spec.ts`, `docs/log.md`.
+
+**Validation:** with a temporary 1.5 s delay in the test server handler (a slow pod), the old assertions fail (3231 ms and 3386 ms, expected < 1000) and the new ones pass, as do the two positive tests. With pacing switched on inside the two controls (a mutation check), the new `acquires` assertions alone fail: the hop shows up as a second `domain:softy.pro` acquire that was not granted at once. Without the delay the whole file passed 20 runs out of 20 with `--runInBand`.
 
 ## 2026-11-16 — Lane-scan fixes (T-2459–T-2462)
 
