@@ -12,9 +12,10 @@ import {
   Site,
   DescriptionFormat,
   CompensationInterval,
+  Country,
   JobType,
 } from '@ever-jobs/models';
-import { createHttpClient, extractEmails, extractSalary, htmlToPlainText, markdownConverter, parseLocationList } from '@ever-jobs/common';
+import { createHttpClient, extractEmails, extractSalary, htmlToPlainText, markdownConverter, parseLocationList, parseSalaryCurrency } from '@ever-jobs/common';
 import { REMOTIVE_API_URL, REMOTIVE_HEADERS } from './remotive.constants';
 import { RemotiveApiResponse, RemotiveJob } from './remotive.types';
 
@@ -160,13 +161,27 @@ export class RemotiveService implements IScraper {
    * extractSalary, keeping the interval and currency it finds. The currency
    * falls back to USD only when none was found. Input length is capped as
    * ReDoS defence-in-depth.
+   *
+   * Remotive's salary field is often written with no currency at all
+   * ("70K-80K", "60,000 - 80,000"). extractSalary reads a range with no
+   * currency next to it only under a country hint, so text with no currency
+   * signal is read again with the USA hint: USD, as this plugin always
+   * assumed. The bare-range guard of extractSalary still drops prose such as
+   * "5 - 7 years experience".
    */
   private parseSalary(salary: string | null | undefined): CompensationDto | null {
     if (!salary || salary.length > 200) {
       return null;
     }
 
-    const parsed = extractSalary(salary);
+    let parsed = extractSalary(salary);
+    if (
+      parsed.minAmount == null &&
+      parsed.maxAmount == null &&
+      parseSalaryCurrency(salary).confidence === 'default'
+    ) {
+      parsed = extractSalary(salary, { country: Country.USA });
+    }
     if (parsed.minAmount == null && parsed.maxAmount == null) {
       return null;
     }

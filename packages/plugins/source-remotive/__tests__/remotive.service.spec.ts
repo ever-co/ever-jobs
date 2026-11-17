@@ -89,6 +89,40 @@ describe('RemotiveService salary parsing', () => {
     expect(compensation).toBeNull();
   });
 
+  it('keeps the currency of a non-USD salary', async () => {
+    expect(await compensationOf('£60,000 - £80,000')).toMatchObject({
+      interval: CompensationInterval.YEARLY,
+      minAmount: 60000,
+      maxAmount: 80000,
+      currency: 'GBP',
+    });
+    expect(await compensationOf('€50k - €70k')).toMatchObject({
+      interval: CompensationInterval.YEARLY,
+      minAmount: 50000,
+      maxAmount: 70000,
+      currency: 'EUR',
+    });
+  });
+
+  it('still reads a range written with no currency as USD', async () => {
+    expect(await compensationOf('60,000 - 80,000')).toMatchObject({
+      interval: CompensationInterval.YEARLY,
+      minAmount: 60000,
+      maxAmount: 80000,
+      currency: 'USD',
+    });
+    expect(await compensationOf('70K-80K')).toMatchObject({
+      interval: CompensationInterval.YEARLY,
+      minAmount: 70000,
+      maxAmount: 80000,
+      currency: 'USD',
+    });
+  });
+
+  it('does not read prose numbers as a salary', async () => {
+    expect(await compensationOf('5 - 7 years experience')).toBeNull();
+  });
+
   it('maps every job of a mixed feed with the right compensation', async () => {
     mockGet.mockResolvedValue({
       data: {
