@@ -23,20 +23,61 @@ import { JobPostDto, LocationDto } from '@ever-jobs/models';
  *   - returns a new object; the input is never mutated
  */
 
-const EDGE_WS_RE = /^[\s\u200B-\u200D\uFEFF]+|[\s\u200B-\u200D\uFEFF]+$/g;
+/**
+ * Interior runs of the extended set. Linear: a match consumes the whole run
+ * and the next search starts after it.
+ */
 const INNER_WS_RE = /[\s\u200B-\u200D\uFEFF]+/g;
+
+/**
+ * True for a UTF-16 code unit in the extended edge set: the ECMAScript `\s`
+ * class (WhiteSpace + LineTerminator) plus the zero-width U+200B to U+200D
+ * and U+FEFF. The spec checks it against `/[\s\u200B-\u200D\uFEFF]/` for
+ * every code unit, so the two can never drift apart unnoticed.
+ */
+function isEdgeWhitespace(code: number): boolean {
+  if (code <= 0x20) return code === 0x20 || (code >= 0x09 && code <= 0x0d);
+  if (code < 0xa0) return false;
+  return (
+    code === 0xa0 ||
+    code === 0x1680 ||
+    (code >= 0x2000 && code <= 0x200d) ||
+    code === 0x2028 ||
+    code === 0x2029 ||
+    code === 0x202f ||
+    code === 0x205f ||
+    code === 0x3000 ||
+    code === 0xfeff
+  );
+}
+
+/**
+ * Strip the extended edge set from both ends with two index scans.
+ *
+ * Deliberately not a regex: the alternation `^[set]+|[set]+$` (and any
+ * `[set]+$` on its own) is retried at every position of an interior run, so a
+ * single long run of spaces or U+200B costs quadratic time: 80k characters
+ * blocked the event loop for ~18 s (fork-sync hardening).
+ */
+function trimEdgeWhitespace(value: string): string {
+  let start = 0;
+  let end = value.length;
+  while (start < end && isEdgeWhitespace(value.charCodeAt(start))) start++;
+  while (end > start && isEdgeWhitespace(value.charCodeAt(end - 1))) end--;
+  return start === 0 && end === value.length ? value : value.slice(start, end);
+}
 
 /** Trim edges (extended set); `null` when blank. */
 function cleanEnds(value: unknown): string | null | undefined {
   if (typeof value !== 'string') return value as undefined;
-  const cleaned = value.replace(EDGE_WS_RE, '');
+  const cleaned = trimEdgeWhitespace(value);
   return cleaned === '' ? null : cleaned;
 }
 
 /** Trim edges and collapse interior runs to a single space; `null` when blank. */
 function cleanText(value: unknown): string | null | undefined {
   if (typeof value !== 'string') return value as undefined;
-  const cleaned = value.replace(EDGE_WS_RE, '').replace(INNER_WS_RE, ' ');
+  const cleaned = trimEdgeWhitespace(value).replace(INNER_WS_RE, ' ');
   return cleaned === '' ? null : cleaned;
 }
 
