@@ -184,7 +184,7 @@ function createServer(): Server {
             },
             limit: {
               type: 'number',
-              description: 'Maximum results (default: 25)',
+              description: 'Maximum results (default: 25, max: 100)',
             },
           },
           required: ['query'],
@@ -208,7 +208,7 @@ function createServer(): Server {
             },
             limit: {
               type: 'number',
-              description: 'Number of jobs to sample for salary data (default: 50)',
+              description: 'Number of jobs to sample for salary data (default: 50, max: 100)',
             },
           },
           required: ['query'],

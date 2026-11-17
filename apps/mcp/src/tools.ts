@@ -563,8 +563,8 @@ export async function searchJobs(params: JobSearchParams): Promise<SearchRespons
 
     // The API applies resultsWanted per source (and per location), so its
     // answer can be far longer than `limit`: cut it here, after the
-    // remote_only filter (T-2585).
-    const returnedJobs = filteredJobs.slice(0, normalizeSearchLimit(params.limit));
+    // remote_only filter, keeping jobs from every source (T-2585).
+    const returnedJobs = takeJobsAcrossSources(filteredJobs, normalizeSearchLimit(params.limit));
 
     return {
       total: returnedJobs.length,
@@ -804,6 +804,34 @@ export function normalizeSearchLimit(limit: unknown): number {
         : NaN;
   if (!(n >= 1)) return MCP_DEFAULT_SEARCH_LIMIT;
   return Math.min(Math.floor(n), MCP_MAX_SEARCH_LIMIT);
+}
+
+/**
+ * At most `limit` of `jobs`, shared across their sources (T-2585). The API
+ * sorts its answer by site name, then newest first, so the first `limit` jobs
+ * of a search over several sources would all come from the first site in
+ * alphabetical order. This takes each source's jobs in turn (its first job,
+ * then every source's second job, and so on) until `limit` are picked, and
+ * returns them in the order they had in `jobs`. A list within the limit is
+ * returned as it is.
+ */
+export function takeJobsAcrossSources<T extends { source: string }>(jobs: T[], limit: number): T[] {
+  if (jobs.length <= limit) return jobs;
+  const bySource = new Map<string, number[]>();
+  jobs.forEach((job, index) => {
+    const indexes = bySource.get(job.source);
+    if (indexes) indexes.push(index);
+    else bySource.set(job.source, [index]);
+  });
+  const queues = [...bySource.values()];
+  const picked: number[] = [];
+  for (let round = 0; picked.length < limit; round++) {
+    for (const queue of queues) {
+      if (round < queue.length) picked.push(queue[round]);
+      if (picked.length === limit) break;
+    }
+  }
+  return picked.sort((a, b) => a - b).map((index) => jobs[index]);
 }
 
 /**

@@ -57,7 +57,9 @@ Search for jobs across all sources.
 | `crawl`       | object  | ❌       | Per-request crawl policy (Spec 1690), camelCase    |
 
 The response's `total` is the number of jobs in `jobs`. When the list was cut to `limit`,
-`total_found` gives how many jobs were found (after `remote_only`).
+`total_found` gives how many jobs were found (after `remote_only`). The cut takes each
+source's newest jobs in turn, so a search over several sources keeps jobs from each of
+them (the API sorts by site name, so a plain cut would keep only the first site's jobs).
 
 `crawl` is forwarded to the API unchanged as the `crawl` field (same key in every
 `EVER_JOBS_MCP_REQUEST_KEYS` style); see [`docs/CRAWL_POLICY.md`](../../docs/CRAWL_POLICY.md).

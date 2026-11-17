@@ -336,6 +336,52 @@ describe('search tools — limit caps the jobs returned (T-2585)', () => {
     expect(insights.totalJobsSearched).toBe(30);
     expect(insights.jobsWithSalary).toBe(30);
   });
+
+  /** The API sorts by site name, then newest first (`JobsService.searchJobs`). */
+  function sortedBySite(perSite: Record<string, number>, isRemote = false) {
+    return Object.keys(perSite)
+      .sort()
+      .flatMap((site) => apiJobs(perSite[site], isRemote, `${site}-`).map((job) => ({ ...job, site })));
+  }
+
+  it('shares the cut across sources instead of keeping only the first site in alphabetical order', async () => {
+    mockClient({ post: { jobs: sortedBySite({ lever: 30, adzuna: 30, indeed: 30 }) } });
+    const result = await searchJobs({ query: 'x', limit: 20 });
+
+    expect(result.jobs).toHaveLength(20);
+    expect(result.total_found).toBe(90);
+    const perSource = result.jobs.reduce<Record<string, number>>((acc, j) => {
+      acc[j.source] = (acc[j.source] ?? 0) + 1;
+      return acc;
+    }, {});
+    expect(perSource).toEqual({ adzuna: 7, indeed: 7, lever: 6 });
+    // Each source keeps its newest jobs, and the list keeps the API's order.
+    expect(result.jobs.map((j) => j.id)).toEqual([
+      ...Array.from({ length: 7 }, (_, i) => `adzuna-${i}`),
+      ...Array.from({ length: 7 }, (_, i) => `indeed-${i}`),
+      ...Array.from({ length: 6 }, (_, i) => `lever-${i}`),
+    ]);
+  });
+
+  it('gives a source with few jobs all of them and fills the rest from the others', async () => {
+    mockClient({ post: { jobs: sortedBySite({ adzuna: 2, indeed: 50 }) } });
+    const result = await searchJobs({ query: 'x', limit: 10 });
+
+    expect(result.jobs.map((j) => j.id)).toEqual([
+      'adzuna-0',
+      'adzuna-1',
+      ...Array.from({ length: 8 }, (_, i) => `indeed-${i}`),
+    ]);
+  });
+
+  it('search_remote_jobs keeps jobs from every remote board that answered', async () => {
+    const boards = { arbeitnow: 25, himalayas: 25, jobicy: 25, remoteok: 25, remotive: 25 };
+    mockClient({ post: { jobs: sortedBySite(boards, true) } });
+    const result = await searchRemoteJobs({ query: 'x' });
+
+    expect(result.jobs).toHaveLength(25);
+    expect(new Set(result.jobs.map((j) => j.source))).toEqual(new Set(Object.keys(boards)));
+  });
 });
 
 describe('normalizeSearchLimit (T-2585)', () => {
