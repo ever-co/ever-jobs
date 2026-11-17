@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { Site } from '@ever-jobs/models';
 import {
   MCP_LOCATION_FORMAT_ENV_VAR,
   MCP_REQUEST_KEYS_ENV_VAR,
@@ -238,6 +239,14 @@ describe('searchRemoteJobs — searches the remote boards', () => {
   it('the catalogue lists remote boards', () => {
     expect(REMOTE_IDS.length).toBeGreaterThan(0);
     expect(REMOTE_IDS).toEqual(expect.arrayContaining(['remotive', 'remoteok', 'weworkremotely']));
+  });
+
+  // Every remote id is now always sent, and the API checks siteType with
+  // `@IsEnum(Site, { each: true })`: one id that is not a `Site` value would
+  // turn every search_remote_jobs call into a 400.
+  it('every remote board is a Site value the API accepts', () => {
+    const sites = new Set<string>(Object.values(Site));
+    expect(REMOTE_IDS.filter((id) => !sites.has(id))).toEqual([]);
   });
 
   it('posts every remote board as siteType when no source is given', async () => {
