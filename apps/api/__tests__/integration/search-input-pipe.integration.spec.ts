@@ -167,20 +167,21 @@ describe('GraphQL searchJobs input through the production ValidationPipe (Spec 1
     });
   });
 
-  it('keeps the lenient GraphQL rules for country and descriptionFormat (Spec 1689; Spec 1730 §12.6)', async () => {
-    // Both fields now reach JobsService. They follow the GraphQL rules Spec 1689 put on develop,
-    // not the REST enums: `country` takes a Country value, a name / alias or an ISO alpha-2 code
+  it('keeps the lenient GraphQL country rule and maps descriptionFormat "text" to plain (Spec 1689; T-2523)', async () => {
+    // Both fields now reach JobsService. `country` follows the GraphQL rule Spec 1689 put on
+    // develop, not the REST enum: it takes a Country value, a name / alias or an ISO alpha-2 code
     // and is resolved to a Country BEFORE any plugin sees it (a raw "DE" used to make
     // getIndeedDomain throw); an unrecognised country is dropped, not rejected.
-    // `descriptionFormat` is any string: a value outside markdown / plain reaches the plugins
-    // as-is, and they leave the description unconverted, as for html.
+    // `descriptionFormat` (T-2523) takes markdown / html / plain plus the documented alias "text",
+    // which reaches the plugins as plain. It used to be any string, and the plugins left every
+    // value outside markdown / plain unconverted, so "text" got raw HTML.
     const code = await gql(
       `{ searchJobs(input: { searchTerm: "engineer", country: "DE", descriptionFormat: "text" }) { count } }`,
     );
     expect(code.body.errors).toBeUndefined();
     expect(code.body.data.searchJobs.count).toBe(2);
     expect(jobsService.searchJobsWithDiagnostics.mock.calls[0]![0]).toEqual(
-      expect.objectContaining({ country: 'GERMANY', descriptionFormat: 'text' }),
+      expect.objectContaining({ country: 'GERMANY', descriptionFormat: 'plain' }),
     );
 
     const unknown = await gql(`{ searchJobs(input: { searchTerm: "engineer", country: "Atlantis" }) { count } }`);
@@ -195,6 +196,17 @@ describe('GraphQL searchJobs input through the production ValidationPipe (Spec 1
     expect(jobsService.searchJobsWithDiagnostics.mock.calls[2]![0]).toEqual(
       expect.objectContaining({ country: 'GERMANY', descriptionFormat: 'plain' }),
     );
+  });
+
+  it('rejects an unknown descriptionFormat with BAD_REQUEST before scraping (T-2523)', async () => {
+    const res = await gql(`{ searchJobs(input: { searchTerm: "engineer", descriptionFormat: "md" }) { count } }`);
+
+    expect(res.body.data).toBeNull();
+    expect(res.body.errors).toHaveLength(1);
+    const [error] = res.body.errors;
+    expect(error.extensions.code).toBe('BAD_REQUEST');
+    expect(JSON.stringify(error)).toMatch(/descriptionFormat/);
+    expect(jobsService.searchJobsWithDiagnostics).not.toHaveBeenCalled();
   });
 
   it('gives every SearchJobsInput field a class-validator decorator (whitelist keeps it)', async () => {
