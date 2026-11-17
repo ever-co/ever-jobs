@@ -156,3 +156,86 @@ describe('search command — input and output', () => {
     expect(stderr).not.toHaveBeenCalled();
   });
 });
+
+describe('search command — --no-description', () => {
+  const ORIGINAL_CSV_HEADER =
+    'id,site,title,companyName,location,jobUrl,datePosted,jobType,isRemote,minAmount,maxAmount,' +
+    'currency,interval,description,datePostedAt,datePostedPrecision,datePostedBasis';
+
+  function described(id: string): JobPostDto {
+    return new JobPostDto({
+      id,
+      site: 'remotive',
+      title: 'Engineer',
+      companyName: 'Acme',
+      jobUrl: `https://example.com/${id}`,
+      description: 'LONG-DESC',
+    });
+  }
+
+  const written = (): string => stdout.mock.calls.map((c) => String(c[0])).join('');
+
+  it('parses --no-description as false', () => {
+    const { cmd } = makeSearch();
+    expect(parse(cmd, ['--no-description']).description).toBe(false);
+  });
+
+  it('without the flag, description is not false', () => {
+    const { cmd } = makeSearch();
+    expect(parse(cmd, ['-q', 'engineer']).description).not.toBe(false);
+  });
+
+  it('json: drops the description and keeps every other field', async () => {
+    const { cmd } = makeSearch([described('1'), described('2')]);
+    await cmd.run([], { searchTerm: 'engineer', format: 'json', description: false } as any);
+
+    const out = written();
+    expect(out).not.toContain('LONG-DESC');
+    const parsed = JSON.parse(out);
+    expect(parsed.map((j: JobPostDto) => j.id)).toEqual(['1', '2']);
+    expect(parsed.every((j: JobPostDto) => !('description' in j))).toBe(true);
+    expect(parsed[0]).toMatchObject({ site: 'remotive', title: 'Engineer', companyName: 'Acme' });
+  });
+
+  it('csv: leaves out the description column', async () => {
+    const { cmd } = makeSearch([described('1')]);
+    await cmd.run([], { searchTerm: 'engineer', format: 'csv', description: false } as any);
+
+    const out = written();
+    expect(out).not.toContain('LONG-DESC');
+    const [header, row] = out.trimEnd().split('\n');
+    expect(header.split(',')).not.toContain('description');
+    expect(header).toBe(ORIGINAL_CSV_HEADER.replace(',description,', ','));
+    expect(row.split(',')).toHaveLength(header.split(',').length);
+  });
+
+  it('applies on the --stdin JSON path too', async () => {
+    const { cmd } = makeSearch([described('1')]);
+    jest.spyOn(cmd as any, 'readStdin').mockResolvedValue({ searchTerm: 'engineer' });
+    await cmd.run([], { stdin: true, description: false } as any);
+    expect(written()).not.toContain('LONG-DESC');
+  });
+
+  it('still matches --exclude-keyword against the description it omits', async () => {
+    const other = new JobPostDto({ id: '2', title: 'Engineer', jobUrl: 'https://example.com/2', description: 'fine' });
+    const { cmd } = makeSearch([described('1'), other]);
+    await cmd.run([], { searchTerm: 'engineer', excludeKeyword: ['LONG-DESC'], format: 'json', description: false } as any);
+    expect(JSON.parse(written()).map((j: JobPostDto) => j.id)).toEqual(['2']);
+  });
+
+  it('json without the flag: output is unchanged and keeps the description', async () => {
+    const jobs = [described('1')];
+    const { cmd } = makeSearch(jobs);
+    await cmd.run([], { searchTerm: 'engineer', format: 'json' } as any);
+    expect(written()).toBe(JSON.stringify(jobs, null, 2) + '\n');
+    expect(written()).toContain('LONG-DESC');
+  });
+
+  it('csv without the flag: the description column stays', async () => {
+    const { cmd } = makeSearch([described('1')]);
+    await cmd.run([], { searchTerm: 'engineer', format: 'csv', description: true } as any);
+    const [header, row] = written().trimEnd().split('\n');
+    expect(header).toBe(ORIGINAL_CSV_HEADER);
+    expect(row).toContain(',LONG-DESC,');
+  });
+});
