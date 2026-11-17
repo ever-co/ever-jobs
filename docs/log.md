@@ -5,6 +5,20 @@
 
 ---
 
+## 2026-11-17 — Lane-scan fixes
+
+One dated entry for the day; each fix has its own section.
+
+### Fix: Remotive salaries with a `k` are read, and hourly pay keeps its interval and currency (T-2587)
+
+**Symptom.** `RemotiveService.parseSalary()` (`packages/plugins/source-remotive/src/remotive.service.ts`) matched the salary text with its own regex, `/\$?([\d,]+)\s*[-–]\s*\$?([\d,]+)/`, and always returned `interval: yearly` and `currency: 'USD'`. A `k` after the first number broke the match, so a job with `$170k - $200k` got no compensation at all; `$14 - $20/hour` became a yearly salary of 14–20 USD; and a salary in another currency was labelled USD. Salary filters, `POST /api/jobs/analyze` and the MCP `get_salary_insights` tool were wrong for Remotive jobs.
+
+**Fix.** `parseSalary()` now calls the shared `extractSalary` (`@ever-jobs/common`), which already reads these shapes (pinned by the Spec 1695 cases in `packages/common/__tests__/salary.spec.ts`), the way `source-monster` does. It keeps the 200-character input cap, builds a `CompensationDto` only when a minimum or maximum amount was found, and keeps the parsed interval and currency, falling back to `USD` only when no currency was found. Salary text with no currency signal at all (`60,000 - 80,000`, `70K-80K`) is read a second time with the `Country.USA` hint, because `extractSalary` reads a range with no currency next to it only under a country hint; without it such ranges, which develop read as USD, would lose their compensation. The bare-range guard of `extractSalary` still drops prose such as `5 - 7 years experience`, which develop read as yearly 5–7 USD. The unused `SALARY_REGEX` and its comment are removed.
+
+**Files:** `packages/plugins/source-remotive/src/remotive.service.ts`, `packages/plugins/source-remotive/__tests__/remotive.service.spec.ts` (new; the package had no unit test), `docs/log.md`.
+
+**Validation:** the new `remotive.service.spec.ts` (8 tests) mocks `createHttpClient` with jobs whose salary is `$170k - $200k`, `$14 - $20/hour`, `$60,000 - $80,000` and `''`, and expects yearly 170000–200000 USD, hourly 14–20 USD, yearly 60000–80000 USD and `null`, one job at a time and as one mixed feed. It also checks that `£60,000 - £80,000` and `€50k - €70k` keep GBP and EUR, that `60,000 - 80,000` and `70K-80K` are read as yearly USD, and that `5 - 7 years experience` gives `null`. Against develop 6 fail and 2 pass (the comma range and the empty salary); all 8 pass now.
+
 ## 2026-11-16 — Lane-scan fixes (T-2459–T-2462)
 
 One dated entry for the day; each fix has its own section.
