@@ -514,8 +514,10 @@ describe('extractSalary — salary field values seen on public feeds (Spec 1695)
     ['$50-$75 /hour', 'hourly 50-75 USD'],
     ['$10K-$20K', 'monthly 10000-20000 USD'],
     ['$35,3k- $52k', 'null'],
-    ['OTE $25k - $35k', 'null'],
-    ['$20k -$35k', 'null'],
+    // T-2633 — read as yearly now; both were lost when only the minimum
+    // chose the interval.
+    ['OTE $25k - $35k', 'yearly 25000-35000 USD'],
+    ['$20k -$35k', 'yearly 20000-35000 USD'],
     ['$25.00 - $29.00 per hour on W2', 'hourly 25-29 USD'],
     ['$115,000 - $149,500 a year', 'yearly 115000-149500 USD'],
     ['$90-$150+/hr, with vetted clients', 'hourly 90-150 USD'],
@@ -528,6 +530,68 @@ describe('extractSalary — salary field values seen on public feeds (Spec 1695)
     ['$15 to $25 per hour.', 'hourly 15-25 USD'],
   ])('%p → %s', (text, expected) => {
     expect(render(extractSalary(text))).toBe(expected);
+  });
+});
+
+describe('extractSalary — a range that crosses the monthly threshold is yearly (T-2633)', () => {
+  // With no stated period the minimum alone chose the interval: a minimum
+  // under monthlyThreshold (30,000) read the range as monthly, the maximum at
+  // or above it was nulled, and the whole range was dropped.
+  it.each([
+    ['$25k - $35k', 'yearly 25000-35000 USD'],
+    ['OTE $25k - $35k', 'yearly 25000-35000 USD'],
+    ['$20k -$35k', 'yearly 20000-35000 USD'],
+    ['$20,000 - $40,000', 'yearly 20000-40000 USD'],
+    ['$28,000 - $32,000', 'yearly 28000-32000 USD'],
+  ])('%p → %s', (text, expected) => {
+    expect(render(extractSalary(text))).toBe(expected);
+  });
+
+  it('returns the full envelope for a crossing range', () => {
+    expect(extractSalary('$25k - $35k')).toEqual({
+      interval: 'yearly',
+      minAmount: 25000,
+      maxAmount: 35000,
+      currency: 'USD',
+    });
+    expect(extractSalary('$25k - $35k', { enforceAnnualSalary: true })).toEqual({
+      interval: 'yearly',
+      minAmount: 25000,
+      maxAmount: 35000,
+      currency: 'USD',
+    });
+  });
+
+  it('keeps a stated period: per month stays monthly', () => {
+    expect(render(extractSalary('$25,000 - $35,000 per month'))).toBe('monthly 25000-35000 USD');
+    expect(render(extractSalary('$25k - $35k/yr'))).toBe('yearly 25000-35000 USD');
+    expect(
+      render(extractSalary('$25,000 - $35,000', { interval: CompensationInterval.MONTHLY })),
+    ).toBe('monthly 25000-35000 USD');
+  });
+
+  it('keeps ranges inside one band unchanged', () => {
+    expect(render(extractSalary('$5,000 - $8,000'))).toBe('monthly 5000-8000 USD');
+    expect(render(extractSalary('$10K-$20K'))).toBe('monthly 10000-20000 USD');
+    expect(render(extractSalary('$40k - $60k'))).toBe('yearly 40000-60000 USD');
+    expect(render(extractSalary('$25 - $45'))).toBe('hourly 25-45 USD');
+  });
+
+  it('still runs the bounds checks on the yearly reading', () => {
+    // 750,000 is above upperLimit (700,000), so nothing is emitted.
+    expect(render(extractSalary('$25,000 - $750,000'))).toBe('null');
+    expect(render(extractSalary('$25,000 - $40,000', { upperLimit: 35000 }))).toBe('null');
+  });
+
+  it('leaves a range that crosses the hourly threshold as it was', () => {
+    expect(render(extractSalary('$300 - $400'))).toBe('null');
+  });
+
+  it('leaves the legacy grammar as it was', () => {
+    expect(render(extractSalary('$25k - $35k', { grammar: 'legacy' }))).toBe('null');
+    expect(render(extractSalary('$28,000 - $32,000', { grammar: 'legacy' }))).toBe('null');
+    process.env[GRAMMAR_ENV] = 'legacy';
+    expect(render(extractSalary('$20,000 - $40,000'))).toBe('null');
   });
 });
 

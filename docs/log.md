@@ -5,9 +5,19 @@
 
 ---
 
-## 2026-11-17 — Lane-scan fixes (T-2584)
+## 2026-11-17 — Lane-scan fixes
 
 One dated entry for the day; each fix has its own section.
+
+### Fix: `extractSalary` reads a range that crosses the monthly threshold as yearly instead of dropping it (T-2633)
+
+**Symptom.** With no stated period, `extractSalary` (`packages/common/src/utils/helpers.ts`) chose a range's interval from its minimum alone. A minimum under `monthlyThreshold` (default 30,000, `helpers.ts:1313` on develop) read the range as monthly, and a maximum at or above it was then set to `null` (`helpers.ts:1500-1503`), so the whole range came back as the all-`null` envelope (`helpers.ts:1510`). `$25k - $35k`, `OTE $25k - $35k`, `$20k -$35k`, `$20,000 - $40,000` and `$28,000 - $32,000` all gave no salary, while `$40k - $60k` and `$25k - $35k/yr` were read. Every plugin that calls the shared parser lost these jobs' compensation; in the task's sample, 3 of 12 Remotive salary values had this shape (`source-remotive` calls `extractSalary` since T-2587). Spec 1695 §3 had left this shape unparsed as a decision of its own; `packages/common/__tests__/helpers.spec.ts` and the public-feed table in `salary.spec.ts` pinned the loss.
+
+**Fix.** In the extended grammar only, a range with no caller `interval` hint and no pay-period token, whose minimum is in the monthly band (at or above `hourlyThreshold`, under `monthlyThreshold`) and whose maximum is at or above `monthlyThreshold`, is read as yearly at both ends; the usual bounds checks (`lowerLimit`, `upperLimit`, minimum below maximum) then apply, so `$25,000 - $750,000` still gives nothing. A stated period still wins (`$25,000 - $35,000 per month` stays monthly), ranges inside one band are unchanged (`$5,000 - $8,000` and `$10K-$20K` monthly, `$40k - $60k` yearly), the hourly band keeps its guard (`$300 - $400` still gives nothing), and the legacy grammar (`grammar: 'legacy'` or `EVER_JOBS_SALARY_GRAMMAR=legacy`) keeps the earlier no-match. Spec 1695 §3 gets a dated note.
+
+**Files:** `packages/common/src/utils/helpers.ts`, `packages/common/__tests__/{salary,helpers}.spec.ts`, `packages/plugins/source-remotive/__tests__/remotive.service.spec.ts`, `.specify/specs/1695-salary-parsing-hardening/spec.md`, `docs/log.md` (this entry; the day's two `## 2026-11-17` headings are merged into one, as `npm run lint:docs` reported them as duplicates).
+
+**Validation:** 10 tests fail against develop and pass now: the five strings above (yearly, USD, the right amounts) and the full envelope of `$25k - $35k`, with and without `enforceAnnualSalary`, in a new `salary.spec.ts` block; the `OTE $25k - $35k` and `$20k -$35k` rows of the public-feed table (were `null`); the `$28,000 - $32,000` baseline in `helpers.spec.ts` (now yearly 28000-32000 USD, hint assertions kept); and a new Remotive case for `$25k - $35k` (yearly 25000-35000 USD). Five controls pass before and after: a stated period (`per month`, `/yr`, a monthly hint), ranges inside one band, the bounds checks, the hourly crossing, and the legacy grammar. `npm run test:core`, the `packages/plugins/source-` suites, `tsc --project tsconfig.typecheck.json --noEmit` and `npm run lint:docs` pass.
 
 ### Fix: Authentic Jobs no longer writes its API key to the log (T-2584)
 
@@ -18,10 +28,6 @@ One dated entry for the day; each fix has its own section.
 **Files:** `packages/plugins/source-authenticjobs/src/authenticjobs.service.ts`, `packages/plugins/source-authenticjobs/__tests__/authenticjobs.service.spec.ts` (new), `docs/log.md`.
 
 **Validation:** the 2 new tests (a two-page scrape and a scrape whose request fails with a 500, both with `AUTHENTICJOBS_API_KEY=test-key-123` and a spy on every `Logger.prototype` level) fail against develop, because the `Fetching …` lines hold `api_key=test-key-123`, and pass now. The paging test also checks that every request still sends `api_key`, `method`, `format`, `page`, `count` and `keyword`; the failure test checks that `api_key` was sent. The package's e2e suite still passes (3 tests; it returns early without a key). Both CI type-checks are clean and `npm run lint:docs` passes.
-
-## 2026-11-17 — Lane-scan fixes
-
-One dated entry for the day; each fix has its own section.
 
 ### Fix: MCP `get_job_details` answers from recent search results instead of a missing API route (T-2586)
 

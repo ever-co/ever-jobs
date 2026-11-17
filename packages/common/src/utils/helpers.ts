@@ -1293,6 +1293,11 @@ function buildSingleBoundCandidates(
  * different tokens on one range (`"$20/hr - $40,000/yr"`) return the
  * all-`null` envelope. `enforceAnnualSalary` still annualises the amounts
  * and keeps the stated interval.
+ *
+ * T-2633 — in the extended grammar, a range with no stated period whose
+ * minimum is in the monthly band and whose maximum is at or above
+ * `monthlyThreshold` (`"$25k - $35k"`) is read as yearly instead of being
+ * dropped; the legacy grammar keeps the earlier no-match.
  */
 export function extractSalary(
   salaryStr: string | null,
@@ -1497,6 +1502,14 @@ export function extractSalary(
     interval = CompensationInterval.HOURLY;
     annualMinSalary = minSalary * 2080;
     annualMaxSalary = maxSalary < hourlyThreshold ? maxSalary * 2080 : null;
+  } else if (minSalary < monthlyThreshold && grammar !== 'legacy' && maxSalary >= monthlyThreshold) {
+    // T-2633 — a minimum in the monthly band with a maximum at or above
+    // monthlyThreshold (`$25k - $35k`) is a low yearly range, not a monthly
+    // one with its ceiling nulled; both ends are read as yearly and the
+    // bounds checks below still apply. The legacy grammar keeps dropping it.
+    interval = CompensationInterval.YEARLY;
+    annualMinSalary = minSalary;
+    annualMaxSalary = maxSalary;
   } else if (minSalary < monthlyThreshold) {
     interval = CompensationInterval.MONTHLY;
     annualMinSalary = minSalary * 12;

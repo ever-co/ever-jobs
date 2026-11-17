@@ -81,12 +81,14 @@ describe('extractSalary', () => {
 
   // Spec 5045 — explicit interval hint overrides magnitude inference.
   it('takes the interval from the hint instead of magnitude (low yearly)', () => {
-    // Without a hint this range is lost entirely: 28000 sits in the monthly
-    // band but 32000 crosses monthlyThreshold(30000), so the crossing guard
-    // nulls the max and the parser returns nothing.
+    // T-2633 — without a hint, 28000 sits in the monthly band but 32000
+    // crosses monthlyThreshold(30000), so the range is read as yearly (it
+    // was dropped when only the minimum chose the interval).
     const inferred = extractSalary('$28,000 - $32,000');
-    expect(inferred.interval).toBeNull();
-    expect(inferred.minAmount).toBeNull();
+    expect(inferred.interval).toBe('yearly');
+    expect(inferred.minAmount).toBe(28000);
+    expect(inferred.maxAmount).toBe(32000);
+    expect(inferred.currency).toBe('USD');
 
     const hinted = extractSalary('$28,000 - $32,000', {
       interval: CompensationInterval.YEARLY,

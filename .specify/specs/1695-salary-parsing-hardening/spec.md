@@ -93,7 +93,11 @@ description figure is dropped.
 - New currencies (`₹`, `CA$`) and the `between $X and $Y` form.
 - A single amount with no directional marker (`$14 per hour`).
 - The K-suffix magnitude default (`$20k - $35k`, `OTE $25k - $35k` stay unparsed; `$10K-$20K`
-  stays monthly). A data-backed decision of its own.
+  stays monthly). A data-backed decision of its own. *(Decided 2026-11-17, T-2633: in the
+  extended grammar a range with no stated period whose minimum is under `monthlyThreshold` and
+  whose maximum is at or above it is read as yearly, so `$20k - $35k` and `OTE $25k - $35k` now
+  read yearly 20000-35000 and 25000-35000 USD; `$10K-$20K` stays monthly and the legacy grammar
+  keeps the no-match. See `docs/log.md`.)*
 - The USA-only gate on the description fallback.
 - Plugin-local salary regexes; they can move to the shared helper in follow-ups.
 
