@@ -93,6 +93,8 @@ List all available job sources.
 
 Search for remote-only positions across all remote-first job boards (RemoteOK, Remotive, We Work Remotely, Jobicy, Himalayas, Arbeitnow).
 
+Without `source`, or with a `source` that is not a remote board, every board that `list_sources` reports with type `remote` is searched, and `sources_searched` lists them. A remote `source` searches that board alone.
+
 | Parameter | Type   | Required | Description                      |
 | --------- | ------ | -------- | -------------------------------- |
 | `query`   | string | ✅       | Job search query                 |
