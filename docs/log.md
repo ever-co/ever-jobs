@@ -5,6 +5,20 @@
 
 ---
 
+## 2026-11-17 — Lane-scan fixes (T-2607)
+
+One dated entry for the day; each fix has its own section.
+
+### Test: the redirect-pacing red controls no longer depend on CI speed (T-2607)
+
+**Symptom.** Two red-control tests in `packages/common/__tests__/http-client-redirect-pacing.spec.ts` ended with a wall-clock upper bound across real loopback HTTP requests: `expect(hop.arrivedAt - softyGrants[0].at).toBeLessThan(1000)` ("red control: EVER_JOBS_CRAWL_PACE_REDIRECTS=false follows the hop inside the aggregator slot, at once") and `expect(paths[1].arrivedAt - grants[0].at).toBeLessThan(1000)` ("... both requests in one slot, back to back"). On a slow or busy CI pod the hop can reach the server more than 1 s after the first grant without ever waiting for a slot; the first test failed that way (about 3.1 s) on PR #144, which only changes `apps/mcp`. The file's own comment already said the gap between arrivals is not a valid bound.
+
+**Fix.** Test-only. `pacedClient()` now also records every `HostLimiter.acquire` call with its bucket and `grantedAtOnce` (whether the limiter granted the slot inside the call, as it does when the bucket is free and ready; a request held behind `maxConcurrent`, the interval, the idle gap or a cool-down is not). The two red controls drop the upper bound and assert on the limiter instead: the hop took no slot of its own (the grant count, already asserted) and never queued behind the Softy bucket (the only acquires are the requests the test makes, each granted at once). The positive tests keep their `>= 1000` lower bounds, which are safe on slow machines. No product code changes.
+
+**Files:** `packages/common/__tests__/http-client-redirect-pacing.spec.ts`, `docs/log.md`.
+
+**Validation:** with a temporary 1.5 s delay in the test server handler (a slow pod), the old assertions fail (3231 ms and 3386 ms, expected < 1000) and the new ones pass, as do the two positive tests. With pacing switched on inside the two controls (a mutation check), the new `acquires` assertions alone fail: the hop shows up as a second `domain:softy.pro` acquire that was not granted at once. Without the delay the whole file passed 20 runs out of 20 with `--runInBand`.
+
 ## 2026-11-16 — Lane-scan fixes (T-2459–T-2462)
 
 One dated entry for the day; each fix has its own section.
