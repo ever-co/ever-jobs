@@ -5,6 +5,20 @@
 
 ---
 
+## 2026-11-17 — Lane-scan fixes (T-2584)
+
+One dated entry for the day; each fix has its own section.
+
+### Fix: Authentic Jobs no longer writes its API key to the log (T-2584)
+
+**Symptom.** `AuthenticJobsService.scrape()` (`packages/plugins/source-authenticjobs/src/authenticjobs.service.ts`) reads `AUTHENTICJOBS_API_KEY` and sends it as the `api_key` query parameter. It built the request URL by hand and logged it at info level for every page (`Fetching Authentic Jobs page 1: https://authenticjobs.com/api/?format=json&method=aj.jobs.search&api_key=<key>&page=1&…`). `apps/api/src/main.ts` uses the default Nest logger, so with the key set every search that included `authenticjobs` wrote the key to the API log and to any log shipper behind it, against `AGENTS.md` rule 10 and `docs/SECURITY_GUIDELINES.md` ("Never log API keys"). The shared `HttpClient` redacts `api_key` only in its own log lines (`SENSITIVE_QUERY_KEYS`); this line was the plugin's own.
+
+**Fix.** The page line is now `Fetching Authentic Jobs page <n>`, without the URL. The request passes its query as `client.get(AUTHENTICJOBS_API_URL, { params })` instead of a hand-built query string. The shared client names only `config.url` in its retry, redirect and cool-down lines (`describeRequest`, `redactUrl`) and never `config.params`, so the key stays out of those lines as well. The request sends the same parameters, `api_key` included; axios encodes them now, which leaves a few characters such as `,` and `:` unescaped where `URLSearchParams` escaped them, and the server decodes the same values. No other log, warn or error line in the file names the URL or the request config (the error line logs `err.message` only).
+
+**Files:** `packages/plugins/source-authenticjobs/src/authenticjobs.service.ts`, `packages/plugins/source-authenticjobs/__tests__/authenticjobs.service.spec.ts` (new), `docs/log.md`.
+
+**Validation:** the 2 new tests (a two-page scrape and a scrape whose request fails with a 500, both with `AUTHENTICJOBS_API_KEY=test-key-123` and a spy on every `Logger.prototype` level) fail against develop, because the `Fetching …` lines hold `api_key=test-key-123`, and pass now. Both also check that every request still sends `api_key`, `method`, `format`, `page`, `count` and `keyword`. The package's e2e suite still passes (3 tests; it returns early without a key). Both CI type-checks are clean and `npm run lint:docs` passes.
+
 ## 2026-11-16 — Lane-scan fixes (T-2459–T-2462)
 
 One dated entry for the day; each fix has its own section.
