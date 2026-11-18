@@ -24,7 +24,9 @@ import { runWithHttpMemo } from '../src/http/http-memo';
  * a `HostLimiter` spy records when each slot is granted), and, as lower bounds
  * only, on the server's arrival clock. Every pacing test has a red control:
  * `EVER_JOBS_CRAWL_PACE_REDIRECTS=false` (the pre-fix in-slot follow) makes the
- * same assertion fail, shown by the paired "control" test asserting the old timing.
+ * same assertion fail, shown by the paired "control" test asserting the old path
+ * on the limiter (no slot of its own for the hop, no request held in a queue) —
+ * never with a wall-clock upper bound, which a slow CI pod breaks (T-2607).
  *
  * Review round 2: a hop is re-issued only when a lock or a host policy applies — the
  * hop host is host-owned (`*.softy.pro`), or the request or the hop is under a
@@ -105,12 +107,23 @@ describe('HttpClient redirect pacing (Spec 1715 audit A0)', () => {
    * `arrivedAt >= its grant >= the previous grant + interval` holds exactly; no
    * tolerance is needed (the wire gap between two ARRIVALS is not a valid bound:
    * the first request of a file pays a cold client path after its grant).
+   *
+   * Every `acquire` is recorded too, with `grantedAtOnce`: whether its slot was
+   * granted inside the call (the limiter grants synchronously when the bucket is
+   * free and ready). A request held behind the bucket — its `maxConcurrent`, its
+   * interval or idle gap, a cool-down — is not. This is the limiter's state, not
+   * elapsed time, so a red control states "the hop never waited for the target
+   * bucket" without a wall-clock upper bound (T-2607: a `< 1000 ms` bound across
+   * real loopback requests failed on a slow CI pod at ~3.1 s).
    */
-  function pacedClient(
-    options: { egressAllowHosts?: string[] } = {},
-  ): { client: HttpClient; grants: Array<{ bucket: string; at: number; minIntervalMs: number }> } {
+  function pacedClient(options: { egressAllowHosts?: string[] } = {}): {
+    client: HttpClient;
+    grants: Array<{ bucket: string; at: number; minIntervalMs: number }>;
+    acquires: Array<{ bucket: string; grantedAtOnce: boolean }>;
+  } {
     const limiter = new HostLimiter();
     const grants: Array<{ bucket: string; at: number; minIntervalMs: number }> = [];
+    const acquires: Array<{ bucket: string; grantedAtOnce: boolean }> = [];
     type Grant = (bucket: { key: string }, waiter: { limits: { minIntervalMs: number } }, now: number) => void;
     const internals = limiter as unknown as { grant: Grant };
     const grant = internals.grant.bind(limiter);
@@ -118,8 +131,19 @@ describe('HttpClient redirect pacing (Spec 1715 audit A0)', () => {
       grants.push({ bucket: bucket.key, at: now, minIntervalMs: waiter.limits.minIntervalMs });
       grant(bucket, waiter, now);
     });
-    return { client: new HttpClient({ retries: 0, hostLimiter: limiter, ...options }), grants };
+    const acquire = limiter.acquire.bind(limiter);
+    jest.spyOn(limiter, 'acquire').mockImplementation((key, acquireOptions) => {
+      const before = grants.length;
+      const slot = acquire(key, acquireOptions);
+      acquires.push({ bucket: key, grantedAtOnce: grants.length > before });
+      return slot;
+    });
+    return { client: new HttpClient({ retries: 0, hostLimiter: limiter, ...options }), grants, acquires };
   }
+
+  /** `acquires` in bucket order (requests started together may reach the limiter in either order). */
+  const byBucket = (acquires: Array<{ bucket: string; grantedAtOnce: boolean }>) =>
+    [...acquires].sort((a, b) => a.bucket.localeCompare(b.bucket));
 
   const setEnv = (vars: Record<string, string | undefined>): void => {
     for (const [name, value] of Object.entries(vars)) {
@@ -231,14 +255,20 @@ describe('HttpClient redirect pacing (Spec 1715 audit A0)', () => {
 
     it('red control: EVER_JOBS_CRAWL_PACE_REDIRECTS=false follows the hop inside the aggregator slot, at once', async () => {
       setEnv({ [CRAWL_EXTRA_ENV.PACE_REDIRECTS]: 'false' });
-      const { client, grants } = pacedClient();
+      const { client, grants, acquires } = pacedClient();
 
       await probeTwo(client);
 
       const softyGrants = grants.filter((g) => g.bucket === 'domain:softy.pro');
-      expect(softyGrants).toHaveLength(1);
-      const hop = offers(softyPort).find((h) => h.path === '/offers/2');
-      expect(hop!.arrivedAt - softyGrants[0].at).toBeLessThan(1000);
+      expect(softyGrants).toHaveLength(1); // the hop took no slot of its own
+      // ... and never queued behind the Softy bucket: the hop never asked the limiter
+      // (the only two acquires are the two requests the test makes), and both were
+      // granted at once. Stated on the limiter, not the clock (T-2607).
+      expect(byBucket(acquires)).toEqual([
+        { bucket: 'domain:softy.pro', grantedAtOnce: true },
+        { bucket: `host:jobs.redirect.test:${redirectPort}`, grantedAtOnce: true },
+      ]);
+      expect(offers(softyPort).map((h) => h.path).sort()).toEqual(['/offers/1', '/offers/2']);
     });
 
     it('the legacy preset keeps the pre-fix in-slot follow (EVER_JOBS_CRAWL_PACE_REDIRECTS follows it)', async () => {
@@ -335,14 +365,15 @@ describe('HttpClient redirect pacing (Spec 1715 audit A0)', () => {
 
     it('red control: EVER_JOBS_CRAWL_PACE_REDIRECTS=false — both requests in one slot, back to back', async () => {
       setEnv({ [CRAWL_EXTRA_ENV.PACE_REDIRECTS]: 'false' });
-      const { client, grants } = pacedClient();
+      const { client, grants, acquires } = pacedClient();
 
       await client.get(`http://acme.softy.pro:${softyPort}/offres/8`, { httpAgent: agent });
 
       expect(grants).toHaveLength(1);
+      // The hop never went back to the limiter: one acquire (the first request's), granted at once (T-2607).
+      expect(acquires).toEqual([{ bucket: 'domain:softy.pro', grantedAtOnce: true }]);
       const paths = hits.filter((h) => h.port === softyPort);
       expect(paths.map((h) => h.path)).toEqual(['/offres/8', '/offers/8']);
-      expect(paths[1].arrivedAt - grants[0].at).toBeLessThan(1000);
     });
 
     it('EVER_JOBS_CRAWL_BUILTIN_HOSTS_DISABLE=*.softy.pro: not host-owned any more, the same-bucket hop follows in the slot', async () => {
