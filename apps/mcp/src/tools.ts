@@ -434,7 +434,7 @@ const SOURCES: SourceInfo[] = [
   // Phase 9: Job Board Expansion
   { name: 'The Muse', id: 'themuse', type: 'job_board', requires_company_slug: false, description: 'Career advice and curated job listings' },
   { name: 'Working Nomads', id: 'workingnomads', type: 'remote', requires_company_slug: false, description: 'Curated remote jobs worldwide' },
-  { name: '4 Day Week', id: 'fourdayweek', type: 'job_board', requires_company_slug: false, description: '4-day work week job listings' },
+  { name: '4 Day Week', id: 'fourdayweek', type: 'remote', requires_company_slug: false, description: '4-day work week job listings' },
   { name: 'Startup.jobs', id: 'startupjobs', type: 'job_board', requires_company_slug: false, description: 'Startup jobs worldwide' },
   { name: 'NoDesk', id: 'nodesk', type: 'remote', requires_company_slug: false, description: 'Remote and flexible jobs' },
   { name: 'Web3 Career', id: 'web3career', type: 'job_board', requires_company_slug: false, description: 'Web3/crypto/blockchain jobs' },
