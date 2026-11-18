@@ -3,6 +3,13 @@ export const COMMA_AI_ORIGIN = 'https://comma.ai';
 export const COMMA_AI_CAREERS_URL = `${COMMA_AI_ORIGIN}/jobs`;
 export const COMMA_AI_DEFAULT_TIMEOUT_SECONDS = 30;
 /**
+ * Hosts this plugin may fetch — mirrors `companyDomains` (Spec 1689). A
+ * caller-supplied `companyUrl` elsewhere is ignored in favour of
+ * {@link COMMA_AI_CAREERS_URL}, node chunks are only fetched from them, and
+ * every redirect hop is pinned to them.
+ */
+export const COMMA_AI_ALLOWED_HOSTS: readonly string[] = ['comma.ai'];
+/**
  * SvelteKit node chunks referenced by the careers page
  * (`import("/_app/immutable/nodes/4.ABC123.js")` + modulepreload links).
  * Group 1 is the chunk path; hashes rotate on every deploy.

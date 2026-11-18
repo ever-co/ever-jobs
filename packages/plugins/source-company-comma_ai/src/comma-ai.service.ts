@@ -9,8 +9,14 @@ import {
   ScrapeDiagnostics,
   Site,
 } from '@ever-jobs/models';
-import { createHttpClient, parseLocationText } from '@ever-jobs/common';
 import {
+  createHttpClient,
+  describeUrlForLog,
+  parseLocationText,
+  pinUrlToHosts,
+} from '@ever-jobs/common';
+import {
+  COMMA_AI_ALLOWED_HOSTS,
   COMMA_AI_CAREERS_URL,
   COMMA_AI_COMPANY_NAME,
   COMMA_AI_DEFAULT_TIMEOUT_SECONDS,
@@ -57,14 +63,19 @@ export class CommaAiService implements IScraper {
       proxies: input.proxies,
       caCert: input.caCert,
       requestTimeout: input.requestTimeout ?? COMMA_AI_DEFAULT_TIMEOUT_SECONDS,
+      // Spec 1689 — re-pin every redirect hop, not just the first URL
+      allowedRedirectHosts: COMMA_AI_ALLOWED_HOSTS,
     });
 
-    const careersUrl = this.normalize(input.companyUrl) || COMMA_AI_CAREERS_URL;
+    const careersUrl = this.careersUrl(input);
     const shellRes = await client.get<string>(careersUrl);
     for (const chunkPath of this.chunkPaths(String(shellRes.data ?? ''))) {
-      const chunkRes = await client
-        .get<string>(`${COMMA_AI_ORIGIN}${chunkPath}`)
-        .catch(() => null);
+      const chunkUrl = this.chunkUrl(chunkPath);
+      if (!chunkUrl) {
+        this.logger.debug(`comma.ai: skipping node chunk path \`${chunkPath.slice(0, 200)}\``);
+        continue;
+      }
+      const chunkRes = await client.get<string>(chunkUrl).catch(() => null);
       const src = String(chunkRes?.data ?? '');
       if (!COMMA_AI_QUALIFICATIONS_RE.test(src)) continue;
       const jobs = this.parseJobsArray(src)
@@ -73,6 +84,48 @@ export class CommaAiService implements IScraper {
       if (jobs.length) return jobs;
     }
     return [];
+  }
+
+  /**
+   * The careers page to fetch: the caller's `companyUrl` when it is on
+   * comma.ai (or a subdomain), otherwise this plugin's board.
+   *
+   * Pin-or-ignore (Spec 1689), as `source-company-soundryx` does: a company
+   * plugin scrapes one company, so an off-domain, internal or malformed
+   * `companyUrl` is a mistake or an attempt to aim our HTTP client elsewhere.
+   * Neither deserves a failed scrape — ignore it and say so. `http:` is
+   * upgraded.
+   */
+  private careersUrl(input: ScraperInputDto): string {
+    const requested = this.normalize(input.companyUrl);
+    if (!requested) return COMMA_AI_CAREERS_URL;
+    const pinned = pinUrlToHosts(requested, COMMA_AI_ALLOWED_HOSTS, { upgradeHttp: true });
+    if (!pinned) {
+      this.logger.debug(
+        `comma.ai: ignoring companyUrl on host \`${describeUrlForLog(requested)}\` - not an https URL on ${COMMA_AI_ALLOWED_HOSTS.join(', ')}`,
+      );
+      return COMMA_AI_CAREERS_URL;
+    }
+    return pinned;
+  }
+
+  /**
+   * `https://comma.ai{chunkPath}` when the path read off the careers page is
+   * a plain node-chunk path on comma.ai, else null (Spec 1689 — links read
+   * off a fetched page are untrusted).
+   *
+   * The URL parser resolves `..` / `.` segments (also `%2e`-encoded), turns
+   * `\` into `/` and splits off `?` and `#`, so a chunk path such as
+   * `/_app/immutable/nodes/../../x?q=.js` would fetch an arbitrary path and
+   * query. Any of those makes the parsed path differ from the matched text —
+   * the chunk is then skipped rather than fetched.
+   */
+  private chunkUrl(chunkPath: string): string | null {
+    const pinned = pinUrlToHosts(`${COMMA_AI_ORIGIN}${chunkPath}`, COMMA_AI_ALLOWED_HOSTS);
+    if (!pinned) return null;
+    const url = new URL(pinned);
+    if (url.pathname !== chunkPath || url.search || url.hash) return null;
+    return url.href;
   }
 
   /** Unique `/_app/immutable/nodes/*.js` paths embedded in the careers page. */
@@ -220,16 +273,36 @@ export class CommaAiService implements IScraper {
     return out;
   }
 
-  /** `key: "…"` or `key: '…'` inside an object literal; unescaped value or null. */
+  /**
+   * `key: "…"` or `key: '…'` inside an object literal; unescaped value or null.
+   *
+   * The two body alternatives are disjoint (Spec 1689, as in
+   * `source-company-4earth_tech`): an escape starts with a backslash, a plain
+   * character never is one. The fork's `(?:\\.|(?:(?!\1).))*` let a
+   * backslash match either branch, so a run of backslashes with no closing
+   * quote backtracked exponentially (60 of them would pin the event loop for
+   * hours). A plain character still excludes line terminators, exactly as
+   * `.` did.
+   */
   private scalarField(objText: string, key: string): string | null {
-    const re = new RegExp(`\\b${key}\\s*:\\s*(["'])((?:\\\\.|(?:(?!\\1).))*)\\1`);
+    const re = new RegExp(
+      `\\b${key}\\s*:\\s*(["'])((?:\\\\.|(?!\\1)[^\\\\\\n\\r\\u2028\\u2029])*)\\1`,
+    );
     const m = re.exec(objText);
     return m ? this.unescapeJs(m[2]) : null;
   }
 
-  /** `key: \`…\`` inside an object literal — a template-literal field. */
+  /**
+   * `key: \`…\`` inside an object literal — a template-literal field.
+   *
+   * Disjoint alternatives (Spec 1689): an escape is a backslash plus any one
+   * character (a template literal may span lines, so a line break counts),
+   * a plain character is anything but a backtick or a backslash. The fork's
+   * `[^\`]` also matched a backslash, so a backslash run with no closing
+   * backtick backtracked exponentially.
+   */
   private templateField(objText: string, key: string): string | null {
-    const re = new RegExp(`\\b${key}\\s*:\\s*\`((?:\\\\.|[^\`])*)\``);
+    const re = new RegExp(`\\b${key}\\s*:\\s*\`((?:\\\\[\\s\\S]|[^\`\\\\])*)\``);
     const m = re.exec(objText);
     return m ? this.unescapeJs(m[1]) : null;
   }

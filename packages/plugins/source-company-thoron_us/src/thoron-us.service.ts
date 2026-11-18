@@ -9,8 +9,15 @@ import {
   ScrapeDiagnostics,
   Site,
 } from '@ever-jobs/models';
-import { createHttpClient, extractJobType, parseLocationText } from '@ever-jobs/common';
 import {
+  createHttpClient,
+  describeUrlForLog,
+  extractJobType,
+  parseLocationText,
+  pinUrlToHosts,
+} from '@ever-jobs/common';
+import {
+  THORON_US_ALLOWED_HOSTS,
   THORON_US_CAREERS_URL,
   THORON_US_COMPANY_NAME,
   THORON_US_DEFAULT_TIMEOUT_SECONDS,
@@ -54,9 +61,11 @@ export class ThoronUsService implements IScraper {
       proxies: input.proxies,
       caCert: input.caCert,
       requestTimeout: input.requestTimeout ?? THORON_US_DEFAULT_TIMEOUT_SECONDS,
+      // Spec 1689 — re-pin every redirect hop, not just the first URL
+      allowedRedirectHosts: THORON_US_ALLOWED_HOSTS,
     });
 
-    const careersUrl = this.normalize(input.companyUrl) || THORON_US_CAREERS_URL;
+    const careersUrl = this.careersUrl(input);
     const shellRes = await client.get<string>(careersUrl);
     const mainPath = THORON_US_MAIN_JS_RE.exec(String(shellRes.data ?? ''))?.[1];
     if (!mainPath) return [];
@@ -65,6 +74,29 @@ export class ThoronUsService implements IScraper {
     return this.parseJobsArray(String(bundleRes.data ?? ''))
       .map((entry) => this.toJobPost(entry))
       .filter((job): job is JobPostDto => job !== null);
+  }
+
+  /**
+   * The SPA shell to fetch: the caller's `companyUrl` when it is on thoron.us
+   * (or a subdomain), otherwise this plugin's careers page.
+   *
+   * Pin-or-ignore (Spec 1689), as `source-company-soundryx` does: a company
+   * plugin scrapes one company, so an off-domain, internal or malformed
+   * `companyUrl` is a mistake or an attempt to aim our HTTP client elsewhere.
+   * Neither deserves a failed scrape — ignore it and say so. `http:` is
+   * upgraded.
+   */
+  private careersUrl(input: ScraperInputDto): string {
+    const requested = this.normalize(input.companyUrl);
+    if (!requested) return THORON_US_CAREERS_URL;
+    const pinned = pinUrlToHosts(requested, THORON_US_ALLOWED_HOSTS, { upgradeHttp: true });
+    if (!pinned) {
+      this.logger.debug(
+        `Thoron: ignoring companyUrl on host \`${describeUrlForLog(requested)}\` - not an https URL on ${THORON_US_ALLOWED_HOSTS.join(', ')}`,
+      );
+      return THORON_US_CAREERS_URL;
+    }
+    return pinned;
   }
 
   /**
@@ -159,9 +191,21 @@ export class ThoronUsService implements IScraper {
     return out;
   }
 
-  /** `key: "…"` or `key: '…'` inside an object literal; unescaped value or null. */
+  /**
+   * `key: "…"` or `key: '…'` inside an object literal; unescaped value or null.
+   *
+   * The two body alternatives are disjoint (Spec 1689, as in
+   * `source-company-4earth_tech`): an escape starts with a backslash, a plain
+   * character never is one. The fork's `(?:\\.|(?:(?!\1).))*` let a
+   * backslash match either branch, so a run of backslashes with no closing
+   * quote backtracked exponentially (60 of them would pin the event loop for
+   * hours). A plain character still excludes line terminators, exactly as
+   * `.` did.
+   */
   private scalarField(objText: string, key: string): string | null {
-    const re = new RegExp(`\\b${key}\\s*:\\s*(["'])((?:\\\\.|(?:(?!\\1).))*)\\1`);
+    const re = new RegExp(
+      `\\b${key}\\s*:\\s*(["'])((?:\\\\.|(?!\\1)[^\\\\\\n\\r\\u2028\\u2029])*)\\1`,
+    );
     const m = re.exec(objText);
     return m ? this.unescapeJs(m[2]) : null;
   }
