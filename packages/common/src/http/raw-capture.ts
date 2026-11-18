@@ -361,7 +361,11 @@ export function rawCaptureWithholdReason(
  */
 const ENV_SECRET_PART = /KEY|SECRET|TOKEN|PASSWORD|PASSWD|PASSPHRASE|CREDENTIAL|COOKIE|BEARER|SIGNATURE|AFFID/;
 
-/** Env-name words that mark a credential only as a whole word (`TALROO_PUBLISHER_PASS`, `DB_PWD`). */
+/**
+ * Env-name words that mark a credential only as a whole word after another
+ * one (`TALROO_PUBLISHER_PASS`, `DB_PWD`): the shell's own `PWD` / `OLDPWD`
+ * hold the working directory.
+ */
 const ENV_SECRET_WORDS = new Set(['PASS', 'PWD']);
 
 /**
@@ -397,8 +401,9 @@ const envNameCache = new Map<string, boolean>();
  * `raw_by_source` both use it.
  *
  * Words are split on anything but letters and digits. A credential: a
- * fragment from `ENV_SECRET_PART` anywhere, a whole `PASS` / `PWD` word, or
- * `ID` after an account word (`APP_ID`, `USER_ID`, `PUBLISHER_ID`, …). Not a
+ * fragment from `ENV_SECRET_PART` anywhere, a whole `PASS` / `PWD` word after
+ * another one (so not the shell's own `PWD`), or `ID` after an account word
+ * (`APP_ID`, `USER_ID`, `PUBLISHER_ID`, …). Not a
  * credential: a name whose last word names a setting about one (`_NAME`,
  * `_HEADER`, `_URL`, `_TYPE`, `_TTL`, … — so `API_KEY_HEADER_NAME=x-api-key`
  * is kept), and `KEYWORD` / `KEYWORDS`, which are search terms, not keys.
@@ -418,7 +423,7 @@ export function isSecretEnvName(name: string): boolean {
     words.some(
       (word, index) =>
         ENV_SECRET_PART.test(word) ||
-        ENV_SECRET_WORDS.has(word) ||
+        (index > 0 && ENV_SECRET_WORDS.has(word)) ||
         (word === 'ID' && index > 0 && ENV_SECRET_ID_PREFIXES.has(words[index - 1])),
     );
 

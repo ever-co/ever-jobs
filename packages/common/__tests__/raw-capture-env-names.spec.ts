@@ -70,6 +70,8 @@ describe('which env names hold credentials (one classifier)', () => {
     'SESSIONNAME',
     'JOBSBYLEVEL_MAX_PAGES',
     'EVER_JOBS_STORE',
+    'PWD', // the shell's working directory
+    'OLDPWD',
   ])('%s is not', (name) => {
     expect(envSecretValues({ [name]: FAKE })).toEqual([]);
   });
