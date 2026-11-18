@@ -131,6 +131,16 @@ and browser contexts alive with no fan-out abort.
   request with a long `searchTerm` tests many windows against env secrets; it needs an include_raw key);
   very long caller `input.auth` values (38k+ characters) make the caller-tier pattern throw, which fails
   the scrape closed; the PHP `\/`, HTML-entity and `encodeURI` forms of a secret are not matched.
+- Raw capture, caller tier (found by the round-4 check; needs `include_raw` on, an include_raw key and the
+  caller's own `auth` values, so only an operator can reach it):
+  - When a caller value occurs in a text field, the key-name rules run in a length-keeping mask mode.
+    A value that only the key-name rules protect can then stay in clear, and the output shape (a quoted
+    or bare `REDACTED`) shows whether a 6+ character guess occurs in such a value.
+  - With 64 long caller values echoed in the page, the caller tier costs about 0.6 s per MB.
+  - Recommended follow-up: drop the caller tier. It only hides the caller's own `auth` values from
+    that same caller's response, and it is the source of both items.
+- Still unmatched key-only text shapes: unquoted JS assignments, YAML, INI, header and Set-Cookie text,
+  `<meta name="csrf-token">`, and CDATA after a comment or text.
 - JSON-LD, pre-existing: malformed `ld+json` blocks are not capped (about 1 s per MiB of them),
   `collectJobPostings` recursion has no depth bound (a deep block rejects the scrape), and the
   per-page address cap drops later postings' locations without a log line.

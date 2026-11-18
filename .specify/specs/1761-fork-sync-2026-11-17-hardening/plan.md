@@ -16,7 +16,7 @@ unchanged and the fork tip stays an ancestor of `develop`; a squash would make t
 re-present every file. Nothing the fork wrote is reverted. Its new features (`include_raw`,
 `deadline_ms`, the location-object mapper, the 10 new plugins) stay, behind safe defaults.
 
-The work ran in six steps:
+The work ran in seven steps:
 
 1. **Review, read-only.** Five lanes covered the diff from the merge base `a4621490`: http/core, API,
    the new plugins, the changed plugins, and utils/config/metadata. No fork code ran. Every
@@ -48,7 +48,14 @@ The work ran in six steps:
    and re-serialized every JSON body.
 6. **Round 3 on the merged branch.** Value scrub first. One env-name classifier. The API pass is a
    thin call into the tiered common scrubber. CDATA and value-attribute XML, the axios and
-   `URLSearchParams` encodings, and a deadline below 1 ms are handled. A last adversarial check followed.
+   `URLSearchParams` encodings, and a deadline below 1 ms are handled.
+7. **Round 4.** The final order is: server-tier value scrub, then structure and key-name rules, then the
+   caller tier. Caller spans are redacted together with what the rules hide, so a caller value can neither
+   erase a key name nor cut a secret. JSON is parsed as received. A dropped duplicate credential key is
+   redacted on the text. The caller tier is linear: no regex, KMP for long variants, and values over
+   4096 characters or past 64 values are ignored (logged by length only). A scrub that cannot complete
+   returns metadata only instead of failing the search. The last adversarial check found only low and info
+   items inside this operator-only path; they are listed in spec §4.
 
 ## 2. Checks
 
