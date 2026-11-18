@@ -102,6 +102,18 @@ describe('search-deadline-config', () => {
       expect(defaultDeadlineCap(Number.NaN)).toBe(0);
     });
 
+    it('a positive fan-out deadline below 1 ms still caps, at 1 ms (round 3)', () => {
+      expect(defaultDeadlineCap(0.5)).toBe(1);
+      expect(defaultDeadlineCap(Number.MIN_VALUE)).toBe(1);
+      expect(defaultDeadlineCap(1.9)).toBe(1);
+      expect(resolveSearchDeadlineMaxMs({}, 0.5, jest.fn())).toBe(1);
+      expect(sanitizeDeadlineCap(undefined, 0.5)).toBe(1);
+      // With that ceiling neither "no deadline" nor a huge value gets through.
+      const policy = { maxMs: resolveSearchDeadlineMaxMs({}, 0.5, jest.fn()), allowUnbounded: false };
+      expect(clampRequestedDeadline(0, policy)).toBe(1);
+      expect(clampRequestedDeadline(99_999_999, policy)).toBe(1);
+    });
+
     it('keeps a valid configured ceiling', () => {
       expect(sanitizeDeadlineCap(240_000, FANOUT)).toBe(240_000);
     });

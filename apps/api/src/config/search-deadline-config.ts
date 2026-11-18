@@ -53,14 +53,16 @@ export interface DeadlineOverridePolicy {
 
 /**
  * The ceiling used when the operator sets none: the fan-out deadline itself,
- * or `0` (no ceiling) when the operator runs without one.
+ * or `0` (no ceiling) when the operator runs without one (`≤ 0`). A positive
+ * deadline below 1 ms is still a deadline the service enforces, so it caps at
+ * 1 ms rather than reading as "no ceiling".
  */
 export function defaultDeadlineCap(fanoutDeadlineMs: unknown): number {
   if (typeof fanoutDeadlineMs !== 'number' || !Number.isFinite(fanoutDeadlineMs)) {
     return 0;
   }
-  if (fanoutDeadlineMs < 1) return 0;
-  return Math.min(Math.floor(fanoutDeadlineMs), MAX_TIMER_DELAY_MS);
+  if (fanoutDeadlineMs <= 0) return 0;
+  return Math.max(1, Math.min(Math.floor(fanoutDeadlineMs), MAX_TIMER_DELAY_MS));
 }
 
 /**
