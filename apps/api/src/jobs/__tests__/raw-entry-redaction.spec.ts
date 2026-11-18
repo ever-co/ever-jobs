@@ -1,3 +1,4 @@
+import { Logger } from '@nestjs/common';
 import type { RawHttpEntry } from '@ever-jobs/models';
 import { collectRawCaptureSecrets, redactRawEntry } from '../raw-entry-redaction';
 
@@ -210,5 +211,82 @@ describe('raw-entry-redaction', () => {
     redactRawEntry(entry({ body: html }), many);
     redactRawEntry(entry({ body: json }), many);
     expect(Date.now() - started).toBeLessThan(5_000);
+  });
+
+  describe('round 4: the caller tier stays linear and never fails the search', () => {
+    afterEach(() => jest.restoreAllMocks());
+
+    // The round-3 verifier's reproduction: a long `auth` value and a search
+    // term the URLs and the body echo, i.e. long near misses.
+    const term = 'a'.repeat(60_000);
+    const echoing = () =>
+      entry({
+        url: `https://api.jobs2careers.com/api/search.php?id=x&q=${term}`,
+        final_url: `https://api.jobs2careers.com/api/search.php?id=x&q=${term}&p=2`,
+        body: `<html><h1>Results for ${term}</h1>${'<p>job</p>'.repeat(1_000)}<input name=q value="${term}"></html>`,
+      });
+
+    it('a 30k auth value costs milliseconds, not seconds, and is ignored (logged by length only)', () => {
+      const debug = jest.spyOn(Logger.prototype, 'debug').mockImplementation(() => undefined);
+      const apiKey = `${'a'.repeat(30_000)} z`;
+      const started = Date.now();
+      const scrubber = collectRawCaptureSecrets({}, { jooble: { apiKey } });
+      const outs = [echoing(), echoing(), echoing()].map((e) => redactRawEntry(e, scrubber));
+      expect(Date.now() - started).toBeLessThan(1_000);
+      expect(outs[0].url).toBe(`https://api.jobs2careers.com/api/search.php?id=x&q=${term}`);
+      const messages = debug.mock.calls.map((call) => String(call[0]));
+      expect(messages.some((m) => m.includes(String(apiKey.length)))).toBe(true);
+      expect(messages.every((m) => !m.includes('a'.repeat(100)))).toBe(true);
+    });
+
+    it('a 38k auth value does not throw (it compiled into a regular expression too large)', () => {
+      jest.spyOn(Logger.prototype, 'debug').mockImplementation(() => undefined);
+      const scrubber = collectRawCaptureSecrets({}, { jooble: { apiKey: `${'a'.repeat(38_000)} z` } });
+      const body = `<html>${'<p>ordinary job listing</p>'.repeat(2_000)}</html>`;
+      expect(redactRawEntry(entry({ body }), scrubber).body).toBe(body);
+    });
+
+    it('a 4,096-character auth value of near misses (the cap) is matched in linear time', () => {
+      const apiKey = `${'a'.repeat(2_000)}z${'a'.repeat(2_095)}`;
+      const started = Date.now();
+      const scrubber = collectRawCaptureSecrets({}, { jooble: { apiKey } });
+      for (let i = 0; i < 3; i++) redactRawEntry(echoing(), scrubber);
+      expect(Date.now() - started).toBeLessThan(1_000);
+      expect(redactRawEntry(entry({ body: `<p>${apiKey}</p>` }), scrubber).body).toBe(`<p>${REDACTED}</p>`);
+    });
+
+    it('an auth block that cannot be read keeps the server tier and withholds bodies', () => {
+      jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+      const auth = {
+        get jooble(): never {
+          throw new Error('auth read failed');
+        },
+      };
+      const scrubber = collectRawCaptureSecrets(env, auth);
+      const out = redactRawEntry(
+        entry({ url: `https://api.adzuna.com/v1/x?ref=${ADZUNA_KEY}`, body: 'body', request_body: { a: 1 } }),
+        scrubber,
+      );
+      expect(out).not.toHaveProperty('body');
+      expect(out).not.toHaveProperty('request_body');
+      expect(out.truncated).toBe(true);
+      expect(out.status).toBe(200);
+      expect(out.url).toBe(`https://api.adzuna.com/v1/x?ref=${REDACTED}`);
+    });
+
+    it('an entry that cannot be scrubbed keeps its metadata only', () => {
+      jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+      const broken = entry({ url: `https://jooble.org/api/${JOOBLE_KEY}` });
+      Object.defineProperty(broken, 'request_body', {
+        enumerable: true,
+        get(): never {
+          throw new Error('request body read failed');
+        },
+      });
+      const out = redactRawEntry(broken, secrets);
+      expect(out).not.toHaveProperty('request_body');
+      expect(out.truncated).toBe(true);
+      expect(out.url).toBe(`https://jooble.org/api/${REDACTED}`);
+    });
   });
 });
