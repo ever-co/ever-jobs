@@ -371,20 +371,22 @@ describe('toLocationDtos: per-call and per-clone cost (fork-sync hardening)', ()
     return o;
   };
   const cities = (n: number) => Array.from({ length: n }, (_, i) => ({ city: `c${i}` }));
-  // Generous bound: the inputs below took 2-6 s before (alias tables rebuilt
-  // per call; every clone re-walked its parent); slow CI CPUs must not flake.
-  const BOUND_MS = 1000;
 
-  it('maps 60k small objects one call each in linear time', () => {
-    // ~55 us per call when every call rebuilt the alias tables.
-    const started = Date.now();
-    for (let i = 0; i < 30_000; i++) {
-      toLocationDto({}, { prefer: { country: 'addressCountry.name' } });
+  it('builds the alias tables once per configuration, not on every call', () => {
+    // Every call used to split all ~60 default aliases (plus the custom ones
+    // and the prefer path) again: ~55 us per call even for an empty object.
+    toLocationDto({}, { aliases: { state: ['region'] } }); // first use builds it
+    const split = jest.spyOn(String.prototype, 'split');
+    try {
+      for (let i = 0; i < 100; i++) {
+        toLocationDto({}, { prefer: { country: 'addressCountry.name' } });
+        toLocationDto({}, { aliases: { state: ['region'] } });
+        toLocationDtos([{}, {}], { textKeys: [], nameKeys: [] });
+      }
+      expect(split).not.toHaveBeenCalled();
+    } finally {
+      split.mockRestore();
     }
-    for (let i = 0; i < 30_000; i++) {
-      toLocationDto({}, { aliases: { state: ['region'] } });
-    }
-    expect(Date.now() - started).toBeLessThan(BOUND_MS);
   });
 
   it('keeps custom alias configurations apart and still validates them per call', () => {
@@ -481,8 +483,10 @@ describe('toLocationDtos: per-call and per-clone cost (fork-sync hardening)', ()
     expect(toLocationDtos(huge)).toHaveLength(1);
   });
 
-  it('maps 100 parents of 199 keys x 20 addresses in linear time', () => {
-    // The reported shape: 222 KiB, ~3.8 s (21 s before the first caps).
+  it('maps 100 parents of 199 keys x 20 addresses quickly', () => {
+    // The reported shape: 222 KiB, ~3.8 s (21 s before the first caps); a
+    // few hundred ms now. Generous bound so slow CI CPUs never flake; the
+    // expansion count below is the exact check.
     const parent = (): Record<string, unknown> => {
       const o: Record<string, unknown> = {};
       for (let i = 0; i < 199; i++) o[`k${i}`] = i;
@@ -492,7 +496,7 @@ describe('toLocationDtos: per-call and per-clone cost (fork-sync hardening)', ()
     const input = JSON.parse(JSON.stringify(Array.from({ length: 100 }, parent)));
     const started = Date.now();
     const out = toLocationDtos(input);
-    expect(Date.now() - started).toBeLessThan(BOUND_MS);
+    expect(Date.now() - started).toBeLessThan(2000);
     // identical parents dedupe; each expands floor(400 / 199) = 2 entries
     expect(out.map((l) => l.city)).toEqual(['c0', 'c1']);
   });

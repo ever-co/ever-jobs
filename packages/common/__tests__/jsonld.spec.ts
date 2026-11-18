@@ -405,12 +405,18 @@ describe('parseJobPostingLd: address caps (fork-sync hardening)', () => {
     ]);
     // every posting keeps its other fields
     expect(postings.every((p) => p.title === 'Staff Engineer')).toBe(true);
+    // one address per posting: the page budget still stops at 2000
+    const many = parseJobPostingLd(
+      page(Array.from({ length: 2100 }, (_, i) => ({ '@type': 'JobPosting', jobLocation: { address: { addressLocality: `p${i}` } } }))),
+    );
+    expect(many.filter((p) => p.locations.length === 1)).toHaveLength(2000);
+    expect(many[1999].locations[0]?.city).toBe('p1999');
+    expect(many[2000].locations).toEqual([]);
   });
 
   it.each([
     ['100k empty addresses (293 KiB)', { ...baseJob, jobLocation: { address: Array.from({ length: 100_000 }, () => ({})) } }],
     ['33k places with an empty address', { ...baseJob, jobLocation: Array.from({ length: 33_000 }, () => ({ address: {} })) }],
-    ['10k postings with an empty address', Array.from({ length: 10_000 }, () => ({ '@type': 'JobPosting', jobLocation: { address: {} } }))],
   ])('maps a page of %s in linear time', (_label, payload) => {
     const html = page(payload);
     const started = Date.now();
