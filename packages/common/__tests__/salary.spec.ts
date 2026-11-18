@@ -587,6 +587,33 @@ describe('extractSalary — a range that crosses the monthly threshold is yearly
     expect(render(extractSalary('$300 - $400'))).toBe('null');
   });
 
+  it('reads a crossing range as yearly in EUR, GBP and CHF too', () => {
+    expect(render(extractSalary('€25.000 - €35.000', { country: Country.SPAIN }))).toBe(
+      'yearly 25000-35000 EUR',
+    );
+    expect(render(extractSalary('20.000 - 40.000', { country: Country.GERMANY }))).toBe(
+      'yearly 20000-40000 EUR',
+    );
+    expect(render(extractSalary('£25,000 - £35,000'))).toBe('yearly 25000-35000 GBP');
+    expect(render(extractSalary("CHF 25'000 - CHF 35'000"))).toBe('yearly 25000-35000 CHF');
+  });
+
+  it('leaves a crossing range in kr or zł as it was (monthly pay there, not a low yearly one)', () => {
+    // A yearly 25,000 kr / zł is far below full-time pay; 25.000-35.000 kr is
+    // a common monthly range, so the yearly reading would be 12 times too small.
+    expect(render(extractSalary('25.000 kr - 35.000 kr', { country: Country.DENMARK }))).toBe('null');
+    expect(render(extractSalary('25.000 - 35.000', { country: Country.DENMARK }))).toBe('null');
+    expect(render(extractSalary('SEK 28000 - SEK 38000'))).toBe('null');
+    expect(render(extractSalary('NOK 25000 - NOK 45000'))).toBe('null');
+    expect(render(extractSalary('20.000 zł - 35.000 zł'))).toBe('null');
+    expect(render(extractSalary('PLN 20000 - PLN 35000'))).toBe('null');
+    // In-band ranges and a stated period are unchanged there.
+    expect(render(extractSalary('25.000 kr - 28.000 kr', { country: Country.DENMARK }))).toBe(
+      'monthly 25000-28000 DKK',
+    );
+    expect(render(extractSalary('PLN 20000 - PLN 35000 per month'))).toBe('monthly 20000-35000 PLN');
+  });
+
   it('leaves the legacy grammar as it was', () => {
     expect(render(extractSalary('$25k - $35k', { grammar: 'legacy' }))).toBe('null');
     expect(render(extractSalary('$28,000 - $32,000', { grammar: 'legacy' }))).toBe('null');
