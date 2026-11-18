@@ -11,23 +11,31 @@ import {
 } from '@ever-jobs/models';
 import {
   createHttpClient,
+  describeUrlForLog,
   extractJobType,
   parseLocationText,
+  pinUrlToHosts,
 } from '@ever-jobs/common';
 import * as cheerio from 'cheerio';
 import {
+  REVOY_ALLOWED_HOSTS,
   REVOY_CAREERS_URL,
   REVOY_COMPANY_NAME,
   REVOY_DEFAULT_TIMEOUT_SECONDS,
+  REVOY_DOC_ALLOWED_HOSTS,
   REVOY_DOC_DEPARTMENT_BLOCK_RE,
   REVOY_DOC_DEPARTMENT_RE,
   REVOY_DOC_EXPORT,
   REVOY_DOC_ID_RE,
+  REVOY_DOC_LINK_HOSTS,
   REVOY_DOC_LOCATION_BLOCK_RE,
   REVOY_DOC_LOCATION_RE,
   REVOY_DOC_TYPE_RE,
   REVOY_HYBRID_RE,
   REVOY_LINK_SELECTOR,
+  REVOY_MAX_DOC_BYTES,
+  REVOY_MAX_DOC_CHARS,
+  REVOY_MAX_DOCS,
   REVOY_ONSITE_RE,
   REVOY_ORIGIN,
   REVOY_REMOTE_RE,
@@ -65,20 +73,26 @@ export class RevoyService implements IScraper {
   }
 
   private async fetchJobs(input: ScraperInputDto): Promise<JobPostDto[]> {
-    const client = createHttpClient({
+    const clientOptions = {
       proxies: input.proxies,
       caCert: input.caCert,
       requestTimeout: input.requestTimeout ?? REVOY_DEFAULT_TIMEOUT_SECONDS,
-    });
+    };
+    // Spec 1689 — re-pin every redirect hop, not just the first URL: the
+    // index stays on revoy.com, the doc exports on Google's doc hosts.
+    const pageClient = createHttpClient({ ...clientOptions, allowedRedirectHosts: REVOY_ALLOWED_HOSTS });
+    const docClient = createHttpClient({ ...clientOptions, allowedRedirectHosts: REVOY_DOC_ALLOWED_HOSTS });
 
-    const careersUrl = this.normalize(input.companyUrl) || REVOY_CAREERS_URL;
-    const indexRes = await client.get<string>(careersUrl);
-    const refs = this.parseIndex(cheerio.load(String(indexRes.data ?? '')));
+    const careersUrl = this.careersUrl(input);
+    const indexRes = await pageClient.get<string>(careersUrl);
+    const refs = this.parseIndex(cheerio.load(String(indexRes.data ?? '')), careersUrl);
     if (refs.length === 0) return [];
 
     const jobs: JobPostDto[] = [];
     for (const ref of refs) {
-      const docRes = await client.get<string>(REVOY_DOC_EXPORT(ref.docId)).catch(() => null);
+      const docRes = await docClient
+        .get<string>(REVOY_DOC_EXPORT(ref.docId), { maxContentLength: REVOY_MAX_DOC_BYTES })
+        .catch(() => null);
       const docText = docRes ? String(docRes.data ?? '') : null;
       const job = this.buildJob(ref, docText);
       if (job) jobs.push(job);
@@ -86,22 +100,71 @@ export class RevoyService implements IScraper {
     return jobs;
   }
 
-  /** `.text-label-medium` rows: `<a class="link-12" href="…/document/d/{id}/…">{title}</a> — {place}`. */
-  private parseIndex($: cheerio.CheerioAPI): RevoyJobRef[] {
+  /**
+   * The careers index to fetch: the caller's `companyUrl` when it is on
+   * revoy.com (or a subdomain), otherwise this plugin's page.
+   *
+   * Pin-or-ignore (Spec 1689), as `source-company-soundryx` does. Here it
+   * also decides which Google Docs get fetched and parsed: an unpinned index
+   * let a caller point the plugin at a page of links to docs they wrote.
+   * An off-domain, internal or malformed `companyUrl` is ignored, not fatal.
+   * `http:` is upgraded.
+   */
+  private careersUrl(input: ScraperInputDto): string {
+    const requested = this.normalize(input.companyUrl);
+    if (!requested) return REVOY_CAREERS_URL;
+    const pinned = pinUrlToHosts(requested, REVOY_ALLOWED_HOSTS, { upgradeHttp: true });
+    if (!pinned) {
+      this.logger.debug(
+        `Revoy: ignoring companyUrl on host \`${describeUrlForLog(requested)}\` - not an https URL on ${REVOY_ALLOWED_HOSTS.join(', ')}`,
+      );
+      return REVOY_CAREERS_URL;
+    }
+    return pinned;
+  }
+
+  /**
+   * `.text-label-medium` rows: `<a class="link-12" href="…/document/d/{id}/…">{title}</a> — {place}`.
+   *
+   * A row counts only when its link, resolved against the index, is an https
+   * URL on docs.google.com (Spec 1689 — links read off a page are untrusted);
+   * the pinned URL is what the job links to. At most {@link REVOY_MAX_DOCS}
+   * distinct docs are kept.
+   */
+  private parseIndex($: cheerio.CheerioAPI, careersUrl: string): RevoyJobRef[] {
     const refs: RevoyJobRef[] = [];
     const seen = new Set<string>();
     $(REVOY_LINK_SELECTOR).each((_, el) => {
+      if (refs.length >= REVOY_MAX_DOCS) return false;
       const $a = $(el);
       const href = $a.attr('href')?.trim();
-      const docId = href ? REVOY_DOC_ID_RE.exec(href)?.[1] : null;
+      const docUrl = href ? this.docLink(href, careersUrl) : null;
+      const docId = docUrl ? REVOY_DOC_ID_RE.exec(new URL(docUrl).pathname)?.[1] : null;
       const title = this.normalize($a.text());
-      if (!docId || !title || seen.has(docId)) return;
+      if (!docUrl || !docId || !title || seen.has(docId)) return undefined;
       seen.add(docId);
       const rowText = this.normalize($a.parent().text());
       const linkLocation = REVOY_ROW_LOCATION_RE.exec(rowText)?.[1]?.trim() || null;
-      refs.push({ docId, docUrl: href as string, title, linkLocation });
+      refs.push({ docId, docUrl, title, linkLocation });
+      return undefined;
     });
     return refs;
+  }
+
+  /** `href` resolved against the index and pinned to docs.google.com, else null. */
+  private docLink(href: string, careersUrl: string): string | null {
+    let absolute: string;
+    try {
+      absolute = new URL(href, careersUrl).toString();
+    } catch {
+      return null;
+    }
+    const pinned = pinUrlToHosts(absolute, REVOY_DOC_LINK_HOSTS, {
+      upgradeHttp: true,
+      allowSubdomains: false,
+    });
+    if (!pinned) this.logger.debug(`Revoy: skipping off-site doc link on host \`${describeUrlForLog(absolute)}\``);
+    return pinned;
   }
 
   private buildJob(ref: RevoyJobRef, docText: string | null): JobPostDto | null {
@@ -144,15 +207,20 @@ export class RevoyService implements IScraper {
 
   /**
    * Doc headers vary: `Location: Troutdale, OR (on-site)` vs caps blocks
-   * `LOCATION\tPortland, OR` / `FUNCTION\tFinance`. Labeled lines win;
+   * `LOCATION\r\nPortland, OR` / `FUNCTION\tFinance`. Labeled lines win;
    * caps blocks are a fallback; the rest is description text.
+   *
+   * Only the first {@link REVOY_MAX_DOC_CHARS} characters are parsed and
+   * kept (Spec 1689): the patterns are linear, but a doc is third-party
+   * text and a role description never needs more.
    */
-  private parseDoc(text: string): {
+  private parseDoc(fullText: string): {
     locationText: string | null;
     department: string | null;
     typeText: string | null;
     description: string;
   } {
+    const text = fullText.slice(0, REVOY_MAX_DOC_CHARS);
     const locationText =
       REVOY_DOC_LOCATION_RE.exec(text)?.[1]?.trim() ||
       REVOY_DOC_LOCATION_BLOCK_RE.exec(text)?.[1]?.trim() ||
