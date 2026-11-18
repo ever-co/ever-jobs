@@ -17,6 +17,7 @@ jest.mock('@ever-jobs/common', () => {
 });
 
 import { XlightService } from '../src/xlight.service';
+import { XLIGHT_ALLOWED_HOSTS } from '../src/xlight.constants';
 
 function respondWith(payload: unknown): void {
   getMock.mockResolvedValue({ data: payload });
@@ -127,5 +128,62 @@ describe('XlightService', () => {
       new ScraperInputDto({ resultsWanted: 5, offset: 5 }),
     );
     expect(paged.jobs).toHaveLength(5);
+  });
+
+  describe('URL pinning (Spec 1689)', () => {
+    it('fetches an on-domain companyUrl, upgrading http to https', async () => {
+      respondWith(careersHtml);
+      const res = await service.scrape(
+        new ScraperInputDto({ companyUrl: 'http://jobs.xlight.com/careers' }),
+      );
+      expect(getMock).toHaveBeenCalledTimes(1);
+      expect(getMock).toHaveBeenCalledWith('https://jobs.xlight.com/careers');
+      expect(res.jobs[0].jobUrl).toBe('https://jobs.xlight.com/careers');
+    });
+
+    it.each([
+      ['off-domain', 'https://evil.example/careers/'],
+      ['lookalike', 'https://xlight.com.evil.example/careers/'],
+      ['userinfo', 'https://xlight.com@evil.example/careers/'],
+      ['userinfo on the allowed host', 'https://user:pass@www.xlight.com/careers/'],
+      ['explicit port', 'https://www.xlight.com:8443/careers/'],
+      ['metadata IP over http', 'http://169.254.169.254/latest/meta-data/'],
+      ['internal IP', 'http://10.0.0.5:8080/careers/'],
+      ['IPv6 ULA', 'http://[fd00::1]/careers/'],
+      ['cluster DNS', 'http://argocd-server.argocd.svc.cluster.local/'],
+      ['non-http scheme', 'file:///etc/passwd'],
+    ])('ignores a %s companyUrl and fetches the default board', async (_label, companyUrl) => {
+      respondWith(careersHtml);
+      const res = await service.scrape(new ScraperInputDto({ companyUrl }));
+      expect(getMock).toHaveBeenCalledTimes(1);
+      expect(getMock).toHaveBeenCalledWith('https://www.xlight.com/careers');
+      expect(res.jobs.length).toBeGreaterThan(0);
+      for (const job of res.jobs) expect(job.jobUrl).toBe('https://www.xlight.com/careers');
+    });
+
+    it('logs only the host of a refused companyUrl, never its credentials or query', () => {
+      const debug = jest
+        .spyOn((service as unknown as { logger: { debug: (m: string) => void } }).logger, 'debug')
+        .mockImplementation(() => undefined);
+      (service as unknown as { careersUrl(input: ScraperInputDto): string }).careersUrl(
+        new ScraperInputDto({ companyUrl: 'https://user:s3cret@evil.example/x?token=t0k' }),
+      );
+      const logged = debug.mock.calls.map((call) => String(call[0])).join('\n');
+      expect(logged).toContain('evil.example');
+      expect(logged).not.toMatch(/s3cret|t0k|user:/);
+    });
+
+    it('pins every redirect hop to the plugin allowlist', async () => {
+      const { createHttpClient } = jest.requireMock('@ever-jobs/common') as {
+        createHttpClient: jest.Mock;
+      };
+      createHttpClient.mockClear();
+      respondWith(careersHtml);
+      await service.scrape(new ScraperInputDto({}));
+      expect(createHttpClient).toHaveBeenCalledWith(
+        expect.objectContaining({ allowedRedirectHosts: XLIGHT_ALLOWED_HOSTS }),
+      );
+      expect(XLIGHT_ALLOWED_HOSTS).toEqual(['xlight.com']);
+    });
   });
 });

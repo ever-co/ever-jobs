@@ -175,4 +175,86 @@ describe('JibeService', () => {
     const res = await service.scrape(new ScraperInputDto({ companySlug: 'nope.example.com' }));
     expect(res.jobs).toEqual([]);
   });
+
+  it('drops a non-http apply_url', async () => {
+    mockGet.mockResolvedValueOnce({
+      data: apiPage([apiJob({ id: '5', applyUrl: 'javascript:alert(document.cookie)' })], 1),
+    });
+    const res = await service.scrape(new ScraperInputDto({ companySlug: HOST }));
+    expect(res.jobs).toHaveLength(1);
+    expect(res.jobs[0].applyUrl).toBeNull();
+    expect(res.jobs[0].jobUrlDirect).toBeNull();
+    expect(res.jobs[0].jobUrl).toBe(`https://${HOST}/jobs/5`);
+  });
+
+  describe('tenant host guard (Spec 1689)', () => {
+    it.each([
+      ['private IP over http', 'http://10.0.0.5:8080'],
+      ['metadata IP', 'https://169.254.169.254/latest/meta-data/'],
+      ['public IP literal', 'https://8.8.8.8/careers/jobs'],
+      ['hex IPv4 spelling', 'https://0x7f.1/'],
+      ['IPv6 literal', 'http://[fd00::1]/'],
+      ['loopback name', 'https://localhost.localdomain/'],
+      ['internal suffix', 'metadata.internal'],
+      ['cluster service', 'https://valkey.valkey.svc.cluster.local/'],
+      ['kubernetes namespace TLD', 'kubernetes.default'],
+      ['userinfo', 'https://user:pw@careers.acme.com/careers-home/jobs'],
+      ['host smuggled through userinfo', 'https://careers.acme.com@10.0.0.5/'],
+      ['explicit port', 'https://careers.acme.com:8443/'],
+    ])('refuses a %s tenant without fetching', async (_label, companyUrl) => {
+      const res = await service.scrape(new ScraperInputDto({ companyUrl }));
+      expect(res.jobs).toEqual([]);
+      expect(mockGet).not.toHaveBeenCalled();
+    });
+
+    it('refuses the same hosts given as companySlug', async () => {
+      for (const companySlug of ['10.0.0.5', '169.254.169.254', 'localhost', 'svc.cluster.local']) {
+        await service.scrape(new ScraperInputDto({ companySlug }));
+      }
+      expect(mockGet).not.toHaveBeenCalled();
+    });
+
+    it('upgrades an http tenant URL to https', async () => {
+      mockGet.mockResolvedValueOnce({ data: apiPage(pageJobs(['1']), 1) });
+      const res = await service.scrape(
+        new ScraperInputDto({ companyUrl: 'http://careers.rivian.com/careers-home/jobs' }),
+      );
+      expect(mockGet.mock.calls[0][0]).toBe('https://careers.rivian.com/api/jobs?page=1');
+      expect(res.jobs[0].jobUrl).toBe('https://careers.rivian.com/careers-home/jobs/1');
+      expect(res.jobs[0].companyUrl).toBe('https://careers.rivian.com');
+    });
+
+    it('falls back to companySlug when companyUrl is refused', async () => {
+      mockGet.mockResolvedValueOnce({ data: apiPage(pageJobs(['1']), 1) });
+      await service.scrape(
+        new ScraperInputDto({ companyUrl: 'http://10.0.0.5:8080', companySlug: HOST }),
+      );
+      expect(mockGet).toHaveBeenCalledTimes(1);
+      expect(mockGet.mock.calls[0][0]).toBe(`https://${HOST}/api/jobs?page=1`);
+    });
+
+    it('pins every redirect hop to the tenant host', async () => {
+      const { createHttpClient } = jest.requireMock('@ever-jobs/common') as {
+        createHttpClient: jest.Mock;
+      };
+      createHttpClient.mockClear();
+      mockGet.mockResolvedValueOnce({ data: apiPage(pageJobs(['1']), 1) });
+      await service.scrape(new ScraperInputDto({ companySlug: 'Careers.Rivian.com' }));
+      expect(createHttpClient).toHaveBeenCalledWith(
+        expect.objectContaining({ allowedRedirectHosts: ['careers.rivian.com'] }),
+      );
+    });
+
+    it('logs only the host of a refused tenant, never its credentials or query', async () => {
+      const warn = jest
+        .spyOn((service as unknown as { logger: { warn: (m: string) => void } }).logger, 'warn')
+        .mockImplementation(() => undefined);
+      await service.scrape(
+        new ScraperInputDto({ companyUrl: 'https://user:s3cret@10.0.0.5/x?token=t0k' }),
+      );
+      const logged = warn.mock.calls.map((call) => String(call[0])).join('\n');
+      expect(logged).toContain('10.0.0.5');
+      expect(logged).not.toMatch(/s3cret|t0k|user:/);
+    });
+  });
 });

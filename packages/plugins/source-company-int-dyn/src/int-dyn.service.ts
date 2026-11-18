@@ -9,9 +9,10 @@ import {
   ScrapeDiagnostics,
   Site,
 } from '@ever-jobs/models';
-import { createHttpClient } from '@ever-jobs/common';
+import { createHttpClient, describeUrlForLog, pinUrlToHosts } from '@ever-jobs/common';
 import * as cheerio from 'cheerio';
 import {
+  INT_DYN_ALLOWED_HOSTS,
   INT_DYN_APPLY_MAILTO,
   INT_DYN_BULLET_SELECTOR,
   INT_DYN_CAREERS_URL,
@@ -61,9 +62,11 @@ export class IntDynService implements IScraper {
       proxies: input.proxies,
       caCert: input.caCert,
       requestTimeout: input.requestTimeout ?? INT_DYN_DEFAULT_TIMEOUT_SECONDS,
+      // Spec 1689 — re-pin every redirect hop, not just the first URL
+      allowedRedirectHosts: INT_DYN_ALLOWED_HOSTS,
     });
 
-    const careersUrl = this.pageUrl(this.normalize(input.companyUrl)) || INT_DYN_ORIGIN;
+    const careersUrl = this.pageUrl(input);
     const res = await client.get<string>(careersUrl);
     const rows = this.parseCareersPage(cheerio.load(String(res.data ?? '')));
     return rows
@@ -118,16 +121,30 @@ export class IntDynService implements IScraper {
     return parts.join('\n\n');
   }
 
-  /** The careers board lives at the #Careers anchor of the one-page site; strip the fragment for the fetch. */
-  private pageUrl(url: string): string {
-    if (!url) return '';
-    try {
-      const u = new URL(url);
-      u.hash = '';
-      return u.toString();
-    } catch {
-      return '';
+  /**
+   * The page to fetch: the caller's `companyUrl` when it is on int-dyn.com
+   * (or a subdomain), otherwise the site root. The careers board lives at the
+   * `#Careers` anchor of the one-page site, so the fragment is stripped.
+   *
+   * Pin-or-ignore (Spec 1689), as `source-company-soundryx` does: a company
+   * plugin scrapes one company, so an off-domain, internal or malformed
+   * `companyUrl` is a mistake or an attempt to aim our HTTP client elsewhere.
+   * Neither deserves a failed scrape — ignore it and say so. `http:` is
+   * upgraded.
+   */
+  private pageUrl(input: ScraperInputDto): string {
+    const requested = this.normalize(input.companyUrl);
+    if (!requested) return INT_DYN_ORIGIN;
+    const pinned = pinUrlToHosts(requested, INT_DYN_ALLOWED_HOSTS, { upgradeHttp: true });
+    if (!pinned) {
+      this.logger.debug(
+        `Integrated Dynamics: ignoring companyUrl on host \`${describeUrlForLog(requested)}\` - not an https URL on ${INT_DYN_ALLOWED_HOSTS.join(', ')}`,
+      );
+      return INT_DYN_ORIGIN;
     }
+    const url = new URL(pinned);
+    url.hash = '';
+    return url.toString();
   }
 
   private applyInput(jobs: JobPostDto[], input: ScraperInputDto): JobPostDto[] {

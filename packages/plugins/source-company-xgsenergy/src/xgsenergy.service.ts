@@ -12,12 +12,15 @@ import {
 } from '@ever-jobs/models';
 import {
   createHttpClient,
+  describeUrlForLog,
   htmlToPlainText,
   parseLocationText,
+  pinUrlToHosts,
 } from '@ever-jobs/common';
 import * as cheerio from 'cheerio';
 import type { AnyNode } from 'domhandler';
 import {
+  XGSENERGY_ALLOWED_HOSTS,
   XGSENERGY_CAREERS_URL,
   XGSENERGY_CFEMAIL_ATTR,
   XGSENERGY_CFEMAIL_HREF_RE,
@@ -68,11 +71,36 @@ export class XgsEnergyService implements IScraper {
       proxies: input.proxies,
       caCert: input.caCert,
       requestTimeout: input.requestTimeout ?? XGSENERGY_DEFAULT_TIMEOUT_SECONDS,
+      // Spec 1689 — re-pin every redirect hop, not just the first URL
+      allowedRedirectHosts: XGSENERGY_ALLOWED_HOSTS,
     });
 
-    const careersUrl = this.normalize(input.companyUrl) || XGSENERGY_CAREERS_URL;
+    const careersUrl = this.careersUrl(input);
     const res = await client.get<string>(careersUrl);
     return this.parseItems(cheerio.load(String(res.data ?? '')), careersUrl);
+  }
+
+  /**
+   * The careers page to fetch: the caller's `companyUrl` when it is on
+   * xgsenergy.com (or a subdomain), otherwise this plugin's board.
+   *
+   * Pin-or-ignore (Spec 1689), as `source-company-soundryx` does: a company
+   * plugin scrapes one company, so an off-domain, internal or malformed
+   * `companyUrl` is a mistake or an attempt to aim our HTTP client elsewhere.
+   * Neither deserves a failed scrape — ignore it and say so. `http:` is
+   * upgraded.
+   */
+  private careersUrl(input: ScraperInputDto): string {
+    const requested = this.normalize(input.companyUrl);
+    if (!requested) return XGSENERGY_CAREERS_URL;
+    const pinned = pinUrlToHosts(requested, XGSENERGY_ALLOWED_HOSTS, { upgradeHttp: true });
+    if (!pinned) {
+      this.logger.debug(
+        `XGS Energy: ignoring companyUrl on host \`${describeUrlForLog(requested)}\` - not an https URL on ${XGSENERGY_ALLOWED_HOSTS.join(', ')}`,
+      );
+      return XGSENERGY_CAREERS_URL;
+    }
+    return pinned;
   }
 
   /** One `div.elementor-accordion-item` per role: tab title + tab content. */

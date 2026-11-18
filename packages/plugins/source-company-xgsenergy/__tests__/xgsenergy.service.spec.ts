@@ -14,6 +14,7 @@ jest.mock('@ever-jobs/common', () => {
 });
 
 import { XgsEnergyService } from '../src/xgsenergy.service';
+import { XGSENERGY_ALLOWED_HOSTS } from '../src/xgsenergy.constants';
 
 function live(): void {
   getMock.mockReset();
@@ -134,5 +135,64 @@ describe('XgsEnergyService', () => {
     );
     expect(limited.jobs).toHaveLength(2);
     expect(limited.jobs[0].title).toBe('Drilling Engineer');
+  });
+
+  describe('URL pinning (Spec 1689)', () => {
+    it('fetches an on-domain companyUrl, upgrading http to https', async () => {
+      live();
+      const res = await service.scrape(
+        new ScraperInputDto({ companyUrl: 'http://xgsenergy.com/careers/' }),
+      );
+      expect(getMock).toHaveBeenCalledTimes(1);
+      expect(getMock).toHaveBeenCalledWith('https://xgsenergy.com/careers/');
+      expect(res.jobs[0].jobUrl).toMatch(/^https:\/\/xgsenergy\.com\/careers\/#/);
+    });
+
+    it.each([
+      ['off-domain', 'https://evil.example/careers/'],
+      ['lookalike', 'https://xgsenergy.com.evil.example/careers/'],
+      ['userinfo', 'https://xgsenergy.com@evil.example/careers/'],
+      ['userinfo on the allowed host', 'https://user:pass@www.xgsenergy.com/careers/'],
+      ['explicit port', 'https://www.xgsenergy.com:8443/careers/'],
+      ['metadata IP over http', 'http://169.254.169.254/latest/meta-data/'],
+      ['internal IP', 'http://10.0.0.5:8080/careers/'],
+      ['IPv6 ULA', 'http://[fd00::1]/careers/'],
+      ['cluster DNS', 'http://argocd-server.argocd.svc.cluster.local/'],
+      ['non-http scheme', 'file:///etc/passwd'],
+    ])('ignores a %s companyUrl and fetches the default page', async (_label, companyUrl) => {
+      live();
+      const res = await service.scrape(new ScraperInputDto({ companyUrl }));
+      expect(getMock).toHaveBeenCalledTimes(1);
+      expect(getMock).toHaveBeenCalledWith('https://www.xgsenergy.com/careers/');
+      expect(res.jobs).toHaveLength(7);
+      for (const job of res.jobs) {
+        expect(job.jobUrl.startsWith('https://www.xgsenergy.com/careers/')).toBe(true);
+      }
+    });
+
+    it('logs only the host of a refused companyUrl, never its credentials or query', () => {
+      const debug = jest
+        .spyOn((service as unknown as { logger: { debug: (m: string) => void } }).logger, 'debug')
+        .mockImplementation(() => undefined);
+      (service as unknown as { careersUrl(input: ScraperInputDto): string }).careersUrl(
+        new ScraperInputDto({ companyUrl: 'https://user:s3cret@evil.example/x?token=t0k' }),
+      );
+      const logged = debug.mock.calls.map((call) => String(call[0])).join('\n');
+      expect(logged).toContain('evil.example');
+      expect(logged).not.toMatch(/s3cret|t0k|user:/);
+    });
+
+    it('pins every redirect hop to the plugin allowlist', async () => {
+      const { createHttpClient } = jest.requireMock('@ever-jobs/common') as {
+        createHttpClient: jest.Mock;
+      };
+      createHttpClient.mockClear();
+      live();
+      await service.scrape(new ScraperInputDto({}));
+      expect(createHttpClient).toHaveBeenCalledWith(
+        expect.objectContaining({ allowedRedirectHosts: XGSENERGY_ALLOWED_HOSTS }),
+      );
+      expect(XGSENERGY_ALLOWED_HOSTS).toEqual(['xgsenergy.com']);
+    });
   });
 });

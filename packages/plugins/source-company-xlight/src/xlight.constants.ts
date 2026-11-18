@@ -2,6 +2,12 @@ export const XLIGHT_COMPANY_NAME = 'xLight';
 export const XLIGHT_ORIGIN = 'https://www.xlight.com';
 export const XLIGHT_CAREERS_URL = `${XLIGHT_ORIGIN}/careers`;
 export const XLIGHT_DEFAULT_TIMEOUT_SECONDS = 30;
+/**
+ * Hosts this plugin may fetch — mirrors `companyDomains` (Spec 1689). A
+ * caller-supplied `companyUrl` elsewhere is ignored in favour of
+ * {@link XLIGHT_CAREERS_URL}, and every redirect hop is pinned to them.
+ */
+export const XLIGHT_ALLOWED_HOSTS: readonly string[] = ['xlight.com'];
 /** Webflow CMS list — one card per role. */
 export const XLIGHT_ITEM_SELECTOR = 'div.careers-item.w-dyn-item';
 export const XLIGHT_TITLE_SELECTOR = 'h3.job-item-title';

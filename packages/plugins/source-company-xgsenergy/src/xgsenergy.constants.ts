@@ -2,6 +2,12 @@ export const XGSENERGY_COMPANY_NAME = 'XGS Energy';
 export const XGSENERGY_ORIGIN = 'https://www.xgsenergy.com';
 export const XGSENERGY_CAREERS_URL = `${XGSENERGY_ORIGIN}/careers/`;
 export const XGSENERGY_DEFAULT_TIMEOUT_SECONDS = 30;
+/**
+ * Hosts this plugin may fetch — mirrors `companyDomains` (Spec 1689). A
+ * caller-supplied `companyUrl` elsewhere is ignored in favour of
+ * {@link XGSENERGY_CAREERS_URL}, and every redirect hop is pinned to them.
+ */
+export const XGSENERGY_ALLOWED_HOSTS: readonly string[] = ['xgsenergy.com'];
 
 /** One accordion block per role. */
 export const XGSENERGY_ITEM_SELECTOR = 'div.elementor-accordion-item';

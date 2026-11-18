@@ -13,8 +13,9 @@ import {
   ScrapeDiagnostics,
   Site,
 } from '@ever-jobs/models';
-import { createHttpClient } from '@ever-jobs/common';
+import { createHttpClient, describeUrlForLog, pinUrlToHosts } from '@ever-jobs/common';
 import {
+  BUILDNEBULA_ALLOWED_HOSTS,
   BUILDNEBULA_COMPANY_NAME,
   BUILDNEBULA_DEFAULT_TIMEOUT_SECONDS,
   BUILDNEBULA_LISTINGS_PATH,
@@ -61,6 +62,8 @@ export class BuildnebulaService implements IScraper {
       proxies: input.proxies,
       caCert: input.caCert,
       requestTimeout: input.requestTimeout ?? BUILDNEBULA_DEFAULT_TIMEOUT_SECONDS,
+      // Spec 1689 — re-pin every redirect hop, not just the first URL
+      allowedRedirectHosts: BUILDNEBULA_ALLOWED_HOSTS,
     });
 
     const origin = this.origin(input.companyUrl);
@@ -194,12 +197,28 @@ export class BuildnebulaService implements IScraper {
     );
   }
 
-  /** Origin of `companyUrl` (or the careers URL a caller passed), else default. */
+  /**
+   * Origin of `companyUrl` (or the careers URL a caller passed) when it is on
+   * buildnebula.com (or a subdomain), else the default origin.
+   *
+   * Pin-or-ignore (Spec 1689), as `source-company-soundryx` does: the URL is
+   * checked by `pinUrlToHosts` and the origin is read from the checked URL
+   * with the WHATWG parser, never sliced off the raw text by a regex (which
+   * kept `https://buildnebula.com@10.0.0.5:8080` as an "origin"). An
+   * off-domain, internal or malformed `companyUrl` is ignored, not fatal.
+   * `http:` is upgraded.
+   */
   private origin(companyUrl?: string): string {
-    const raw = this.normalize(companyUrl);
-    if (!raw) return BUILDNEBULA_ORIGIN;
-    const m = /^(https?:\/\/[^/]+)/i.exec(raw);
-    return m ? m[1] : BUILDNEBULA_ORIGIN;
+    const requested = this.normalize(companyUrl);
+    if (!requested) return BUILDNEBULA_ORIGIN;
+    const pinned = pinUrlToHosts(requested, BUILDNEBULA_ALLOWED_HOSTS, { upgradeHttp: true });
+    if (!pinned) {
+      this.logger.debug(
+        `Nebula: ignoring companyUrl on host \`${describeUrlForLog(requested)}\` - not an https URL on ${BUILDNEBULA_ALLOWED_HOSTS.join(', ')}`,
+      );
+      return BUILDNEBULA_ORIGIN;
+    }
+    return new URL(pinned).origin;
   }
 
   private applyInput(jobs: JobPostDto[], input: ScraperInputDto): JobPostDto[] {

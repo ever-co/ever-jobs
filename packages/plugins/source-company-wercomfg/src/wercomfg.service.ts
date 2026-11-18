@@ -13,21 +13,26 @@ import {
 } from '@ever-jobs/models';
 import {
   createHttpClient,
+  describeUrlForLog,
   extractJobType,
   extractLdJsonBlocks,
+  firstPublicUrl,
   htmlToPlainText,
   jobPostingLdFromNode,
   jobPostingLdToCompensation,
   markdownConverter,
+  pinUrlToHosts,
   toDateOnly,
 } from '@ever-jobs/common';
 import * as cheerio from 'cheerio';
 import {
+  WERCOMFG_ALLOWED_HOSTS,
   WERCOMFG_APPLY_MAILTO,
   WERCOMFG_CAREERS_URL,
   WERCOMFG_COMPANY_NAME,
   WERCOMFG_DEFAULT_TIMEOUT_SECONDS,
   WERCOMFG_DETAIL_LINK_RE,
+  WERCOMFG_MAX_DETAIL_LINKS,
   WERCOMFG_ORIGIN,
 } from './wercomfg.constants';
 import { WercoDetailLink, WercoPosting } from './wercomfg.types';
@@ -78,44 +83,88 @@ export class WercoMfgService implements IScraper {
       proxies: input.proxies,
       caCert: input.caCert,
       requestTimeout: input.requestTimeout ?? WERCOMFG_DEFAULT_TIMEOUT_SECONDS,
+      // Spec 1689 — re-pin every redirect hop, not just the first URL
+      allowedRedirectHosts: WERCOMFG_ALLOWED_HOSTS,
     });
 
-    const careersUrl = this.normalize(input.companyUrl) || WERCOMFG_CAREERS_URL;
+    const careersUrl = this.careersUrl(input);
     const indexRes = await client.get<string>(careersUrl);
     const links = this.collectDetailLinks(cheerio.load(String(indexRes.data ?? '')), careersUrl);
     if (!links.length) return [];
 
-    const settled = await Promise.allSettled(
-      links.map((link) => client.get<string>(link.url)),
-    );
+    // One detail page at a time (CLAUDE.md §6, Spec 1690): a small company
+    // site, and a cap above, so no fan-out. A failed page skips that role only.
     const jobs: JobPostDto[] = [];
-    settled.forEach((result, i) => {
-      if (result.status !== 'fulfilled') {
-        this.logger.warn(`Werco detail fetch failed for ${links[i].url}`);
-        return;
+    for (const link of links) {
+      const res = await client.get<string>(link.url).catch(() => null);
+      if (!res) {
+        this.logger.warn(`Werco detail fetch failed for ${link.url}`);
+        continue;
       }
-      const posting = this.parseDetail(String(result.value.data ?? ''));
-      if (!posting) return;
-      const job = this.toJobPost(posting, links[i], input.descriptionFormat);
+      const posting = this.parseDetail(String(res.data ?? ''));
+      if (!posting) continue;
+      const job = this.toJobPost(posting, link, input.descriptionFormat);
       if (job) jobs.push(job);
-    });
+    }
     return jobs;
   }
 
+  /**
+   * The careers index to fetch: the caller's `companyUrl` when it is on
+   * wercomfg.com (or a subdomain), otherwise this plugin's board.
+   *
+   * Pin-or-ignore (Spec 1689), as `source-company-soundryx` does: a company
+   * plugin scrapes one company, so an off-domain, internal or malformed
+   * `companyUrl` is a mistake or an attempt to aim our HTTP client elsewhere.
+   * Neither deserves a failed scrape — ignore it and say so. `http:` is
+   * upgraded.
+   */
+  private careersUrl(input: ScraperInputDto): string {
+    const requested = this.normalize(input.companyUrl);
+    if (!requested) return WERCOMFG_CAREERS_URL;
+    const pinned = pinUrlToHosts(requested, WERCOMFG_ALLOWED_HOSTS, { upgradeHttp: true });
+    if (!pinned) {
+      this.logger.debug(
+        `Werco Manufacturing: ignoring companyUrl on host \`${describeUrlForLog(requested)}\` - not an https URL on ${WERCOMFG_ALLOWED_HOSTS.join(', ')}`,
+      );
+      return WERCOMFG_CAREERS_URL;
+    }
+    return pinned;
+  }
+
+  /**
+   * `/careers/{slug}` links on the index, each pinned to the Werco hosts
+   * (Spec 1689 — links read off a fetched page are untrusted): a link to
+   * another host, an IP literal, a non-default port or with credentials is
+   * dropped, an `http:` one is upgraded. At most
+   * {@link WERCOMFG_MAX_DETAIL_LINKS} distinct links are kept.
+   */
   private collectDetailLinks($: cheerio.CheerioAPI, baseUrl: string): WercoDetailLink[] {
     const seen = new Set<string>();
     const links: WercoDetailLink[] = [];
+    let dropped = 0;
     $('a[href]').each((_i, el) => {
+      if (links.length >= WERCOMFG_MAX_DETAIL_LINKS) return false;
       const href = ($(el).attr('href') ?? '').trim();
       const absolute = this.absoluteUrl(href, baseUrl);
-      if (!absolute) return;
-      const path = new URL(absolute).pathname;
-      if (!WERCOMFG_DETAIL_LINK_RE.test(path)) return;
-      const url = absolute.split('#')[0];
-      if (seen.has(url)) return;
+      if (!absolute || !WERCOMFG_DETAIL_LINK_RE.test(new URL(absolute).pathname)) return undefined;
+      const pinned = pinUrlToHosts(absolute, WERCOMFG_ALLOWED_HOSTS, { upgradeHttp: true });
+      if (!pinned) {
+        dropped++;
+        return undefined;
+      }
+      const parsed = new URL(pinned);
+      parsed.hash = '';
+      const url = parsed.href;
+      if (seen.has(url)) return undefined;
       seen.add(url);
-      links.push({ url, slug: path.replace(/^\/careers\//, '').replace(/\/+$/, '') });
+      links.push({
+        url,
+        slug: parsed.pathname.replace(/^\/careers\//, '').replace(/\/+$/, ''),
+      });
+      return undefined;
     });
+    if (dropped) this.logger.debug(`Werco Manufacturing: dropped ${dropped} off-site detail link(s)`);
     return links;
   }
 
@@ -143,7 +192,8 @@ export class WercoMfgService implements IScraper {
     if (!title) return null;
     const atsId = this.normalize(identifier) || link.slug;
     if (!atsId) return null;
-    const jobUrl = this.normalize(posting.url) || link.url;
+    // only an http(s) page may become a link (Spec 1751) — never `javascript:`
+    const jobUrl = firstPublicUrl(this.normalize(posting.url)) ?? link.url;
     const description = this.composeDescription(
       this.formatDescription(posting.description, format),
       industry,
@@ -166,7 +216,7 @@ export class WercoMfgService implements IScraper {
       companyUrl: WERCOMFG_ORIGIN,
       jobUrl,
       jobUrlDirect: jobUrl,
-      applyUrl: this.normalize(posting.applyUrl) || WERCOMFG_APPLY_MAILTO,
+      applyUrl: firstPublicUrl(this.normalize(posting.applyUrl)) ?? WERCOMFG_APPLY_MAILTO,
       jobType: employmentType ? extractJobType(employmentType.replace(/[_-]/g, ' ')) ?? null : null,
       location,
       ...(location ? { locations: [location] } : {}),

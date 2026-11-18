@@ -9,8 +9,15 @@ import {
   ScrapeDiagnostics,
   Site,
 } from '@ever-jobs/models';
-import { createHttpClient, parseLocationText } from '@ever-jobs/common';
 import {
+  createHttpClient,
+  describeUrlForLog,
+  firstPublicUrl,
+  parseLocationText,
+  pinUrlToHosts,
+} from '@ever-jobs/common';
+import {
+  MINERVAHUMANOIDS_ALLOWED_HOSTS,
   MINERVAHUMANOIDS_APPLY_ANCHOR,
   MINERVAHUMANOIDS_COMPANY_NAME,
   MINERVAHUMANOIDS_DEFAULT_TIMEOUT_SECONDS,
@@ -59,6 +66,8 @@ export class MinervaHumanoidsService implements IScraper {
       proxies: input.proxies,
       caCert: input.caCert,
       requestTimeout: input.requestTimeout ?? MINERVAHUMANOIDS_DEFAULT_TIMEOUT_SECONDS,
+      // Spec 1689 — re-pin every redirect hop, not just the first URL
+      allowedRedirectHosts: MINERVAHUMANOIDS_ALLOWED_HOSTS,
     });
 
     const origin = this.origin(input.companyUrl);
@@ -88,7 +97,8 @@ export class MinervaHumanoidsService implements IScraper {
     const id = this.normalize(item.id);
     if (!title || !id) return null;
 
-    const externalApply = this.normalize(item.applyUrl);
+    // only an http(s) page may become a link (Spec 1751) — never `javascript:`
+    const externalApply = firstPublicUrl(this.normalize(item.applyUrl));
     const isTalent = item.program === 'talent';
     const jobUrl =
       externalApply || `${origin}/careers#job-description-${id}`;
@@ -129,12 +139,28 @@ export class MinervaHumanoidsService implements IScraper {
     return parts.join('\n\n');
   }
 
-  /** Origin of `companyUrl` (or the careers URL a caller passed), else default. */
+  /**
+   * Origin of `companyUrl` (or the careers URL a caller passed) when it is on
+   * minervahumanoids.com (or a subdomain), else the default origin.
+   *
+   * Pin-or-ignore (Spec 1689), as `source-company-soundryx` does: the URL is
+   * checked by `pinUrlToHosts` and the origin is read from the checked URL
+   * with the WHATWG parser, never sliced off the raw text by a regex (which
+   * kept `https://minervahumanoids.com@10.0.0.5:8080` as an "origin"). An
+   * off-domain, internal or malformed `companyUrl` is ignored, not fatal.
+   * `http:` is upgraded.
+   */
   private origin(companyUrl?: string): string {
-    const raw = this.normalize(companyUrl);
-    if (!raw) return MINERVAHUMANOIDS_ORIGIN;
-    const m = /^(https?:\/\/[^/]+)/i.exec(raw);
-    return m ? m[1] : MINERVAHUMANOIDS_ORIGIN;
+    const requested = this.normalize(companyUrl);
+    if (!requested) return MINERVAHUMANOIDS_ORIGIN;
+    const pinned = pinUrlToHosts(requested, MINERVAHUMANOIDS_ALLOWED_HOSTS, { upgradeHttp: true });
+    if (!pinned) {
+      this.logger.debug(
+        `Minerva Humanoids: ignoring companyUrl on host \`${describeUrlForLog(requested)}\` - not an https URL on ${MINERVAHUMANOIDS_ALLOWED_HOSTS.join(', ')}`,
+      );
+      return MINERVAHUMANOIDS_ORIGIN;
+    }
+    return new URL(pinned).origin;
   }
 
   private applyInput(jobs: JobPostDto[], input: ScraperInputDto): JobPostDto[] {

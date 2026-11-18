@@ -9,9 +9,16 @@ import {
   ScrapeDiagnostics,
   Site,
 } from '@ever-jobs/models';
-import { createHttpClient, extractJobType, parseLocationText } from '@ever-jobs/common';
+import {
+  createHttpClient,
+  describeUrlForLog,
+  extractJobType,
+  parseLocationText,
+  pinUrlToHosts,
+} from '@ever-jobs/common';
 import * as cheerio from 'cheerio';
 import {
+  XLIGHT_ALLOWED_HOSTS,
   XLIGHT_APPLY_SELECTOR,
   XLIGHT_CAREERS_URL,
   XLIGHT_COMPANY_NAME,
@@ -58,14 +65,39 @@ export class XlightService implements IScraper {
       proxies: input.proxies,
       caCert: input.caCert,
       requestTimeout: input.requestTimeout ?? XLIGHT_DEFAULT_TIMEOUT_SECONDS,
+      // Spec 1689 — re-pin every redirect hop, not just the first URL
+      allowedRedirectHosts: XLIGHT_ALLOWED_HOSTS,
     });
 
-    const careersUrl = this.normalize(input.companyUrl) || XLIGHT_CAREERS_URL;
+    const careersUrl = this.careersUrl(input);
     const res = await client.get<string>(careersUrl);
     const rows = this.parseCareersPage(cheerio.load(String(res.data ?? '')));
     return rows
       .map((row) => this.toJobPost(row, careersUrl))
       .filter((job): job is JobPostDto => job !== null);
+  }
+
+  /**
+   * The careers page to fetch: the caller's `companyUrl` when it is on
+   * xlight.com (or a subdomain), otherwise this plugin's board.
+   *
+   * Pin-or-ignore (Spec 1689), as `source-company-soundryx` does: a company
+   * plugin scrapes one company, so an off-domain, internal or malformed
+   * `companyUrl` is a mistake or an attempt to aim our HTTP client elsewhere.
+   * Neither deserves a failed scrape — ignore it and say so. `http:` is
+   * upgraded.
+   */
+  private careersUrl(input: ScraperInputDto): string {
+    const requested = this.normalize(input.companyUrl);
+    if (!requested) return XLIGHT_CAREERS_URL;
+    const pinned = pinUrlToHosts(requested, XLIGHT_ALLOWED_HOSTS, { upgradeHttp: true });
+    if (!pinned) {
+      this.logger.debug(
+        `xLight: ignoring companyUrl on host \`${describeUrlForLog(requested)}\` - not an https URL on ${XLIGHT_ALLOWED_HOSTS.join(', ')}`,
+      );
+      return XLIGHT_CAREERS_URL;
+    }
+    return pinned;
   }
 
   private parseCareersPage($: cheerio.CheerioAPI): XlightJobRow[] {

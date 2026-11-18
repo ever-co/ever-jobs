@@ -10,7 +10,12 @@ import {
   LocationDto,
   Site,
 } from '@ever-jobs/models';
-import { createHttpClient } from '@ever-jobs/common';
+import {
+  createHttpClient,
+  describeUrlForLog,
+  firstPublicUrl,
+  isPubliclyRoutableHostname,
+} from '@ever-jobs/common';
 import {
   JIBE_PAGE_SIZE,
   JIBE_DEFAULT_RESULTS,
@@ -34,6 +39,14 @@ import { JibeJobData, JibeJobsPage, JibeTarget } from './jibe.types';
  * (the site host, or a full/partial URL). A fetch error or an unknown tenant
  * degrades to an empty/partial result rather than throwing, so a single
  * tenant never nukes a batch run.
+ *
+ * The tenant host is caller input, so it must look like a public careers
+ * site (Spec 1689, as `source-ats-recruitee` / `source-ats-inhire` check
+ * custom board hosts): https (http is upgraded), a DNS name that
+ * `isPubliclyRoutableHostname` accepts — never an IP literal — with no
+ * credentials and no explicit port. Every redirect hop is pinned to that
+ * host. A two-label in-cluster name (`svc.namespace`) still passes the name
+ * check; the crawl policy's egress guard covers it at connect time.
  */
 @SourcePlugin({
   site: Site.JIBE,
@@ -56,6 +69,8 @@ export class JibeService implements IScraper {
       proxies: input.proxies,
       caCert: input.caCert,
       timeout: input.requestTimeout,
+      // Spec 1689 — every redirect hop stays on the tenant host
+      allowedRedirectHosts: [target.host],
     });
     client.setHeaders(JIBE_HEADERS);
 
@@ -132,7 +147,8 @@ export class JibeService implements IScraper {
     if (!title) return null;
 
     const location = this.buildLocation(data);
-    const applyUrl = this.clean(data.apply_url);
+    // only an http(s) page may become a link (Spec 1751) — never `javascript:`
+    const applyUrl = firstPublicUrl(this.clean(data.apply_url));
     const remote =
       JIBE_REMOTE_LOCATION_TYPES.has((data.location_type ?? '').toUpperCase()) ||
       JIBE_REMOTE_REGEX.test(data.full_location ?? '') ||
@@ -199,9 +215,30 @@ export class JibeService implements IScraper {
       return null;
     }
     if (!parsed.hostname || parsed.hostname.includes(' ') || !parsed.hostname.includes('.')) return null;
+    if (!this.isPublicTenant(parsed)) {
+      this.logger.warn(
+        `Jibe: refusing tenant host \`${describeUrlForLog(raw)}\` - not a public https careers host`,
+      );
+      return null;
+    }
+    parsed.protocol = 'https:';
     const origin = parsed.origin;
     const mount = this.mountFromPath(parsed.pathname);
     return { origin, detailBase: `${origin}${mount}`, host: parsed.hostname.toLowerCase() };
+  }
+
+  /**
+   * `true` when a parsed tenant URL may be fetched: no credentials, no
+   * explicit port, and a hostname that is a public DNS name. The WHATWG
+   * parser has already canonicalised every IPv4 spelling (`0x7f.1`,
+   * `2130706433`) to a dotted quad and bracketed IPv6, so both literal forms
+   * are refused here outright — a Jibe tenant is always a named site.
+   */
+  private isPublicTenant(url: URL): boolean {
+    if (url.username || url.password || url.port) return false;
+    const host = url.hostname.toLowerCase();
+    if (host.startsWith('[') || /^\d{1,3}(?:\.\d{1,3}){3}$/.test(host)) return false;
+    return isPubliclyRoutableHostname(host);
   }
 
   /**
