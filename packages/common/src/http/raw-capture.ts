@@ -31,6 +31,11 @@ import { getRawCapture } from '../context/request-context';
  *    a plugin marks the request `rawCapture: false`, and URLs that look like a
  *    token or auth endpoint are withheld by default (`rawCaptureWithholdReason`).
  *
+ * On every string, layer 3 runs before layers 1 and 2. Those end a value at a
+ * delimiter (`&`, `;`, `/`, a quote, a space), so run first they would split
+ * a known secret that contains one, and the value scrub would find nothing
+ * whole to match.
+ *
  * `drainRawCapture` runs layers 1–3 over every entry once more before the sink
  * closes, so a field written outside these helpers is still scrubbed.
  */
@@ -374,17 +379,33 @@ function escapeRegExp(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-/** Every secret plus the forms it takes once serialized: percent-encoded (both hex cases), form-encoded, JSON-escaped. */
+/**
+ * Every secret plus the forms it takes once serialized:
+ *
+ * - `encodeURIComponent`, with upper- and lower-case hex, and with `+` for a space;
+ * - axios `params` (axios 1.x `helpers/buildURL.js` `encode`): `encodeURIComponent`
+ *   with `:` `$` `,` left raw and `+` for a space;
+ * - `URLSearchParams` (WHATWG form encoding, also what axios writes for a form
+ *   body): `!` `'` `(` `)` `~` percent-encoded as well, `+` for a space;
+ * - JSON-escaped.
+ */
 function secretVariants(secrets: Iterable<string>): string[] {
   const variants = new Set<string>();
   for (const secret of secrets) {
     if (secret.length < RAW_CAPTURE_MIN_SECRET_LENGTH) continue;
     variants.add(secret);
-    const encoded = encodeURIComponent(secret);
+    variants.add(JSON.stringify(secret).slice(1, -1));
+    variants.add(new URLSearchParams([['', secret]]).toString().slice(1));
+    let encoded: string;
+    try {
+      encoded = encodeURIComponent(secret);
+    } catch {
+      continue; // a lone surrogate: no percent-encoded form exists
+    }
     variants.add(encoded);
     variants.add(encoded.replace(/%[0-9A-F]{2}/g, (m) => m.toLowerCase()));
     variants.add(encoded.replace(/%20/g, '+'));
-    variants.add(JSON.stringify(secret).slice(1, -1));
+    variants.add(encoded.replace(/%3A/g, ':').replace(/%24/g, '$').replace(/%2C/g, ',').replace(/%20/g, '+'));
   }
   return [...variants];
 }
@@ -632,7 +653,7 @@ function sanitizeNode(value: unknown, state: SanitizeState, depth: number): unkn
     }
     if (value instanceof URLSearchParams) {
       state.changed = true;
-      return scrubString(redactFormPairs(value.toString()), state);
+      return redactFormPairs(scrubString(value.toString(), state));
     }
     const toJSON = (value as { toJSON?: unknown }).toJSON;
     if (typeof toJSON === 'function') {
@@ -677,6 +698,11 @@ function sanitizeNode(value: unknown, state: SanitizeState, depth: number): unkn
  * every run but a value is bounded, and a value runs to its own terminator. A
  * value cut off by the end of the text — a body truncated by the per-body cap
  * — still counts, so its first characters are redacted rather than kept.
+ *
+ * They run AFTER the value scrub (`sanitizeText`): a rule ends a value at a
+ * delimiter (`&`, `;`, `)`, a quote, a space, ...), so run first it would cut
+ * a known secret that contains one in two, and the value scrub would then
+ * find nothing whole to match and leave the tail in clear.
  */
 
 /**
@@ -720,15 +746,134 @@ const FORM_TEXT_PAIR = new RegExp(
 );
 
 /**
- * `<access_token>value</access_token>` (or a CDATA value) — an XML element
- * named like a credential. Only its text is replaced; the tags are kept.
- * Groups: name, attributes.
+ * `<access_token>value</access_token>` — an XML element named like a
+ * credential. Only its text is replaced; the tags are kept. A CDATA value is
+ * handled by `redactCdataSections`. Groups: name, attributes.
  */
 const XML_TEXT_ELEMENT = new RegExp(
   String.raw`<(?=[\w.:-]{0,255}?${KEY_FRAGMENT})([A-Za-z_][\w.-]{0,127}(?::[A-Za-z_][\w.-]{0,127})?)` +
-    String.raw`(\s[^<>]{0,1024})?(?<!\/)>(<!\[CDATA\[[^\]<]*(?:\]\]>)?|[^<]+)(?=<\/\1\s*>|$)`,
+    String.raw`(\s[^<>]{0,1024})?(?<!\/)>([^<]+)(?=<\/\1\s*>|$)`,
   'gi',
 );
+
+const CDATA_OPEN = '<![CDATA[';
+const CDATA_CLOSE = ']]>';
+
+/** Longest start tag read back from a CDATA section (the name and attributes `XML_TEXT_ELEMENT` allows). */
+const MAX_START_TAG = 1_300;
+
+/** A whole start tag, as read back from a CDATA section. Groups: name. */
+const START_TAG = /^<([A-Za-z_][\w.-]{0,127}(?::[A-Za-z_][\w.-]{0,127})?)(?:\s[^<>]*)?>$/;
+
+function isXmlSpace(code: number): boolean {
+  return code === 0x20 || code === 0x09 || code === 0x0a || code === 0x0d;
+}
+
+/**
+ * Whether `text[lt..gt)` — found by scanning back from `gt`, never below
+ * `floor` — is the start tag of an element named like a credential.
+ */
+function startTagIsCredential(text: string, gt: number, floor: number): boolean {
+  const limit = Math.max(floor, gt - MAX_START_TAG);
+  let lt = gt - 2;
+  for (; lt >= limit; lt--) {
+    const code = text.charCodeAt(lt);
+    if (code === 0x3c /* < */) break;
+    if (code === 0x3e /* > */) return false;
+  }
+  if (lt < limit) return false;
+  const tag = text.slice(lt, gt);
+  if (tag.charCodeAt(tag.length - 2) === 0x2f /* / */) return false; // `<x/>` holds no text
+  const match = START_TAG.exec(tag);
+  return match !== null && isSensitiveKeyName(match[1].slice(match[1].indexOf(':') + 1));
+}
+
+/**
+ * Replace each CDATA section that is the text of an element named like a
+ * credential (`<password> <![CDATA[…]]> </password>`) with `REDACTED`.
+ * Whitespace may surround the section, its value may hold `]` or `<`, and a
+ * value split over several adjacent sections loses all of them. Sections never
+ * nest, so one forward scan finds them all, and the look-back from each stops
+ * at the end of the one before: the work is linear in the text.
+ */
+function redactCdataSections(text: string): string {
+  let open = text.indexOf(CDATA_OPEN);
+  if (open === -1) return text;
+  let out = '';
+  let cursor = 0;
+  let floor = 0;
+  let redactedEnd = -1;
+  while (open !== -1) {
+    const close = text.indexOf(CDATA_CLOSE, open + CDATA_OPEN.length);
+    const end = close === -1 ? text.length : close + CDATA_CLOSE.length;
+    let before = open;
+    while (before > floor && isXmlSpace(text.charCodeAt(before - 1))) before--;
+    const credential =
+      before === redactedEnd ||
+      (before > floor && text.charCodeAt(before - 1) === 0x3e /* > */ && startTagIsCredential(text, before, floor));
+    if (credential) {
+      out += text.slice(cursor, open) + RAW_CAPTURE_REDACTED;
+      cursor = end;
+      redactedEnd = end;
+    }
+    if (close === -1) break;
+    floor = end;
+    open = text.indexOf(CDATA_OPEN, floor);
+  }
+  return cursor === 0 ? text : out + text.slice(cursor);
+}
+
+/**
+ * A start tag with a `value` attribute: `<param name="access_token" value="…"/>`,
+ * `<input type="hidden" name="client_secret" value="…">`, `<token value="…"/>`.
+ * A match starts at `<` and cannot run past the next `<` or `>`, so matches
+ * never overlap and the work is linear; `(?=\s)` ends the name at once, so a
+ * shorter name is never retried against the long look-ahead. Groups: name,
+ * attributes.
+ */
+const VALUE_ATTRIBUTE_TAG =
+  /<([A-Za-z_][\w.:-]{0,127})(?=\s)(?=[^<>]{0,4096}?\svalue\s{0,16}=)(\s[^<>]{0,4096})>/gi;
+
+/**
+ * One attribute of a start tag, read left to right with the sticky flag (each
+ * call consumes at least one character, so a tag is read in one pass). A quote
+ * left open runs to the end of the tag. Groups: name, raw value (with quotes).
+ */
+const ATTRIBUTE_TOKEN = /\s*([^\s"'<>/=]+)(?:\s*=\s*("[^"]*"?|'[^']*'?|[^\s"'<>]*))?|[\s\S]/y;
+
+/**
+ * The tag with its `value` redacted when it holds a credential: the element
+ * is named like one, its `name` attribute is, or it is `type="password"`.
+ */
+function redactValueAttribute(tag: string, name: string, attributes: string): string {
+  let credential = isSensitiveKeyName(name.slice(name.indexOf(':') + 1));
+  let valueAt = -1;
+  let valueRaw = '';
+  ATTRIBUTE_TOKEN.lastIndex = 0;
+  while (ATTRIBUTE_TOKEN.lastIndex < attributes.length) {
+    const at = ATTRIBUTE_TOKEN.lastIndex;
+    const token = ATTRIBUTE_TOKEN.exec(attributes);
+    if (!token) break;
+    const [whole, attribute, raw] = token;
+    if (attribute === undefined || raw === undefined) continue;
+    const quote = raw[0] === '"' || raw[0] === "'" ? raw[0] : '';
+    const unquoted = quote ? raw.slice(1, raw.length > 1 && raw.endsWith(quote) ? -1 : undefined) : raw;
+    const lower = attribute.toLowerCase();
+    if (lower === 'value') {
+      valueAt = at + whole.length - raw.length;
+      valueRaw = raw;
+    } else if (lower === 'name' && isSensitiveKeyName(unquoted)) {
+      credential = true;
+    } else if (lower === 'type' && unquoted.toLowerCase() === 'password') {
+      credential = true;
+    }
+  }
+  const quote = valueRaw[0] === '"' || valueRaw[0] === "'" ? valueRaw[0] : '';
+  const empty = valueRaw.length === 0 || (quote !== '' && valueRaw.length <= 2);
+  if (!credential || valueAt === -1 || empty) return tag;
+  const start = 1 + name.length + valueAt; // `<` + name + offset in the attributes
+  return `${tag.slice(0, start)}${quote}${RAW_CAPTURE_REDACTED}${quote}${tag.slice(start + valueRaw.length)}`;
+}
 
 /** Longest text checked for being a whole form-encoded body (`a=1&b=2`). */
 const MAX_FORM_TEXT = 65_536;
@@ -781,6 +926,8 @@ function redactTextPairs(text: string): string {
     );
   }
   if (out.includes('<')) {
+    out = redactCdataSections(out);
+    out = out.replace(VALUE_ATTRIBUTE_TAG, redactValueAttribute);
     out = out.replace(XML_TEXT_ELEMENT, (match: string, name: string, attributes: string | undefined) =>
       isSensitiveKeyName(name.slice(name.indexOf(':') + 1))
         ? `<${name}${attributes ?? ''}>${RAW_CAPTURE_REDACTED}`
@@ -791,39 +938,46 @@ function redactTextPairs(text: string): string {
 }
 
 /**
- * A redacted copy of a text body: JSON text that parses is redacted by key
- * (and re-serialized only when something changed); any other text by the
- * key-name rules (`redactTextPairs`: JSON-ish and JS-literal pairs, form
- * pairs, XML elements and attributes). Secret values are then scrubbed in
- * every case.
+ * A redacted copy of a text body. Secret values are scrubbed first, on the
+ * text exactly as received (server-held, then caller-chosen: `scrubString`).
+ * Then JSON text that parses is redacted by key and re-serialized only when
+ * that changed something; any other text goes through the key-name rules
+ * (`redactTextPairs`: JSON-ish and JS-literal pairs, form pairs, XML elements,
+ * CDATA and attributes).
+ *
+ * The value scrub runs on the text rather than only on the parsed copy:
+ * `JSON.parse` drops an earlier duplicate key and rounds integers past 2^53,
+ * so a secret in either never reaches the parsed copy, and returning the text
+ * because the parsed copy looked clean would return it in clear.
  */
 function sanitizeText(text: string, state: SanitizeState): string {
-  const first = text.trimStart()[0];
+  const scrubbed = scrubString(text, state);
+  const first = scrubbed.trimStart()[0];
   if (first === '{' || first === '[') {
     let parsed: unknown;
     let parsedOk = false;
     try {
-      parsed = JSON.parse(text);
+      parsed = JSON.parse(scrubbed);
       parsedOk = true;
     } catch {
-      /* not JSON after all — fall through to the text rules */
+      /* not JSON (or no longer, a bare-number secret became REDACTED) — the text rules below */
     }
     if (parsedOk) {
       const outer = state.changed;
       state.changed = false;
       const clean = sanitizeNode(parsed, state, 0);
-      if (!state.changed) {
-        state.changed = outer;
-        return text;
-      }
-      return JSON.stringify(clean);
+      if (state.changed) return JSON.stringify(clean);
+      state.changed = outer;
+      // Nothing to redact by key: the text as received, value-scrubbed (the
+      // original string itself when the value scrub found nothing either).
+      return scrubbed;
     }
   }
 
-  let out = looksFormEncoded(text) ? redactFormBody(text) : text;
+  let out = looksFormEncoded(scrubbed) ? redactFormBody(scrubbed) : scrubbed;
   out = redactTextPairs(out);
-  if (out !== text) state.changed = true;
-  return scrubString(out, state);
+  if (out !== scrubbed) state.changed = true;
+  return out;
 }
 
 function newState(sink: RawCaptureSink | undefined): SanitizeState {
@@ -840,14 +994,18 @@ export function sanitizeCapturedValue(value: unknown, sink?: RawCaptureSink): un
   return typeof value === 'string' ? sanitizeText(value, state) : sanitizeNode(value, state, 0);
 }
 
-/** `url` as stored on an entry: `redactUrl` plus the secret-value scrub. */
+/**
+ * `url` as stored on an entry: the secret-value scrub, then `redactUrl`. The
+ * value scrub goes first so a secret holding `/`, `?`, `&` or `@` is matched
+ * whole before the structural rules split the URL on those characters.
+ */
 export function captureUrl(url: string, sink?: RawCaptureSink): string {
-  return scrubString(redactUrl(url), newState(sink));
+  return redactUrl(scrubString(url, newState(sink)));
 }
 
-/** Error text as stored on an entry: embedded URLs redacted plus the secret-value scrub. */
+/** Error text as stored on an entry: the secret-value scrub, then embedded URLs redacted. */
 export function captureErrorText(text: string, sink?: RawCaptureSink): string {
-  return scrubString(sanitizeErrorText(text), newState(sink));
+  return sanitizeErrorText(scrubString(text, newState(sink)));
 }
 
 /** Recursively redact sensitive keys in a JSON-parsed value (returns a copy). */
@@ -868,11 +1026,13 @@ export function captureRequestBody(data: unknown, sink?: RawCaptureSink): unknow
     try {
       return sanitizeNode(JSON.parse(data), state, 0);
     } catch {
-      return looksFormEncoded(data) ? scrubString(redactFormBody(data), state) : undefined;
+      if (!looksFormEncoded(data)) return undefined;
+      // Value scrub first: a secret holding `&` would otherwise be split by the pair rule.
+      return redactFormBody(scrubString(data, state));
     }
   }
   if (typeof data === 'object') {
-    if (data instanceof URLSearchParams) return scrubString(redactFormPairs(data.toString()), state);
+    if (data instanceof URLSearchParams) return redactFormPairs(scrubString(data.toString(), state));
     if (isBinary(data)) return undefined;
     // FormData / Blob bodies are not JSON — keep them out rather than guess.
     const tag = Object.prototype.toString.call(data);
