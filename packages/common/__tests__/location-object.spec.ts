@@ -303,8 +303,9 @@ describe('toLocationDtos: work bounds (fork-sync hardening)', () => {
     let started = Date.now();
     const all = toLocationDtos(input);
     expect(Date.now() - started).toBeLessThan(BOUND_MS);
-    // expansion is capped: only the first 20 address entries become locations
-    expect(all.map((l) => l.city)).toEqual(Array.from({ length: 20 }, (_, i) => `c${i}`));
+    // expansion is capped: 199 other parent keys (the first 200 keys read,
+    // minus `address`) allow floor(400 / 199) = 2 clones
+    expect(all.map((l) => l.city)).toEqual(['c0', 'c1']);
     started = Date.now();
     const first = toLocationDto(input, { prefer: { country: 'addressCountry.name' } });
     expect(Date.now() - started).toBeLessThan(BOUND_MS);
@@ -360,6 +361,140 @@ describe('toLocationDtos: work bounds (fork-sync hardening)', () => {
     expect(toLocationDto(input, { in: 'address' })).toEqual(
       toLocationDtos(input, { in: 'address' })[0],
     );
+  });
+});
+
+describe('toLocationDtos: per-call and per-clone cost (fork-sync hardening)', () => {
+  const junkKeys = (n: number, prefix = 'junk'): Record<string, unknown> => {
+    const o: Record<string, unknown> = {};
+    for (let i = 0; i < n; i++) o[`${prefix}${i}`] = 'x'.repeat(30);
+    return o;
+  };
+  const cities = (n: number) => Array.from({ length: n }, (_, i) => ({ city: `c${i}` }));
+  // Generous bound: the inputs below took 2-6 s before (alias tables rebuilt
+  // per call; every clone re-walked its parent); slow CI CPUs must not flake.
+  const BOUND_MS = 1000;
+
+  it('maps 60k small objects one call each in linear time', () => {
+    // ~55 us per call when every call rebuilt the alias tables.
+    const started = Date.now();
+    for (let i = 0; i < 30_000; i++) {
+      toLocationDto({}, { prefer: { country: 'addressCountry.name' } });
+    }
+    for (let i = 0; i < 30_000; i++) {
+      toLocationDto({}, { aliases: { state: ['region'] } });
+    }
+    expect(Date.now() - started).toBeLessThan(BOUND_MS);
+  });
+
+  it('keeps custom alias configurations apart and still validates them per call', () => {
+    const input = { region: 'Bavaria', city: 'Munich' };
+    expect(toLocationDto(input, { aliases: { state: ['region'] } })?.state).toBe('Bavaria');
+    expect(toLocationDto({ region: 'Bavaria' }, { aliases: { city: ['region'] } })?.city).toBe(
+      'Bavaria',
+    );
+    expect(toLocationDto(input, { textKeys: ['region'] })?.text).toBe('Bavaria');
+    // the defaults are untouched by earlier custom calls
+    const plain = toLocationDto(input);
+    expect(plain?.state).toBeNull();
+    expect(plain?.extras).toEqual({ region: 'Bavaria' });
+    // a conflicting configuration is never cached: it throws every time
+    for (let i = 0; i < 2; i++) {
+      expect(() => toLocationDto(input, { aliases: { city: ['spot'], state: ['spot'] } })).toThrow(
+        /assigned to both/,
+      );
+    }
+    expect(() => toLocationDto(input, { prefer: { city: 'region' } })).toThrow(/prefer path/);
+    expect(toLocationDto(input, { aliases: { city: ['region'] }, prefer: { city: 'region' } })?.city).toBe(
+      'Bavaria',
+    );
+  });
+
+  it("walks each parent value once, however many address clones carry it", () => {
+    let reads = 0;
+    const info = new Proxy(
+      { a: 1, b: [2, 3] },
+      {
+        get(target, prop, receiver) {
+          if (prop === 'a') reads++;
+          return Reflect.get(target, prop, receiver);
+        },
+      },
+    );
+    const out = toLocationDtos({ info, label: 'x', address: cities(20) });
+    expect(out.map((l) => l.city)).toEqual(cities(20).map((c) => c.city));
+    // every clone used to re-walk (and re-serialize) the parent's fields
+    expect(reads).toBe(1);
+    expect(out[0].extras).toEqual({ info: { a: 1, b: [2, 3] }, label: 'x' });
+    // every DTO still owns its extras
+    expect(out[19].extras).toEqual(out[0].extras);
+    expect(out[19].extras?.info).not.toBe(out[0].extras?.info);
+    expect(out[19].extras).not.toBe(out[0].extras);
+  });
+
+  it.each([
+    ['defaults', {}],
+    ['prefer', { prefer: { country: 'addressCountry.name' } }],
+    ['alias rooted at the address key', { aliases: { city: ['address.city'] } }],
+    ['keep/drop and small limits', { drop: ['junk'], extrasLimits: { maxBytes: 120, maxNodes: 6 } }],
+  ])('maps an address clone exactly like the clone object itself (%s)', (_label, opts) => {
+    const entries = [
+      { city: 'Lyon' },
+      { addressLocality: 'Paris', zip: '75001', geo: { lat: 1, lng: [2, 3] } },
+      { junk: 1 },
+      { addressCountry: 'DE' },
+    ];
+    const parent: Record<string, unknown> = {
+      name: 'HQ',
+      locationId: 'L1',
+      junk: 'j',
+      extras: { site: 'S1', name: 'shadowed' },
+      postalAddress: { country: 'FR', city: 'Nice', postalCode: '06000' },
+      meta: { tags: ['a', 'b'], deep: { x: 1 } },
+    };
+    // A later same-named key is read before the expanded one in a clone.
+    const withStreet = { ...parent, address: '1 Main St' };
+    for (const rest of [parent, withStreet]) {
+      const input = { Address: entries, ...rest };
+      // What expansion means: one object per entry, holding every other key
+      // and the expanded key (moved last) with that entry.
+      const clones = entries.map((entry) => ({ ...rest, Address: entry }));
+      expect(JSON.stringify(toLocationDtos(input, opts))).toBe(
+        JSON.stringify(toLocationDtos(clones, opts)),
+      );
+      expect(JSON.stringify(toLocationDto(input, opts))).toBe(
+        JSON.stringify(toLocationDto(clones, opts)),
+      );
+    }
+  });
+
+  it('expands fewer entries the more fields every clone has to carry', () => {
+    // clones x fields <= 400, at most 20 clones and at least one
+    expect(toLocationDtos({ name: 'HQ', ...junkKeys(19), address: cities(25) })).toHaveLength(20);
+    expect(toLocationDtos({ ...junkKeys(39), address: cities(20) })).toHaveLength(10);
+    // incoming extras keys count as fields too
+    expect(
+      toLocationDtos({ name: 'HQ', extras: junkKeys(99, 'e'), address: cities(20) }),
+    ).toHaveLength(4);
+    expect(toLocationDtos({ ...junkKeys(199), address: cities(20) })).toHaveLength(2);
+    const huge = { address: cities(20), extras: junkKeys(200, 'e'), extras2: 1, Extras: junkKeys(200, 'f') };
+    expect(toLocationDtos(huge)).toHaveLength(1);
+  });
+
+  it('maps 100 parents of 199 keys x 20 addresses in linear time', () => {
+    // The reported shape: 222 KiB, ~3.8 s (21 s before the first caps).
+    const parent = (): Record<string, unknown> => {
+      const o: Record<string, unknown> = {};
+      for (let i = 0; i < 199; i++) o[`k${i}`] = i;
+      o.address = cities(20);
+      return o;
+    };
+    const input = JSON.parse(JSON.stringify(Array.from({ length: 100 }, parent)));
+    const started = Date.now();
+    const out = toLocationDtos(input);
+    expect(Date.now() - started).toBeLessThan(BOUND_MS);
+    // identical parents dedupe; each expands floor(400 / 199) = 2 entries
+    expect(out.map((l) => l.city)).toEqual(['c0', 'c1']);
   });
 });
 
