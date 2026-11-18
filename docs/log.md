@@ -5,7 +5,11 @@
 
 ---
 
-## 2026-11-17 — Lane-scan fixes (T-2584, T-2586, T-2587, T-2607)
+## 2026-11-17 — Lane-scan fixes (T-2584, T-2586, T-2587)
+
+### Lane-scan fixes (T-2584, T-2586, T-2587, T-2606)
+
+### Lane-scan fixes (T-2584, T-2586, T-2587, T-2607)
 
 One dated entry for the day; each fix has its own section.
 
@@ -55,6 +59,16 @@ One dated entry for the day; each fix has its own section.
 
 **Validation:** the new `remotive.service.spec.ts` (8 tests) mocks `createHttpClient` with jobs whose salary is `$170k - $200k`, `$14 - $20/hour`, `$60,000 - $80,000` and `''`, and expects yearly 170000–200000 USD, hourly 14–20 USD, yearly 60000–80000 USD and `null`, one job at a time and as one mixed feed. It also checks that `£60,000 - £80,000` and `€50k - €70k` keep GBP and EUR, that `60,000 - 80,000` and `70K-80K` are read as yearly USD, and that `5 - 7 years experience` gives `null`. Against develop 6 fail and 2 pass (the comma range and the empty salary); all 8 pass now.
 
+### Fix: CLI `--format summary` counts max-only salaries in "With salary data" (T-2606)
+
+**Symptom.** `toSummary()` in `apps/cli/src/commands/search.command.ts` counted a job as having salary data with `if (job.compensation?.minAmount) salaryCount++;`, and printed the count as `With salary data: N`. A compensation with only a `maxAmount` (the default salary grammar reads upper-only figures such as `"Compensation: up to $90,000"`), or with a `0` placeholder `minAmount` and a real `maxAmount`, was not counted, while a negative `minAmount` was. So `ever-jobs search … -f summary` reported fewer jobs with salary data than `withSalaryCount` of `--analyze` on the same jobs, which has used `hasSalaryAmount` since T-2522.
+
+**Fix.** `toSummary()` counts a job when `hasSalaryAmount(job.compensation)` holds (`@ever-jobs/common`: a finite bound above zero, min or max), the same rule `AnalyticsService` uses for `withSalaryCount` and `compareSites`' `withSalary`. A `0` / `0` placeholder, a negative amount and a job with no compensation are not counted. The rest of the summary is unchanged.
+
+**Files:** `apps/cli/src/commands/search.command.ts`, `apps/cli/__tests__/search-summary.command.spec.ts` (new), `docs/log.md`.
+
+**Validation:** 7 new tests run `SearchCommand` with a mocked `jobsService` and `format: 'summary'` and read the `With salary data` line from stdout. 4 fail against develop (a max-only salary and a `0` minimum with a real maximum give 0 instead of 1; a negative `minAmount` gives 1 instead of 0; a mix of six jobs gives 2 where `--analyze` reports 3) and pass now; the 3 controls (a `0` / `0` placeholder and a job without compensation are not counted, a yearly min-max salary is) pass before and after.
+
 ### Test: the redirect-pacing red controls no longer depend on CI speed (T-2607)
 
 **Symptom.** Two red-control tests in `packages/common/__tests__/http-client-redirect-pacing.spec.ts` ended with a wall-clock upper bound across real loopback HTTP requests: `expect(hop.arrivedAt - softyGrants[0].at).toBeLessThan(1000)` ("red control: EVER_JOBS_CRAWL_PACE_REDIRECTS=false follows the hop inside the aggregator slot, at once") and `expect(paths[1].arrivedAt - grants[0].at).toBeLessThan(1000)` ("... both requests in one slot, back to back"). On a slow or busy CI pod the hop can reach the server more than 1 s after the first grant without ever waiting for a slot; the first test failed that way (about 3.1 s) on PR #144, which only changes `apps/mcp`. The file's own comment already said the gap between arrivals is not a valid bound.
@@ -68,6 +82,18 @@ One dated entry for the day; each fix has its own section.
 ## 2026-11-16 — Lane-scan fixes (T-2459–T-2462)
 
 One dated entry for the day; each fix has its own section.
+
+### Fix: the MCP search tools return at most `limit` jobs (T-2585)
+
+**Symptom.** The `search_jobs` tool documents `limit` as "Maximum number of results to return (default: 20, max: 100)" (`apps/mcp/src/index.ts`), but `apps/mcp/src/tools.ts` used it only as the API's `resultsWanted` (`Math.min(params.limit ?? 20, 100)` in `buildSearchRequestBody`). The API applies `resultsWanted` per source, and per location when `locations` is set (`ScraperInputDto.resultsWanted`), and with no `source` it searches every non-ATS source (`apps/api/src/jobs/jobs.service.ts`). `searchJobs` mapped every returned job, applied `remote_only` and returned them all, so `limit: 20` could put hundreds or thousands of jobs, each with a 500-character description, into one tool result; one source with 3 locations gave up to 60. `search_remote_jobs` and `get_salary_insights` call `searchJobs` and had the same problem (`get_salary_insights` computed its statistics over every returned job, not the number it says it samples). A `limit` that is not a number (e.g. `"abc"`) sent `resultsWanted: NaN`.
+
+**Fix.** New `normalizeSearchLimit(limit)` in `tools.ts`: a number, or a numeric string, is rounded down and capped at 100 (`MCP_MAX_SEARCH_LIMIT`); anything else, and anything below 1, gives 20 (`MCP_DEFAULT_SEARCH_LIMIT`). `buildSearchRequestBody` sends it as `resultsWanted` (`results_wanted` in the snake style), and `searchJobs` cuts the jobs to it after the `remote_only` filter (`takeJobsAcrossSources`): the API sorts by site name, then newest first, so a plain cut kept only the alphabetically first site's jobs (all 25 `search_remote_jobs` results from one board); the cut takes each source's newest jobs in turn and keeps them in the API's order. `total` stays the number of jobs returned; the new optional `SearchResponse.total_found` gives the count before the cut and is present only when jobs were cut, so a response within the limit keeps its previous shape. `search_remote_jobs` (default 25) and `get_salary_insights` (default 50) get the same cap; their own defaults still apply only to a missing `limit`, so a non-numeric one gives them 20. `apps/mcp/README.md` says what `limit` and `total_found` mean and gives the other two tools' maximum. Not changed: the API still scrapes `resultsWanted` jobs per source and location, so a search over many sources does the same work as before; only the tool result is bounded.
+
+**Files:** `apps/mcp/src/tools.ts`, `apps/mcp/__tests__/tools-api-contract.spec.ts`, `apps/mcp/README.md`, `docs/log.md`.
+
+**Validation:** 8 new tests in `tools-api-contract.spec.ts`; 7 fail against develop and pass now: 150 jobs from the API with `limit: 20` give the first 20, `total` 20 and `total_found` 150 (develop: 150 jobs); with `remote_only`, 100 on-site jobs followed by 50 remote ones give the first 20 remote jobs and `total_found` 50 (develop: 50); `limit: "abc"` sends `resultsWanted: 20` and returns 20 jobs (develop: `NaN` and 150); `search_remote_jobs` with no `limit` returns 25 of 150; `get_salary_insights` with `limit: 30` samples 30 of 150; and two `normalizeSearchLimit` cases (the default for missing, non-numeric and below-1 values; rounding down and the cap at 100). Review follow-up: 3 more tests (90 jobs from 3 sources with `limit: 20` give 7/7/6 per source in the API's order; a source with 2 jobs keeps both and the other fills the rest; `search_remote_jobs` keeps every board that answered); the first and third fail with a plain `slice`. The control (5 jobs with `limit: 20` come back as they were, with no `total_found`) passes before and after. `jest --testPathPatterns apps/mcp/__tests__` passes (6 suites, 107 tests).
+
+**Merge fix (with T-2586).** Develop's `get_job_details` (T-2586) has `searchJobs` remember only the first `MCP_RECENT_JOBS_LIMIT` (1000) jobs of the API's answer, before the cut. The cut takes each source's jobs in turn, so on a wide search it returns jobs listed past index 1000: with 20 sources × 100 jobs and `limit: 100`, 50 of the 100 returned jobs got `job not found in recent search results; call search_jobs first`. `searchJobs` now remembers after the cut, in the API's order: every returned job (at most 100) and the first of the other jobs, up to 1000 in all, so a response can no longer push out its own returned jobs. The 1000-job cap and the oldest-first order are unchanged, and a response of at most 1000 jobs is remembered whole, as before. A new test in `tools-api-contract.spec.ts` (20 sources × 100 jobs, `limit: 100`, every returned job looked up by `job_id` and by `job_url`) fails before the change (50 missing) and passes now; `apps/mcp/README.md` says the returned jobs are remembered.
 
 ### Fix: MCP `search_remote_jobs` searches the remote boards, not the whole catalogue (T-2546)
 

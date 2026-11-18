@@ -6,7 +6,7 @@ import {
   DescriptionFormat, JobType, ExclusionPreset, DatePostedBasis,
 } from '@ever-jobs/models';
 import {
-  applyJobExclusions, exclusionSpecFromInput, hasExclusionInput, toCsvCell,
+  applyJobExclusions, exclusionSpecFromInput, hasExclusionInput, hasSalaryAmount, toCsvCell,
 } from '@ever-jobs/common';
 import { AnalyticsService } from '@ever-jobs/analytics';
 import {
@@ -398,7 +398,7 @@ export class SearchCommand extends CommandRunner {
         }
       }
       if (job.isRemote) remoteCount++;
-      if (job.compensation?.minAmount) salaryCount++;
+      if (hasSalaryAmount(job.compensation)) salaryCount++;
     }
 
     const lines: string[] = [
