@@ -622,6 +622,97 @@ describe('extractSalary — a range that crosses the monthly threshold is yearly
   });
 });
 
+describe('extractSalary — a currency written only after the maximum (T-2634)', () => {
+  // Each of these gave the all-null envelope: the prefix shape needs a
+  // currency before the first amount, the suffix shape one right after it.
+  it.each([
+    ['60,000 - 80,000 USD', 'yearly 60000-80000 USD'],
+    ['60K-80K USD', 'yearly 60000-80000 USD'],
+    ['40,000 - 50,000 GBP', 'yearly 40000-50000 GBP'],
+    ['50.000 - 70.000 EUR', 'yearly 50000-70000 EUR'],
+    ['60,000 – 80,000 $', 'yearly 60000-80000 USD'],
+    ['Salary: 90,000 - 110,000 USD, plus equity', 'yearly 90000-110000 USD'],
+  ])('%p → %s', (text, expected) => {
+    expect(render(extractSalary(text))).toBe(expected);
+  });
+
+  it('reads a pay-period token after the currency, which also admits a small minimum', () => {
+    expect(render(extractSalary('20 - 25 USD/hr'))).toBe('hourly 20-25 USD');
+    expect(render(extractSalary('25 - 30 USD per hour'))).toBe('hourly 25-30 USD');
+    expect(extractSalary('20 - 25 USD/hr', { enforceAnnualSalary: true })).toEqual({
+      interval: 'hourly',
+      minAmount: 41600,
+      maxAmount: 52000,
+      currency: 'USD',
+    });
+  });
+
+  it('refuses prose: a raw minimum under lowerLimit with no k and no period token', () => {
+    expect(render(extractSalary('5 - 7 USD'))).toBe('null');
+    expect(render(extractSalary('team of 100 - 150 EUR'))).toBe('null');
+    expect(render(extractSalary('5 - 7 USD', { lowerLimit: 4 }))).toBe('hourly 5-7 USD');
+  });
+
+  it('does not read a currency that opens the next amount as closing the range', () => {
+    expect(render(extractSalary('2020 - 2023 $50,000 signing grant'))).toBe('null');
+    expect(render(extractSalary('2020 - 2023 USD 50,000 signing grant'))).toBe('null');
+  });
+
+  it('leaves the shapes that already parsed alone', () => {
+    expect(render(extractSalary('USD 60,000 - 80,000'))).toBe('yearly 60000-80000 USD');
+    expect(render(extractSalary('60,000 USD - 80,000 USD'))).toBe('yearly 60000-80000 USD');
+    // An anchored dash range wins over a trailing-currency one.
+    expect(render(extractSalary('$90,000 - $110,000; 1,000 - 2,000 USD'))).toBe(
+      'yearly 90000-110000 USD',
+    );
+  });
+
+  it('is a dash range: it beats an unqualified "to" range before it', () => {
+    expect(render(extractSalary('$10,000 to $20,000 of hardware; 90,000 - 110,000 USD'))).toBe(
+      'yearly 90000-110000 USD',
+    );
+  });
+
+  it('a refused match does not hide a single bound', () => {
+    expect(render(extractSalary('from $40,000 per year; 5 - 7 USD'))).toBe('yearly 40000-null USD');
+  });
+
+  it('skips a range after a benefit word, as it does a "to" range', () => {
+    // The bonus, budget or relocation figure is not the pay; the reading
+    // develop gave (a single bound, or nothing) stays.
+    expect(
+      render(extractSalary('Sign-on bonus 5,000 - 10,000 USD. Salary from $90,000 per year')),
+    ).toBe('yearly 90000-null USD');
+    expect(render(extractSalary('Learning budget: 1,000 - 2,000 USD per year'))).toBe('null');
+    expect(
+      render(extractSalary('Relocation budget 5,000 - 10,000 USD. Compensation: up to $120,000')),
+    ).toBe('yearly null-120000 USD');
+    // A skipped benefit range does not hide the salary range after it.
+    expect(
+      render(extractSalary('Signing bonus 5,000 - 10,000 USD; salary 90,000 - 110,000 USD')),
+    ).toBe('yearly 90000-110000 USD');
+  });
+
+  it('does not change how EUR amounts with comma thousands are read', () => {
+    // The continental number shape reads "60,000" as 60, which the guard refuses.
+    expect(render(extractSalary('60,000 - 80,000 EUR'))).toBe('null');
+  });
+
+  it('grammar: legacy — still needs a currency before or right after the first amount', () => {
+    expect(render(extractSalary('60,000 - 80,000 USD', { grammar: 'legacy' }))).toBe('null');
+    expect(render(extractSalary('60K-80K USD', { grammar: 'legacy' }))).toBe('null');
+  });
+
+  it.each([
+    ['100 - 200' + ' '.repeat(50_000) + 'USD', 'null'],
+    ['100k - 200k' + ' '.repeat(50_000) + 'x', 'null'],
+  ])('a near-miss on a long whitespace run stays linear (input %#)', (text, expected) => {
+    const started = Date.now();
+    expect(render(extractSalary(text))).toBe(expected);
+    expect(Date.now() - started).toBeLessThan(500);
+  });
+});
+
 describe('extractSalary — near-misses on long whitespace runs stay linear (Spec 1695)', () => {
   // Each whitespace run has one owning quantifier in the extended grammar.
   // Two competing `\s*` make these inputs quadratic (seconds at this size).

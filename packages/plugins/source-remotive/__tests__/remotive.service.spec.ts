@@ -133,6 +133,21 @@ describe('RemotiveService salary parsing', () => {
     });
   });
 
+  it('reads a range whose currency code follows only the maximum (T-2634)', async () => {
+    expect(await compensationOf('60,000 - 80,000 USD')).toMatchObject({
+      interval: CompensationInterval.YEARLY,
+      minAmount: 60000,
+      maxAmount: 80000,
+      currency: 'USD',
+    });
+    expect(await compensationOf('60K-80K USD')).toMatchObject({
+      interval: CompensationInterval.YEARLY,
+      minAmount: 60000,
+      maxAmount: 80000,
+      currency: 'USD',
+    });
+  });
+
   it('does not read prose numbers as a salary', async () => {
     expect(await compensationOf('5 - 7 years experience')).toBeNull();
   });
