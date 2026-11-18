@@ -297,8 +297,7 @@ describe('caller values are bounded, matched in linear time, and never throw (ro
   it('a 4,096-character caller value made of near misses costs linear time', () => {
     // A mismatch in the middle defeats both a regular-expression alternation
     // and `indexOf` (each costs about value length × text length here).
-    const value = `${'a'.repeat(2_000)}z${'a'.repeat(2_095)}`;
-    expect(value).toHaveLength(RAW_CAPTURE_MAX_CALLER_SECRET_LENGTH);
+    const value = `${'a'.repeat(2_000)}z${'a'.repeat(2_095)}`; // 4,096 chars: the cap
     const sink = sinkWithCaller(value);
     const text = 'a'.repeat(3_000_000);
     const started = Date.now();
@@ -306,12 +305,15 @@ describe('caller values are bounded, matched in linear time, and never throw (ro
     captureUrl(`https://h/x?q=${'a'.repeat(200_000)}`, sink);
     // ~0.1 s here; quadratic behaviour took several seconds.
     expect(Date.now() - started).toBeLessThan(1_500);
+    expect(value).toHaveLength(RAW_CAPTURE_MAX_CALLER_SECRET_LENGTH);
   });
 
   it('a long caller value is still found when present, by the linear matcher', () => {
     const value = `FAKE_${'xy'.repeat(100)}_KEY`;
     const sink = sinkWithCaller(value);
-    expect(sanitizeCapturedValue(`<p>${value}${value}x${'xy'.repeat(50)}</p>`, sink)).toBe(`<p>REDACTEDx${'xy'.repeat(50)}</p>`);
+    expect(sanitizeCapturedValue(`<p>${value} ${value}x${'xy'.repeat(50)}</p>`, sink)).toBe(
+      `<p>REDACTED REDACTEDx${'xy'.repeat(50)}</p>`,
+    );
     expect(captureUrl(`https://h/x?q=${encodeURIComponent(value)}`, sink)).toBe('https://h/x?q=REDACTED');
   });
 
