@@ -24,6 +24,24 @@
 
 ## 2026-11-17 — Lane-scan fixes (T-2584, T-2586, T-2587)
 
+## 2026-11-18 — Lane-scan fixes (T-2635)
+
+One dated entry for the day; each fix has its own section.
+
+### Fix: the MCP catalogue lists 4 Day Week as a remote board, so `search_remote_jobs` searches it (T-2635)
+
+**Symptom.** The 4 Day Week plugin declares `category: 'remote'` (`packages/plugins/source-4dayweek/src/fourdayweek.service.ts:21-23`), as 12 other plugins do, but the MCP server's source catalogue filed `fourdayweek` as `type: 'job_board'` (`apps/mcp/src/tools.ts:426`). `searchRemoteJobs` builds its list of boards from the catalogue's `remote` entries and keeps `source` only when it is in that list (`tools.ts:728-737`). So `search_remote_jobs` with `source: 'fourdayweek'` searched the other 12 remote boards and never 4 Day Week, a search without `source` left 4 Day Week out, and `list_sources` and `compare_sources` with type `remote` did not list it. The tool's description (`apps/mcp/src/index.ts:174-175`, `apps/mcp/README.md:94`) still named only six of the boards, the README's source coverage counted 6 remote boards, and the search guide (`index.ts:414-415`) listed `fourdayweek` under job boards.
+
+**Fix.** `fourdayweek` has type `remote` in the catalogue. The `search_remote_jobs` description in `index.ts` and in the README says it searches every board that `list_sources` reports with type `remote`, instead of naming a subset that can go stale. The search guide lists `fourdayweek` under remote boards, and the README's source coverage counts 13 remote boards.
+
+**Files:** `apps/mcp/src/{tools,index}.ts`, `apps/mcp/README.md`, `apps/mcp/__tests__/tools-remote-sources.spec.ts` (new), `docs/log.md`.
+
+**Validation:** 8 new tests in `tools-remote-sources.spec.ts`; 7 fail against develop and pass now: the catalogue lists `fourdayweek` as remote and not as a job board; `compare_sources` counts 4 Day Week among the remote boards; a guard reads every plugin's `src/*.service.ts` and checks that the catalogue's remote ids are exactly the `Site` values of the plugins that declare `category: 'remote'` (develop: 12 of the 13); `search_remote_jobs` with `source: 'fourdayweek'` posts `siteType: ['fourdayweek']` (develop: the other 12 boards); without `source` it posts `fourdayweek` among the boards; and the `search_remote_jobs` description in `index.ts` and in the README names every remote board or none (develop: 6 of 12). The eighth test checks that the search guide's "Remote Boards" line lists exactly the catalogue's remote boards; it passes on develop too, and fails if the catalogue changes without the guide. `jest --testPathPatterns apps/mcp/__tests__` passes (7 suites, 118 tests; 110 on develop). Both CI type-checks are clean and `npm run lint:docs` passes. `npm run test:core` with 2 workers: 5601 pass and 3 fail, none in `apps/mcp`: 2 `store-bootstrap.providers.spec.ts` tests need the `better-sqlite3` native binding, which the local install (`npm ci --ignore-scripts`) did not build, and 1 event-loop timing test in `jobs.aggregator.career-level.spec.ts` (a 398 ms gap against its 250 ms limit on a busy PC) passes when its suite runs alone (37/37).
+
+### Lane-scan fixes (T-2584, T-2586, T-2587, T-2606)
+
+### Lane-scan fixes (T-2584, T-2586, T-2587)
+
 ### Lane-scan fixes (T-2584, T-2586, T-2587, T-2606)
 
 ### Lane-scan fixes (T-2584, T-2586, T-2587, T-2607)
