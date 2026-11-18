@@ -1,9 +1,16 @@
 import { Controller, Get, Logger, Res } from '@nestjs/common';
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
+import { SkipThrottle } from '@nestjs/throttler';
 import { Response } from 'express';
 import { MetricsService } from './metrics.service';
 
+/**
+ * The Prometheus scrape is not rate limited (`@SkipThrottle()`), so a 15 s
+ * scrape interval never gets 429 (T-2672). It still needs the API key when
+ * API key auth is on.
+ */
 @ApiTags('Health')
+@SkipThrottle()
 @Controller('metrics')
 export class MetricsController {
   private readonly logger = new Logger(MetricsController.name);

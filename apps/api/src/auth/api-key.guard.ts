@@ -12,6 +12,7 @@ import { Reflector } from '@nestjs/core';
 import { Request } from 'express';
 import { ADMIN_AUTH_METADATA_KEY } from './admin-auth.decorator';
 import { getRequestFromContext } from './context-request';
+import { PROBE_ROUTE_METADATA_KEY } from './probe-route.decorator';
 
 /**
  * The API key a request carries in the configured header (`x-api-key` by
@@ -79,6 +80,12 @@ export function assertAdminApiKey(
  *      - Otherwise require a valid key; throw `ForbiddenException` (403)
  *        on missing/invalid.
  *
+ *  - **Probe routes** (decorated with `@ProbeRoute()` — `GET /health`,
+ *    `GET /ping`, `GET /ready`; T-2672): allowed without a key, because a
+ *    Docker healthcheck or a Kubernetes probe sends none. `GET /metrics` and
+ *    every `/api` route are standard routes. `@AdminAuth()` wins over
+ *    `@ProbeRoute()`.
+ *
  *  - **Admin routes** (decorated with `@AdminAuth()` — e.g. force-open /
  *    force-reset of a circuit breaker): {@link assertAdminApiKey}.
  *      - Always require a valid key, regardless of `auth.enabled`.
@@ -122,6 +129,16 @@ export class ApiKeyGuard implements CanActivate {
     if (isAdmin) {
       assertAdminApiKey(this.config, getRequestFromContext(context), this.logger);
       this.logger.debug('Valid API key provided');
+      return true;
+    }
+
+    // Orchestrator probes answer without a key (T-2672).
+    const isProbe =
+      this.reflector.getAllAndOverride<boolean>(PROBE_ROUTE_METADATA_KEY, [
+        context.getHandler(),
+        context.getClass(),
+      ]) === true;
+    if (isProbe) {
       return true;
     }
 
