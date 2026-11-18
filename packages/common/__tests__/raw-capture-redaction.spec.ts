@@ -26,6 +26,7 @@ import {
   isSensitiveKeyName,
   normalizeBody,
   pushRawEntry,
+  RAW_CAPTURE_CUT_SLACK_BYTES,
   rawCaptureWithholdReason,
   redactUrl,
   registerRawCaptureSecrets,
@@ -707,7 +708,8 @@ describe('body size work is bounded by the cap (review low note)', () => {
     const normalized = normalizeBody(huge, 'text/plain')!;
 
     expect(normalized.bytes).toBe(huge.byteLength);
-    expect((normalized.value as string).length).toBeLessThanOrEqual(1024);
+    // The cap plus the slack `retainBody` sanitizes before the final cut.
+    expect((normalized.value as string).length).toBeLessThanOrEqual(1024 + RAW_CAPTURE_CUT_SLACK_BYTES);
   });
 
   it('skips binary content types without decoding', () => {

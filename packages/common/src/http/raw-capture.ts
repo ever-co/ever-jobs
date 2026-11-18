@@ -16,11 +16,17 @@ import { getRawCapture } from '../context/request-context';
  * 1. Structure — URLs lose userinfo (`user:pass@`), the values of credential
  *    query keys and known path credentials (`SENSITIVE_PATH_SEGMENTS`).
  * 2. Key names — in request bodies, response / error bodies (parsed JSON, JSON
- *    text, form-encoded text) and any header map, the value of every key whose
- *    name looks like a credential (`isSensitiveKeyName`) becomes `REDACTED`.
- * 3. Values — every string is scrubbed of known secret values: credential-named
- *    environment variables (`envSecretValues`) plus values a plugin or the
- *    caller registers with `registerRawCaptureSecrets`.
+ *    text, form-encoded text, JS literals, XML) and any header map, the value
+ *    of every key whose name looks like a credential (`isSensitiveKeyName`)
+ *    becomes `REDACTED`.
+ * 3. Values — every string is scrubbed of known secret values, server-held
+ *    ones first (credential-named environment variables from
+ *    `envSecretValues`, tokens registered with
+ *    `registerServerRawCaptureSecrets`), then values a caller may have chosen
+ *    (`registerRawCaptureSecrets`), so no caller value can be used to probe a
+ *    server secret. A body over the size cap is sanitized past the cap and
+ *    only then cut, so a secret straddling the cut is redacted whole
+ *    (`retainBody`, `cutTextBody`).
  * 4. Token / auth calls — their request and response bodies are never retained:
  *    a plugin marks the request `rawCapture: false`, and URLs that look like a
  *    token or auth endpoint are withheld by default (`rawCaptureWithholdReason`).
@@ -32,6 +38,13 @@ import { getRawCapture } from '../context/request-context';
 const DEFAULT_MAX_BODY_BYTES = 5_242_880; // 5 MiB
 const DEFAULT_MAX_SOURCE_BYTES = 20_971_520; // 20 MiB
 const DEFAULT_DRAIN_MS = 2_000;
+
+/**
+ * Bytes past the per-body cap that are decoded and sanitized before a body is
+ * cut to the cap, so a secret or credential pair straddling the cap is seen
+ * whole and redacted rather than cut in half (`retainBody`).
+ */
+export const RAW_CAPTURE_CUT_SLACK_BYTES = 16_384;
 
 /** What a removed credential is replaced with. */
 export const RAW_CAPTURE_REDACTED = 'REDACTED';
@@ -361,11 +374,8 @@ function escapeRegExp(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-/**
- * One pattern matching every secret and the forms it takes once serialized:
- * percent-encoded (both hex cases), form-encoded and JSON-escaped.
- */
-function buildSecretPattern(secrets: Iterable<string>): RegExp | null {
+/** Every secret plus the forms it takes once serialized: percent-encoded (both hex cases), form-encoded, JSON-escaped. */
+function secretVariants(secrets: Iterable<string>): string[] {
   const variants = new Set<string>();
   for (const secret of secrets) {
     if (secret.length < RAW_CAPTURE_MIN_SECRET_LENGTH) continue;
@@ -376,17 +386,110 @@ function buildSecretPattern(secrets: Iterable<string>): RegExp | null {
     variants.add(encoded.replace(/%20/g, '+'));
     variants.add(JSON.stringify(secret).slice(1, -1));
   }
-  if (variants.size === 0) return null;
-  const alternatives = [...variants].sort((a, b) => b.length - a.length).map(escapeRegExp);
-  return new RegExp(alternatives.join('|'), 'g');
+  return [...variants];
+}
+
+/** One pass of the value scrub: a set of secrets that are redacted together. */
+interface SecretTier {
+  /** Matches when any variant occurs anywhere; no `g` flag, so `test` keeps no state. */
+  probe: RegExp;
+  variants: string[];
+}
+
+/**
+ * The value scrub for one sink. Tiers run in order, each over the output of
+ * the one before:
+ *
+ * 1. Server-held secrets — credential-named env values and values registered
+ *    with `registerServerRawCaptureSecrets` (tokens a provider issued).
+ * 2. Values a caller may have chosen — registered with
+ *    `registerRawCaptureSecrets` (anything resolved from `input.auth`).
+ *
+ * The order is the security property. Matching a caller-chosen value against
+ * text that still holds a server secret is an oracle: a caller value that
+ * overlaps the secret's first characters changes what is redacted, so a
+ * caller can confirm guesses one character at a time. Run second, a caller
+ * value only ever sees server secrets as `REDACTED`.
+ */
+interface SecretScrubber {
+  tiers: SecretTier[];
+  /** Longest variant: how much a body cut mid-secret loses at its tail (`dropCutTail`). */
+  longest: number;
+}
+
+function buildTier(secrets: Iterable<string>): SecretTier | null {
+  const variants = secretVariants(secrets);
+  if (variants.length === 0) return null;
+  return { probe: new RegExp(variants.map(escapeRegExp).join('|')), variants };
+}
+
+function buildScrubber(server: Iterable<string>, caller: Iterable<string>): SecretScrubber | null {
+  const tiers: SecretTier[] = [];
+  let longest = 0;
+  for (const tier of [buildTier(server), buildTier(caller)]) {
+    if (!tier) continue;
+    tiers.push(tier);
+    for (const variant of tier.variants) longest = Math.max(longest, variant.length);
+  }
+  return tiers.length > 0 ? { tiers, longest } : null;
+}
+
+/** More occurrences than this of one tier's secrets in one string withholds the whole string. */
+const MAX_SECRET_SPANS = 65_536;
+
+/**
+ * Replace every occurrence of every variant in `tier` with `REDACTED`.
+ * Occurrences are found independently on the original text (`indexOf` per
+ * variant) and overlapping ones are merged, so no value can hide another by
+ * matching first — a single left-to-right alternation lets an earlier,
+ * overlapping match consume a secret's first characters and leave the rest in
+ * clear. The work is linear in the text per variant; a string with an absurd
+ * number of occurrences is withheld whole rather than spliced.
+ */
+function scrubTier(text: string, tier: SecretTier): string {
+  if (!tier.probe.test(text)) return text;
+  const spans: Array<[number, number]> = [];
+  for (const variant of tier.variants) {
+    const length = variant.length;
+    let start = -1;
+    let end = -1;
+    // Resuming at `end - length + 1` skips occurrences the current run already covers.
+    for (let at = text.indexOf(variant); at !== -1; at = text.indexOf(variant, end - length + 1)) {
+      if (at < end) {
+        end = at + length;
+        continue;
+      }
+      if (start !== -1) spans.push([start, end]);
+      if (spans.length >= MAX_SECRET_SPANS) return RAW_CAPTURE_REDACTED;
+      start = at;
+      end = at + length;
+    }
+    if (start !== -1) spans.push([start, end]);
+  }
+  if (spans.length === 0) return text;
+
+  spans.sort((a, b) => a[0] - b[0]);
+  let out = '';
+  let cursor = 0;
+  for (let i = 0; i < spans.length; ) {
+    const start = spans[i][0];
+    let end = spans[i][1];
+    for (i++; i < spans.length && spans[i][0] < end; i++) end = Math.max(end, spans[i][1]);
+    out += text.slice(cursor, start) + RAW_CAPTURE_REDACTED;
+    cursor = end;
+  }
+  return out + text.slice(cursor);
 }
 
 interface SinkSecrets {
   /** Read lazily, once per sink — a rotated env var is picked up by the next request. */
   env?: string[];
-  registered: Set<string>;
-  /** Compiled lazily; `undefined` = stale. */
-  pattern?: RegExp | null;
+  /** Registered with `registerServerRawCaptureSecrets`: no caller chose them. */
+  server: Set<string>;
+  /** Registered with `registerRawCaptureSecrets`: a caller may have chosen them. */
+  caller: Set<string>;
+  /** Built lazily; `undefined` = stale. */
+  scrubber?: SecretScrubber | null;
   /** Bumped on every registration, so sanitized fields are re-checked. */
   version: number;
 }
@@ -396,29 +499,43 @@ const sinkSecrets = new WeakMap<RawCaptureSink, SinkSecrets>();
 function secretsOf(sink: RawCaptureSink): SinkSecrets {
   let secrets = sinkSecrets.get(sink);
   if (!secrets) {
-    secrets = { registered: new Set(), version: 0 };
+    secrets = { server: new Set(), caller: new Set(), version: 0 };
     sinkSecrets.set(sink, secrets);
   }
   return secrets;
 }
 
-interface Scrubber {
-  pattern: RegExp | null;
-  version: number;
+/**
+ * The value scrubber for `sink`: env secrets (cached on the sink) and the
+ * values registered on it. Without a sink, env secrets are read afresh.
+ */
+function scrubberFor(sink: RawCaptureSink | undefined): SecretScrubber | null {
+  if (!sink) return buildScrubber(envSecretValues(), []);
+  const secrets = secretsOf(sink);
+  if (secrets.scrubber === undefined) {
+    secrets.env ??= envSecretValues();
+    secrets.scrubber = buildScrubber([...secrets.env, ...secrets.server], secrets.caller);
+  }
+  return secrets.scrubber;
 }
 
-/**
- * The secret-value scrubber for `sink`: env secrets (cached on the sink) plus
- * the values registered on it. Without a sink, env secrets are read afresh.
- */
-function scrubberFor(sink: RawCaptureSink | undefined): Scrubber {
-  if (!sink) return { pattern: buildSecretPattern(envSecretValues()), version: 0 };
+function addSecrets(values: unknown, sink: RawCaptureSink | undefined, target: 'server' | 'caller'): void {
+  if (!sink) return;
+  const found = new Set<string>();
+  collectStrings(values, found);
+  if (found.size === 0) return;
   const secrets = secretsOf(sink);
-  if (secrets.pattern === undefined) {
-    secrets.env ??= envSecretValues();
-    secrets.pattern = buildSecretPattern([...secrets.env, ...secrets.registered]);
+  const set = secrets[target];
+  let added = false;
+  for (const value of found) {
+    if (set.has(value)) continue;
+    set.add(value);
+    added = true;
   }
-  return { pattern: secrets.pattern, version: secrets.version };
+  if (added) {
+    secrets.scrubber = undefined;
+    secrets.version += 1;
+  }
 }
 
 /**
@@ -426,29 +543,35 @@ function scrubberFor(sink: RawCaptureSink | undefined): Scrubber {
  * the sink in scope; a no-op when `include_raw` is off). `values` may be a
  * string, an array, or an object whose string leaves are taken — e.g. a
  * scraper input's `auth` block. Strings shorter than
- * `RAW_CAPTURE_MIN_SECRET_LENGTH` are ignored. Plugins call this with the
- * credentials and tokens they resolve (`source-ats-personio`,
- * `source-francetravail`, `source-upwork`, `source-adzuna`, `source-jooble`).
+ * `RAW_CAPTURE_MIN_SECRET_LENGTH` are ignored.
+ *
+ * Values registered here are treated as ones a caller may have chosen
+ * (anything from `input.auth`, or a credential resolved from it or from the
+ * environment), so they are scrubbed after the server-held secrets — see
+ * `SecretScrubber`. An env-sourced credential needs no special call: its
+ * environment variable already puts it in the server-held pass. Tokens a
+ * provider issued go through `registerServerRawCaptureSecrets`.
  */
 export function registerRawCaptureSecrets(
   values: unknown,
   sink: RawCaptureSink | undefined = getRawCapture(),
 ): void {
-  if (!sink) return;
-  const found = new Set<string>();
-  collectStrings(values, found);
-  if (found.size === 0) return;
-  const secrets = secretsOf(sink);
-  let added = false;
-  for (const value of found) {
-    if (secrets.registered.has(value)) continue;
-    secrets.registered.add(value);
-    added = true;
-  }
-  if (added) {
-    secrets.pattern = undefined;
-    secrets.version += 1;
-  }
+  addSecrets(values, sink, 'caller');
+}
+
+/**
+ * Register server-held secret values — ones no caller can choose, such as a
+ * token a provider issued or a credential from server configuration — to be
+ * scrubbed in the same first pass as the env secrets. Never pass a value that
+ * came from the request (`input.auth`): matched in this pass it could be used
+ * to probe the server's own secrets. Same arguments as
+ * `registerRawCaptureSecrets`.
+ */
+export function registerServerRawCaptureSecrets(
+  values: unknown,
+  sink: RawCaptureSink | undefined = getRawCapture(),
+): void {
+  addSecrets(values, sink, 'server');
 }
 
 // ---------------------------------------------------------------------------
@@ -458,14 +581,15 @@ export function registerRawCaptureSecrets(
 const MAX_SANITIZE_DEPTH = 64;
 
 interface SanitizeState {
-  pattern: RegExp | null;
+  scrubber: SecretScrubber | null;
   changed: boolean;
   ancestors: Set<object>;
 }
 
 function scrubString(text: string, state: SanitizeState): string {
-  if (!state.pattern || text.length < RAW_CAPTURE_MIN_SECRET_LENGTH) return text;
-  const scrubbed = text.replace(state.pattern, RAW_CAPTURE_REDACTED);
+  if (!state.scrubber || text.length < RAW_CAPTURE_MIN_SECRET_LENGTH) return text;
+  let scrubbed = text;
+  for (const tier of state.scrubber.tiers) scrubbed = scrubTier(scrubbed, tier);
   if (scrubbed !== text) state.changed = true;
   return scrubbed;
 }
@@ -484,7 +608,7 @@ function sanitizeNode(value: unknown, state: SanitizeState, depth: number): unkn
   if (typeof value === 'string') return scrubString(value, state);
   if (typeof value === 'number') {
     // A numeric secret (an app id, say) parsed out of JSON text is a number, not a string.
-    if (!state.pattern || Math.abs(value) < 10 ** (RAW_CAPTURE_MIN_SECRET_LENGTH - 1)) return value;
+    if (!state.scrubber || Math.abs(value) < 10 ** (RAW_CAPTURE_MIN_SECRET_LENGTH - 1)) return value;
     const text = String(value);
     if (scrubString(text, state) === text) return value;
     return RAW_CAPTURE_REDACTED;
@@ -546,27 +670,132 @@ function sanitizeNode(value: unknown, state: SanitizeState, depth: number): unkn
   }
 }
 
+/*
+ * Key-name rules for text that is not JSON that parses (HTML, XML, form text,
+ * truncated JSON, JS literals). Every pattern below stays linear on hostile
+ * input: a match starts at a fixed character (`{` / `,`, a separator, `<`),
+ * every run but a value is bounded, and a value runs to its own terminator. A
+ * value cut off by the end of the text — a body truncated by the per-body cap
+ * — still counts, so its first characters are redacted rather than kept.
+ */
+
 /**
  * `"key": "value"` / `"key": 123` pairs in JSON-ish text that does not parse
- * (truncated JSON, JSON inside HTML). A match can only start at `{` or `,`, and
- * every run but the value string is bounded, so quote-heavy input stays linear.
+ * (truncated JSON, JSON inside HTML). A match can only start at `{` or `,`.
  */
 const JSON_TEXT_PAIR =
-  /([{,]\s{0,16})"((?:[^"\\\r\n]|\\.){1,128})"(\s{0,16}:\s{0,16})("(?:[^"\\\r\n]|\\.)*"|-?\d[\d.eE+-]{0,64})/g;
+  /([{,]\s{0,16})"((?:[^"\\\r\n]|\\.){1,128})"(\s{0,16}:\s{0,16})("(?:[^"\\\r\n]|\\.)*(?:"|\\?$)|-?\d[\d.eE+-]{0,64})/g;
+
+/**
+ * Fragments every credential key name contains in its raw spelling (a
+ * superset of `isSensitiveKeyName`, which decides). The rules below only
+ * match keys that contain one, so the many ordinary attributes and pairs of an
+ * HTML page cost a failed check, not a replacement callback. A key that
+ * spells a fragment across `_` / `-` (`sec_ret`) is not seen here.
+ */
+const KEY_FRAGMENT = '(?:secret|token|pass|key|credential|cookie|session|private|auth|sig|pwd)';
+
+/**
+ * `key: 'value'`, `'key': "value"`, `key="value"` — JS object literals,
+ * single-quoted pairs, XML / HTML attributes. The match starts at the
+ * separator; lookbehinds read the key (bare, `"quoted"` or `'quoted'`).
+ * Groups: key (one of three), value.
+ */
+const QUOTED_TEXT_PAIR = new RegExp(
+  String.raw`[:=](?<=${KEY_FRAGMENT}[\w$.-]{0,127}["']?\s{0,16}[:=])` +
+    String.raw`(?<=(?:"([\w$.-]{1,128})"|'([\w$.-]{1,128})'|(?<![\w$.-])([A-Za-z_$][\w$.-]{0,127}))\s{0,16}[:=])` +
+    String.raw`\s{0,16}("(?:[^"\\\r\n]|\\.)*(?:"|\\?$)|'(?:[^'\\\r\n]|\\.)*(?:'|\\?$))`,
+  'gi',
+);
+
+/**
+ * `key=value` pairs in free text: a form-encoded body with whitespace around
+ * it, a query string inside HTML or a log line. The match starts at `=`; the
+ * key (read by lookbehind) follows a separator, the unquoted value runs to
+ * the next one. Groups: key, value.
+ */
+const FORM_TEXT_PAIR = new RegExp(
+  String.raw`=(?<=${KEY_FRAGMENT}[\w.%[\]-]{0,127}=)(?<=(?:^|[\s&?;#"'(,{>])([\w.%[\]-]{1,128})=)([^\s&"'<>;)}\]]+)`,
+  'gi',
+);
+
+/**
+ * `<access_token>value</access_token>` (or a CDATA value) — an XML element
+ * named like a credential. Only its text is replaced; the tags are kept.
+ * Groups: name, attributes.
+ */
+const XML_TEXT_ELEMENT = new RegExp(
+  String.raw`<(?=[\w.:-]{0,255}?${KEY_FRAGMENT})([A-Za-z_][\w.-]{0,127}(?::[A-Za-z_][\w.-]{0,127})?)` +
+    String.raw`(\s[^<>]{0,1024})?(?<!\/)>(<!\[CDATA\[[^\]<]*(?:\]\]>)?|[^<]+)(?=<\/\1\s*>|$)`,
+  'gi',
+);
 
 /** Longest text checked for being a whole form-encoded body (`a=1&b=2`). */
 const MAX_FORM_TEXT = 65_536;
 
+/** A whole `a=1&b=2` body; whitespace around it (a trailing newline) is allowed. */
 function looksFormEncoded(text: string): boolean {
-  if (text.length === 0 || text.length > MAX_FORM_TEXT || /\s/.test(text) || !text.includes('=')) return false;
-  return text.split('&').every((pair) => pair.indexOf('=') > 0);
+  if (text.length === 0 || text.length > MAX_FORM_TEXT || !text.includes('=')) return false;
+  const body = text.trim();
+  if (body.length === 0 || /\s/.test(body)) return false;
+  return body.split('&').every((pair) => pair.indexOf('=') > 0);
+}
+
+/** `redactFormPairs` over a form body, keeping the whitespace around it. */
+function redactFormBody(text: string): string {
+  const start = text.length - text.trimStart().length;
+  const end = text.trimEnd().length;
+  return text.slice(0, start) + redactFormPairs(text.slice(start, end)) + text.slice(end);
+}
+
+/** Apply the key-name rules above to text that is not JSON that parses. */
+function redactTextPairs(text: string): string {
+  let out = text;
+  if (out.includes('"')) {
+    out = out.replace(
+      JSON_TEXT_PAIR,
+      (match: string, lead: string, key: string, separator: string, value: string) =>
+        value !== '""' && isSensitiveKeyName(key) ? `${lead}"${key}"${separator}"${RAW_CAPTURE_REDACTED}"` : match,
+    );
+  }
+  if (out.includes('"') || out.includes("'")) {
+    out = out.replace(
+      QUOTED_TEXT_PAIR,
+      (
+        match: string,
+        doubleQuoted: string | undefined,
+        singleQuoted: string | undefined,
+        bare: string | undefined,
+        value: string,
+      ) => {
+        if (value.length === 2 && value[0] === value[1]) return match; // '' or ""
+        if (!isSensitiveKeyName(doubleQuoted ?? singleQuoted ?? bare ?? '')) return match;
+        const q = value[0];
+        return `${match.slice(0, match.length - value.length)}${q}${RAW_CAPTURE_REDACTED}${q}`;
+      },
+    );
+  }
+  if (out.includes('=')) {
+    out = out.replace(FORM_TEXT_PAIR, (match: string, key: string) =>
+      isSensitiveKeyName(safeDecode(key)) ? `=${RAW_CAPTURE_REDACTED}` : match,
+    );
+  }
+  if (out.includes('<')) {
+    out = out.replace(XML_TEXT_ELEMENT, (match: string, name: string, attributes: string | undefined) =>
+      isSensitiveKeyName(name.slice(name.indexOf(':') + 1))
+        ? `<${name}${attributes ?? ''}>${RAW_CAPTURE_REDACTED}`
+        : match,
+    );
+  }
+  return out;
 }
 
 /**
  * A redacted copy of a text body: JSON text that parses is redacted by key
- * (and re-serialized only when something changed); form-encoded text by key;
- * any other text has its `"secret_key": "…"` pairs redacted. Secret values are
- * then scrubbed in every case.
+ * (and re-serialized only when something changed); any other text by the
+ * key-name rules (`redactTextPairs`: JSON-ish and JS-literal pairs, form
+ * pairs, XML elements and attributes). Secret values are then scrubbed in
+ * every case.
  */
 function sanitizeText(text: string, state: SanitizeState): string {
   const first = text.trimStart()[0];
@@ -591,22 +820,14 @@ function sanitizeText(text: string, state: SanitizeState): string {
     }
   }
 
-  let out = text;
-  if (looksFormEncoded(out)) {
-    out = redactFormPairs(out);
-  } else if (out.includes('"')) {
-    out = out.replace(
-      JSON_TEXT_PAIR,
-      (match: string, lead: string, key: string, separator: string, value: string) =>
-        value !== '""' && isSensitiveKeyName(key) ? `${lead}"${key}"${separator}"${RAW_CAPTURE_REDACTED}"` : match,
-    );
-  }
+  let out = looksFormEncoded(text) ? redactFormBody(text) : text;
+  out = redactTextPairs(out);
   if (out !== text) state.changed = true;
   return scrubString(out, state);
 }
 
 function newState(sink: RawCaptureSink | undefined): SanitizeState {
-  return { pattern: scrubberFor(sink).pattern, changed: false, ancestors: new Set() };
+  return { scrubber: scrubberFor(sink), changed: false, ancestors: new Set() };
 }
 
 /**
@@ -631,7 +852,7 @@ export function captureErrorText(text: string, sink?: RawCaptureSink): string {
 
 /** Recursively redact sensitive keys in a JSON-parsed value (returns a copy). */
 export function redactSensitiveKeys(value: unknown): unknown {
-  return sanitizeNode(value, { pattern: null, changed: false, ancestors: new Set() }, 0);
+  return sanitizeNode(value, { scrubber: null, changed: false, ancestors: new Set() }, 0);
 }
 
 /**
@@ -647,7 +868,7 @@ export function captureRequestBody(data: unknown, sink?: RawCaptureSink): unknow
     try {
       return sanitizeNode(JSON.parse(data), state, 0);
     } catch {
-      return looksFormEncoded(data) ? scrubString(redactFormPairs(data), state) : undefined;
+      return looksFormEncoded(data) ? scrubString(redactFormBody(data), state) : undefined;
     }
   }
   if (typeof data === 'object') {
@@ -689,9 +910,11 @@ function asBuffer(data: Uint8Array): Buffer {
  * its UTF-8 byte length, or `null` when the payload is a binary / stream type
  * we deliberately do not capture.
  *
- * A Buffer is cut to the per-body cap *before* it is decoded, so a huge body
- * never becomes a huge string. A parsed JSON value is still serialized once to
- * measure it: axios already parsed it, and its size decides whether it fits.
+ * A Buffer is cut to the per-body cap (plus `RAW_CAPTURE_CUT_SLACK_BYTES`,
+ * which `retainBody` sanitizes before the final cut) *before* it is decoded,
+ * so a huge body never becomes a huge string. A parsed JSON value is still
+ * serialized once to measure it: axios already parsed it, and its size
+ * decides whether it fits.
  */
 export function normalizeBody(
   data: unknown,
@@ -704,7 +927,8 @@ export function normalizeBody(
   if (Buffer.isBuffer(data) || data instanceof Uint8Array) {
     if (contentType && BINARY_CONTENT_TYPE.test(contentType)) return null;
     const buf = asBuffer(data);
-    const text = buf.subarray(0, utf8SafeEnd(buf, rawCaptureMaxBodyBytes())).toString('utf8');
+    const window = rawCaptureMaxBodyBytes() + RAW_CAPTURE_CUT_SLACK_BYTES;
+    const text = buf.subarray(0, utf8SafeEnd(buf, window)).toString('utf8');
     return { value: text, bytes: buf.byteLength };
   }
   if (typeof data === 'object') {
@@ -829,6 +1053,46 @@ export function updateRawEntry(
   Object.assign(entry, clean);
 }
 
+/** Entries whose text body was cut by the per-body cap (`dropCutTail` applies on every re-sanitize). */
+const cutBodies = new WeakSet<RawHttpEntry>();
+
+/** `dropCutTail` drops a multiple of this many characters, so the amount barely reflects secret lengths. */
+const CUT_TAIL_QUANTUM = 64;
+
+/**
+ * Text that ends where a body was cut can end in the first characters of a
+ * secret whose rest was cut off, and the value scrub only matches whole
+ * secrets. Drop the last characters of the sanitized text: at least the
+ * longest secret variant, rounded up. Run after sanitizing, so a secret that
+ * ends before the cut is already `REDACTED` and only a partial one can be in
+ * the raw tail. The amount depends on the registered secrets, never on the
+ * text, so what is dropped does not tell a caller whether a secret was there.
+ */
+function dropCutTail(text: string, sink: RawCaptureSink): string {
+  const scrubber = scrubberFor(sink);
+  if (!scrubber) return text;
+  const margin = Math.ceil(scrubber.longest / CUT_TAIL_QUANTUM) * CUT_TAIL_QUANTUM;
+  if (text.length <= margin) return '';
+  let end = text.length - margin;
+  const last = text.charCodeAt(end - 1);
+  if (last >= 0xd800 && last <= 0xdbff) end--; // never keep half of a surrogate pair
+  return text.slice(0, end);
+}
+
+/**
+ * A text body over the per-body cap, ready to retain. `window` is the body
+ * cut to the cap plus `RAW_CAPTURE_CUT_SLACK_BYTES`, and is sanitized
+ * *before* the cut to the cap: a secret or a `"token": "…"` pair that
+ * straddles the cap is seen whole, redacted, and only then cut. When the
+ * window itself cut through the body, its tail goes too (`dropCutTail`); with
+ * ordinary secret lengths that tail lies past the cap and costs nothing.
+ */
+function cutTextBody(window: string, windowCut: boolean, maxBody: number, sink: RawCaptureSink): unknown {
+  const clean = sanitizeCapturedValue(window, sink);
+  if (typeof clean !== 'string') return clean;
+  return truncateUtf8(windowCut ? dropCutTail(clean, sink) : clean, maxBody);
+}
+
 /**
  * Retain `body` on `entry` under both budgets: the per-body cap truncates the
  * value, the per-source cap decides whether anything is retained at all.
@@ -847,13 +1111,18 @@ export function retainBody(
 
   let value = normalized.value;
   let bytes = normalized.bytes;
+  let cut = false;
+  let windowCut = false;
   const maxBody = rawCaptureMaxBodyBytes();
   if (bytes > maxBody) {
     entry.truncated = true;
     if (typeof value === 'string') {
-      const shortened = truncateUtf8(value, maxBody);
-      value = shortened;
-      bytes = Buffer.byteLength(shortened, 'utf8');
+      // Sanitized past the cap first, then cut (`cutTextBody`).
+      const window = maxBody + RAW_CAPTURE_CUT_SLACK_BYTES;
+      windowCut = bytes > window;
+      value = truncateUtf8(value, window);
+      bytes = maxBody; // what is retained at most
+      cut = true;
     } else {
       // A JSON body cannot be partially parsed — omit it entirely.
       value = undefined;
@@ -866,7 +1135,13 @@ export function retainBody(
     return;
   }
   if (value !== undefined) {
-    const clean = sanitizeCapturedValue(value, sink);
+    let clean: unknown;
+    if (cut) {
+      cutBodies.add(entry);
+      clean = cutTextBody(value as string, windowCut, maxBody, sink);
+    } else {
+      clean = sanitizeCapturedValue(value, sink);
+    }
     entry.body = clean;
     markSanitized(sink, entry, 'body', clean);
     sink.retained_bytes += bytes;
@@ -925,6 +1200,9 @@ function sanitizeRawEntry(sink: RawCaptureSink, entry: RawHttpEntry): void {
       fields[key] = value;
     }
     const clean = sanitizeFields(sink, fields as Partial<RawHttpEntry>);
+    // A cut body re-sanitized under new secrets loses its tail again: a
+    // secret registered since may be longer than the first margin.
+    if (typeof clean.body === 'string' && cutBodies.has(entry)) clean.body = dropCutTail(clean.body, sink);
     if (entry.bodies_withheld) {
       delete entry.body;
       delete entry.request_body;
