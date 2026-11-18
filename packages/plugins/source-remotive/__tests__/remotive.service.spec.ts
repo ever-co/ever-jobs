@@ -60,6 +60,20 @@ describe('RemotiveService salary parsing', () => {
     });
   });
 
+  // T-2633 — 25k sits under the monthly threshold and 35k does not; the
+  // shared parser dropped the whole range, so the job had no compensation.
+  it("reads a 'k' range that crosses the monthly threshold as yearly USD", async () => {
+    const compensation = await compensationOf('$25k - $35k');
+
+    expect(compensation).not.toBeNull();
+    expect(compensation).toMatchObject({
+      interval: CompensationInterval.YEARLY,
+      minAmount: 25000,
+      maxAmount: 35000,
+      currency: 'USD',
+    });
+  });
+
   it('labels an hourly range as hourly, not yearly', async () => {
     const compensation = await compensationOf('$14 - $20/hour');
 
