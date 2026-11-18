@@ -81,6 +81,7 @@ import {
   sanitizeDeadlineCap,
 } from '../config/search-deadline-config';
 import {
+  INCLUDE_RAW_API_KEYS_ENV_VAR,
   INCLUDE_RAW_ENABLED_ENV_VAR,
   INCLUDE_RAW_MAX_CONCURRENT_ENV_VAR,
   includeRawMaxConcurrent,
@@ -249,7 +250,10 @@ export class JobsController {
       'Raw HTTP capture for a single source (Spec 5161), an operator debugging aid. Off unless the server sets ' +
       `${INCLUDE_RAW_ENABLED_ENV_VAR}=true (403 otherwise), and it needs API key auth on (503 otherwise) and a valid ` +
       'admin key in the API key header, as for admin routes (503 when no API_KEYS are configured, 401 for a missing ' +
-      'or unknown key). Valid only when the request resolves to exactly one source; otherwise 400. At most ' +
+      `or unknown key), that is also listed in ${INCLUDE_RAW_API_KEYS_ENV_VAR} (503 while that list is empty, 403 ` +
+      'for a key not in it). Credentials are scrubbed from every entry (the server\'s API keys and secrets, ' +
+      'credential-named query params and JSON fields such as tokens, keyed URL paths), shown as "REDACTED". ' +
+      'Valid only when the request resolves to exactly one source; otherwise 400. At most ' +
       `${INCLUDE_RAW_MAX_CONCURRENT_ENV_VAR} (default 2) capture searches run at once; more get 429. Skips the cache ` +
       'read and adds `raw_by_source` to the JSON response (not to ndjson). When the request names its own target ' +
       '(`companyUrl`, or a `companySlug` that can name a host), each entry keeps only metadata (status, url, ' +
@@ -300,12 +304,13 @@ export class JobsController {
   @ApiResponse({
     status: 403,
     description:
-      'include_raw while the server has it disabled; or, with API key auth on, a missing or invalid API key',
+      `include_raw while the server has it disabled, or with a key not in ${INCLUDE_RAW_API_KEYS_ENV_VAR}; ` +
+      'or, with API key auth on, a missing or invalid API key',
   })
   @ApiResponse({ status: 429, description: 'Rate limit exceeded, or too many include_raw searches at once' })
   @ApiResponse({
     status: 503,
-    description: 'include_raw while API key auth is off or no API_KEYS are configured',
+    description: `include_raw while API key auth is off, or no API_KEYS or ${INCLUDE_RAW_API_KEYS_ENV_VAR} are configured`,
   })
   async searchJobs(
     @Body() input: ScraperInputDto,
@@ -394,8 +399,9 @@ export class JobsController {
     // Spec 5161 — raw HTTP capture is a debugging aid for one source at a
     // time; the service 400s when the selection resolves to anything else.
     // Fork-sync hardening: it returns data fetched with the server's identity
-    // and credentials, so it needs the operator opt-in AND an admin key
-    // (403 / 503 / 401). Checked before any cache or scrape work, and for
+    // and credentials, so it needs the operator opt-in AND an admin key that
+    // is also in EVER_JOBS_INCLUDE_RAW_API_KEYS (403 / 503 / 401; see
+    // `assertIncludeRawAllowed`). Checked before any cache or scrape work, and for
     // format=ndjson too: NDJSON ignores the flag, but the answer to an
     // unauthorised include_raw request should not depend on the format.
     const includeRaw = parseBool(includeRawRaw);

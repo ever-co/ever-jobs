@@ -664,11 +664,17 @@ describe('JobsController', () => {
 
       // Obvious fakes — never a real-looking credential.
       const ADMIN_KEY = 'FAKE_ADMIN_KEY_123456';
-      /** Fork-sync hardening: operator opt-in + auth on + a configured admin key. */
+      /** A valid API_KEYS entry that is not allowed to use include_raw. */
+      const CONSUMER_KEY = 'FAKE_CONSUMER_KEY_777777';
+      /**
+       * Fork-sync hardening: operator opt-in + auth on + a configured admin key
+       * that is also in EVER_JOBS_INCLUDE_RAW_API_KEYS.
+       */
       const allowedConfig = {
         'rawCapture.enabled': true,
+        'rawCapture.apiKeys': [ADMIN_KEY],
         'auth.enabled': true,
-        'auth.apiKeys': [ADMIN_KEY],
+        'auth.apiKeys': [ADMIN_KEY, CONSUMER_KEY],
       };
       const requestWithKey = (key?: string) =>
         ({ headers: key === undefined ? {} : { 'x-api-key': key } }) as any;
@@ -813,6 +819,27 @@ describe('JobsController', () => {
           await expect(
             searchRaw(controller, requestWithKey('FAKE_OTHER_KEY_654321')),
           ).rejects.toBeInstanceOf(UnauthorizedException);
+          expect(jobsService.searchJobsWithDiagnostics).not.toHaveBeenCalled();
+        });
+
+        it('is refused with 403 for a valid API key that is not in EVER_JOBS_INCLUDE_RAW_API_KEYS', async () => {
+          const { controller, jobsService, cacheService } = createController({
+            jobs: [makeJob()],
+            configValues: allowedConfig,
+          });
+          await expect(searchRaw(controller, requestWithKey(CONSUMER_KEY))).rejects.toBeInstanceOf(
+            ForbiddenException,
+          );
+          expect(jobsService.searchJobsWithDiagnostics).not.toHaveBeenCalled();
+          expect(cacheService.get).not.toHaveBeenCalled();
+        });
+
+        it('is refused with 503 while EVER_JOBS_INCLUDE_RAW_API_KEYS is empty', async () => {
+          const { controller, jobsService } = createController({
+            jobs: [makeJob()],
+            configValues: { ...allowedConfig, 'rawCapture.apiKeys': [] },
+          });
+          await expect(searchRaw(controller)).rejects.toBeInstanceOf(ServiceUnavailableException);
           expect(jobsService.searchJobsWithDiagnostics).not.toHaveBeenCalled();
         });
 

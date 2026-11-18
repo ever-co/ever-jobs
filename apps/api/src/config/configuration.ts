@@ -59,7 +59,8 @@ export default () => {
 
     // Raw HTTP capture (`?include_raw=true`, Spec 5161; fork-sync hardening).
     // Operator opt-in, off by default; a request also needs API key auth on
-    // and a valid admin key (see `../auth/include-raw-access.ts`).
+    // and a valid admin key listed in `apiKeys`
+    // (EVER_JOBS_INCLUDE_RAW_API_KEYS; see `../auth/include-raw-access.ts`).
     // `maxConcurrent` bounds the capture searches running at once.
     rawCapture: resolveIncludeRawConfig(process.env),
 
