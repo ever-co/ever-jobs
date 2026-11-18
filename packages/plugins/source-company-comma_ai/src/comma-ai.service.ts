@@ -72,7 +72,8 @@ export class CommaAiService implements IScraper {
     for (const chunkPath of this.chunkPaths(String(shellRes.data ?? ''))) {
       const chunkUrl = this.chunkUrl(chunkPath);
       if (!chunkUrl) {
-        this.logger.debug(`comma.ai: skipping node chunk path \`${chunkPath.slice(0, 200)}\``);
+        // JSON-escaped: the path is page text and may carry line breaks
+        this.logger.debug(`comma.ai: skipping node chunk path ${JSON.stringify(chunkPath.slice(0, 200))}`);
         continue;
       }
       const chunkRes = await client.get<string>(chunkUrl).catch(() => null);
