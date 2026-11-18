@@ -5,11 +5,23 @@ import type {
   Page,
   LaunchOptions,
   BrowserContextOptions,
+  Request,
+  Response,
   Response as PlaywrightResponse,
 } from 'playwright';
+import type { RawHttpEntry } from '@ever-jobs/models';
 import { createHash } from 'crypto';
 import { homedir } from 'os';
 import { join } from 'path';
+import { getRawCapture } from '../context';
+import {
+  captureRequestBody,
+  pushRawEntry,
+  rawCaptureMaxSourceBytes,
+  rawCaptureWithholdReason,
+  retainBufferBody,
+  updateRawEntry,
+} from '../http/raw-capture';
 import { EVER_JOBS_DEFAULT_USER_AGENT } from '../http/crawl/defaults';
 import { assertPublicHostname, assertPublicProxy, assertPublicResolution } from '../http/crawl/egress-guard';
 import {
@@ -552,6 +564,7 @@ export class BrowserPool {
       const page = await context.newPage();
       await this.disposeInitialPages(context);
       this.pageCrawl.set(page, info);
+      attachRawCapture(page);
       // A persistent context is shared: only this page goes on abort.
       return this.closeOnAbort(page, signal, () => page.close());
     }
@@ -561,6 +574,7 @@ export class BrowserPool {
     await this.applyStealthToContext(context, stealth);
     const page = await context.newPage();
     this.pageCrawl.set(page, info);
+    attachRawCapture(page);
     // This context exists for this page alone: closing it closes the page too.
     return this.closeOnAbort(page, signal, () => context.close());
   }
@@ -902,4 +916,154 @@ export class BrowserPool {
       }
     }
   }
+}
+
+/** Resource types worth capturing — js/css/img/font/analytics would only burn the budget. */
+const RAW_CAPTURE_RESOURCE_TYPES = new Set(['document', 'xhr', 'fetch']);
+
+/**
+ * Spec 5161 — attach raw-HTTP capture listeners to a Playwright page.
+ *
+ * Called by `BrowserPool.getPage()` on every page it returns, and directly by
+ * the two sources that skip the pool (`source-tesla-playwright`,
+ * `source-ats-kula_ai`) right after `browser.newPage()`.
+ *
+ * The sink is read **once** here and closed over: Playwright dispatches
+ * `page.on(...)` handlers from its connection message loop, where the
+ * AsyncLocalStorage context is not active, so a handler that looked the sink
+ * up at event time would find nothing.
+ *
+ * Listeners attach to the page, never the context — persistent contexts are
+ * shared across sources and would leak other sources' traffic into the sink.
+ * Pages die with their listeners, so no cleanup is needed.
+ *
+ * Bodies of a chain whose first URL looks like a token / auth endpoint are
+ * never read (`rawCaptureWithholdReason`), and no body is pulled out of
+ * Chromium once the source's capture budget is spent.
+ */
+export function attachRawCapture(page: Page): void {
+  const sink = getRawCapture();
+  if (!sink) return;
+
+  /** Responses keyed by the chain head — lets `finish` stay synchronous. */
+  const responses = new Map<Request, Response>();
+  /** Body reads keyed by the chain head, started on `response`. */
+  const pendingBodies = new Map<Request, Promise<Buffer | null>>();
+  /** Chain heads whose body was not read because the source budget was spent. */
+  const overBudget = new Set<Request>();
+  const startTimes = new Map<Request, number>();
+  /** One entry per redirect chain, keyed by its head request. */
+  const entryByHead = new Map<Request, RawHttpEntry>();
+
+  const headOf = (request: Request): Request => {
+    let head = request;
+    for (;;) {
+      const prev = head.redirectedFrom();
+      if (!prev) return head;
+      head = prev;
+    }
+  };
+
+  const recordable = (request: Request): boolean =>
+    RAW_CAPTURE_RESOURCE_TYPES.has(request.resourceType());
+
+  /** Entry for the chain `request` belongs to, created on first sight. */
+  const entryFor = (request: Request): RawHttpEntry | null => {
+    const head = headOf(request);
+    let entry = entryByHead.get(head);
+    if (!entry) {
+      // `pushRawEntry` redacts the URL and scrubs secret values itself.
+      const withheld = rawCaptureWithholdReason(head.url());
+      const pushed = pushRawEntry(sink, {
+        attempt: 0,
+        method: head.method(),
+        url: head.url(),
+        status: null,
+        elapsed_ms: 0,
+        body_bytes: 0,
+        truncated: false,
+        ...(withheld
+          ? { bodies_withheld: withheld }
+          : { request_body: captureRequestBody(head.postData(), sink) }),
+      });
+      if (!pushed) return null;
+      entry = pushed;
+      entryByHead.set(head, entry);
+    }
+    if (request !== head && request.url() !== head.url()) {
+      updateRawEntry(sink, entry, { final_url: request.url() });
+    }
+    return entry;
+  };
+
+  const elapsedOf = (request: Request): number => {
+    const end = request.timing()?.responseEnd;
+    if (typeof end === 'number' && end >= 0) return Math.round(end);
+    const started = startTimes.get(headOf(request));
+    return started === undefined ? 0 : Date.now() - started;
+  };
+
+  page.on('request', (request) => {
+    if (sink.closed || !recordable(request)) return;
+    startTimes.set(request, Date.now());
+  });
+
+  // Start the body read on `response` so it is already queued before the
+  // plugin's `page.close()` — plugins close the page as soon as parsing is
+  // done, and `response.body()` rejects on a closed page.
+  page.on('response', (response) => {
+    if (sink.closed) return;
+    const request = response.request();
+    if (!recordable(request)) return;
+    const head = headOf(request);
+    responses.set(head, response);
+    // Never pull a token / auth response out of Chromium, nor any body once
+    // the source budget is spent (it could not be retained anyway).
+    if (rawCaptureWithholdReason(head.url())) return;
+    if (sink.retained_bytes >= rawCaptureMaxSourceBytes()) {
+      overBudget.add(head);
+      return;
+    }
+    pendingBodies.set(head, response.body().catch(() => null));
+  });
+
+  const finish = (request: Request, failure: string | null): void => {
+    if (sink.closed || !recordable(request)) return;
+    const entry = entryFor(request);
+    if (!entry) return;
+    entry.elapsed_ms = elapsedOf(request);
+    if (failure !== null) {
+      updateRawEntry(sink, entry, { error: failure });
+      return;
+    }
+    const head = headOf(request);
+    const response = responses.get(head);
+    if (response) {
+      entry.status = response.status();
+      entry.content_type = response.headers()['content-type'];
+    }
+    if (overBudget.has(head)) entry.truncated = true;
+    const bodyPromise = pendingBodies.get(head);
+    if (bodyPromise) {
+      const contentType = entry.content_type;
+      const tracked = bodyPromise
+        .then((buf) => {
+          if (sink.closed) return;
+          if (buf === null) {
+            entry.truncated = true;
+            return;
+          }
+          retainBufferBody(sink, entry, buf, contentType);
+        })
+        .catch(() => {
+          if (!sink.closed) entry.truncated = true;
+        });
+      sink.pending.push(tracked);
+    }
+  };
+
+  page.on('requestfinished', (request) => finish(request, null));
+  page.on('requestfailed', (request) =>
+    finish(request, request.failure()?.errorText ?? 'request failed'),
+  );
 }

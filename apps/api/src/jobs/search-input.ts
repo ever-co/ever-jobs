@@ -30,6 +30,17 @@ export interface SearchRunOptions {
    * passes "the client has disconnected".
    */
   isCancelled?: () => boolean;
+  /**
+   * Spec 5161 — capture raw HTTP for the request's single source into
+   * `rawBySource`. Valid only when the request resolves to exactly one
+   * source; the service 400s otherwise.
+   */
+  captureRaw?: boolean;
+  /**
+   * Spec 5164 — per-request fan-out deadline override in ms (`0` disables the
+   * deadline for this call). Single-source requests only, like `captureRaw`.
+   */
+  deadlineMs?: number;
 }
 
 /**
@@ -126,4 +137,44 @@ export function parseSiteCategories(raw: unknown): Set<SiteCategory> | undefined
     );
   }
   return new Set(raw as SiteCategory[]);
+}
+
+/**
+ * Characters a `companySlug` may hold without being able to name a host of
+ * its own. A dot is left out on purpose: several ATS plugins treat a dotted
+ * slug as a bare hostname (`https://${slug}`), and Avature builds
+ * `https://${slug}.avature.net`, where `/`, `?`, `#` or `@` end the host
+ * early. `:` stays allowed for the Workday `company:wd:site` compound slug,
+ * which only ever lands inside a `*.myworkdayjobs.com` URL.
+ */
+const HOST_NEUTRAL_SLUG = /^[A-Za-z0-9_:-]+$/;
+
+/**
+ * Did the CALLER choose what the selected source fetches? (Spec 5161
+ * hardening, fork sync.) True when the request carries a `companyUrl`
+ * (jsonld and the company-URL plugins fetch it as given; the ATS fallback
+ * derives its target from it), or a `companySlug` that can name a host
+ * rather than a tenant on the plugin's own domain.
+ *
+ * `include_raw` keeps only request metadata for such a request: with bodies,
+ * it would hand the caller the full content of any URL the egress guard
+ * allows, fetched from the server's own address.
+ */
+export function callerSuppliesFetchTarget(input: {
+  companyUrl?: unknown;
+  companySlug?: unknown;
+}): boolean {
+  const { companyUrl, companySlug } = input;
+  if (typeof companyUrl === 'string') {
+    if (companyUrl.trim() !== '') return true;
+  } else if (companyUrl !== undefined && companyUrl !== null) {
+    // Not a string (GraphQL / CLI bypass ValidationPipe): be conservative.
+    return true;
+  }
+
+  if (typeof companySlug === 'string') {
+    const slug = companySlug.trim();
+    return slug !== '' && !HOST_NEUTRAL_SLUG.test(slug);
+  }
+  return companySlug !== undefined && companySlug !== null;
 }
