@@ -19,6 +19,8 @@ import {
   markdownConverter,
   extractEmails,
   parseLocationText,
+  registerRawCaptureSecrets,
+  registerServerRawCaptureSecrets,
   toDateOnly,
 } from '@ever-jobs/common';
 import {
@@ -170,7 +172,13 @@ export class PersonioService implements IScraper {
       timeout: input.requestTimeout,
     });
 
-    // Step 1: Authenticate to obtain Bearer token
+    // Spec 5161 (`include_raw`): scrub these from every captured entry. They
+    // may come from input.auth, so they are scrubbed after the server-held
+    // secrets (env credentials are already among those).
+    registerRawCaptureSecrets([clientId, clientSecret]);
+
+    // Step 1: Authenticate to obtain Bearer token. `rawCapture: false` keeps the
+    // client secret (request) and the bearer token (response) out of raw capture.
     const authResponse = await client.post<PersonioApiAuthResponse>(
       PERSONIO_API_AUTH_URL,
       { client_id: clientId, client_secret: clientSecret },
@@ -179,6 +187,7 @@ export class PersonioService implements IScraper {
           Accept: 'application/json',
           'Content-Type': 'application/json',
         },
+        rawCapture: false,
       },
     );
 
@@ -186,6 +195,8 @@ export class PersonioService implements IScraper {
     if (!token) {
       throw new Error('Personio API auth response did not include a token');
     }
+    // Issued by Personio, so no caller chose it: scrubbed with the server-held secrets.
+    registerServerRawCaptureSecrets(token);
 
     // Step 2: Fetch active positions with pagination
     const resultsWanted = input.resultsWanted ?? 100;

@@ -1,4 +1,5 @@
 import { UpworkAuthDto, UpworkGrantType } from '@ever-jobs/models';
+import { createRawCaptureSink, runWithRawCapture, sanitizeCapturedValue } from '@ever-jobs/common';
 
 import {
   UpworkTokenProvider,
@@ -75,6 +76,36 @@ describe('UpworkTokenProvider — client_credentials', () => {
 
     // 🛑 The regression this guards: Basic auth here returns 401 from Upwork.
     expect(posts[0].config.headers.Authorization).toBeUndefined();
+  });
+
+  it('opts the token call out of raw capture (include_raw must never return its bodies)', async () => {
+    const tokens = new UpworkTokenProvider(
+      clientCreds(),
+      UpworkGrantType.CLIENT_CREDENTIALS,
+    );
+    await tokens.getAccessToken();
+
+    expect(posts[0].url).toBe(UPWORK_TOKEN_URL);
+    expect(posts[0].config.rawCapture).toBe(false);
+  });
+
+  it('scrubs the issued token before caller-supplied credentials that overlap it', async () => {
+    nextResponse = () => ({ data: { access_token: 'FAKE_ISSUED_TOKEN_42', expires_in: 3600 } });
+    // A caller "secret" overlapping the token's first character: scrubbed in
+    // the same pass, it used to consume the `F` and leave the rest in clear.
+    const tokens = new UpworkTokenProvider(
+      new UpworkAuthDto({ clientId: 'cid-123', clientSecret: 'Bearer F' }),
+      UpworkGrantType.CLIENT_CREDENTIALS,
+    );
+    const sink = createRawCaptureSink();
+
+    await runWithRawCapture(sink, () => tokens.getAccessToken());
+
+    expect(sanitizeCapturedValue('authorized as Bearer FAKE_ISSUED_TOKEN_42', sink)).toBe(
+      'authorized as Bearer REDACTED',
+    );
+    // The caller value itself is still scrubbed, in the second pass.
+    expect(sanitizeCapturedValue('echo: Bearer F', sink)).toBe('echo: REDACTED');
   });
 
   it('caches the token so a fan-out costs one token request', async () => {

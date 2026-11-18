@@ -11,9 +11,10 @@ import {
   captureRequestBody,
   normalizeBody,
   pushRawEntry,
+  rawCaptureWithholdReason,
   redactUrl,
   retainBody,
-  sanitizeErrorText,
+  updateRawEntry,
 } from './raw-capture';
 
 const RETRYABLE_STATUSES = [429, 500, 502, 503, 504];
@@ -296,6 +297,15 @@ export interface HttpClientOptions {
  */
 export interface CrawlRequestConfig<D = any> extends AxiosRequestConfig<D> {
   crawl?: CrawlPolicyOverride;
+  /**
+   * Spec 5161 raw capture (`include_raw`): `false` records only this request's
+   * metadata (method, URL, status, timing) and never its request or response
+   * body, success or error. Set it on token / auth calls: their bodies carry
+   * client secrets and access tokens. URLs that look like a token or auth
+   * endpoint are withheld by default (`rawCaptureWithholdReason`); `true` does
+   * not override that. Never sent to the server.
+   */
+  rawCapture?: boolean;
 }
 
 /** The identity (User-Agent, `From`, client hints) one attempt goes out with. */
@@ -324,6 +334,8 @@ interface RequestPlan {
   ctx: ScrapeContext | undefined;
   /** The per-request `crawl` override (`CrawlRequestConfig`), carried to a re-issued redirect hop. */
   requestCrawl: CrawlPolicyOverride | undefined;
+  /** The per-request raw-capture opt-out (`CrawlRequestConfig.rawCapture`), carried to a re-issued redirect hop. */
+  rawCapture: boolean | undefined;
   /**
    * Redirect hops already followed on the way to this request (Spec 1715 audit A0):
    * 0 for a caller's request; a hop re-issued under its own policy carries the
@@ -1229,14 +1241,14 @@ export class HttpClient {
       : new HttpsProxyAgent(proxyUrl);
   }
 
-  async get<T = any>(url: string, config?: AxiosRequestConfig): Promise<AxiosResponse<T>> {
+  async get<T = any>(url: string, config?: CrawlRequestConfig): Promise<AxiosResponse<T>> {
     return this.request<T>({ ...config, method: 'GET', url });
   }
 
   async post<T = any>(
     url: string,
     data?: any,
-    config?: AxiosRequestConfig,
+    config?: CrawlRequestConfig,
   ): Promise<AxiosResponse<T>> {
     return this.request<T>({ ...config, method: 'POST', url, data });
   }
@@ -1262,7 +1274,7 @@ export class HttpClient {
    * the response interceptors, so its Set-Cookie headers are replayed into this
    * client's jar here (a no-op without a jar).
    */
-  async request<T = any>(config: AxiosRequestConfig): Promise<AxiosResponse<T>> {
+  async request<T = any>(config: CrawlRequestConfig): Promise<AxiosResponse<T>> {
     return this.send<T>(config, 0);
   }
 
@@ -1272,7 +1284,7 @@ export class HttpClient {
    * policy (Spec 1715 audit A0, `followDeferredRedirect`).
    */
   private async send<T = any>(config: AxiosRequestConfig, redirectHops: number): Promise<AxiosResponse<T>> {
-    const { crawl: requestCrawl, ...axiosConfig } = config as CrawlRequestConfig;
+    const { crawl: requestCrawl, rawCapture, ...axiosConfig } = config as CrawlRequestConfig;
     const ctx = getScrapeContext();
     const target = resolveTargetUrl(axiosConfig);
     const resolution = this.resolveCrawl(target?.hostname, ctx, requestCrawl);
@@ -1301,6 +1313,7 @@ export class HttpClient {
       identity,
       ctx,
       requestCrawl,
+      rawCapture,
       redirectHops,
     };
     // A re-issued redirect hop (Spec 1715 audit A0) never consults the memo: the
@@ -1438,8 +1451,11 @@ export class HttpClient {
           })));
 
     // Spec 5161 — read the capture sink once per call; AsyncLocalStorage
-    // keeps it in scope across the awaits below.
+    // keeps it in scope across the awaits below. A token / auth call (the
+    // plugin's `rawCapture: false`, or a URL that looks like one) is recorded
+    // without its request or response body.
     const sink = getRawCapture();
+    const withheld = sink ? rawCaptureWithholdReason(target?.href ?? axiosConfig.url, plan.rawCapture) : undefined;
 
     for (let attempt = 0; ; attempt++) {
       const release = bucket ? await limiter.acquire(bucket, limits) : undefined;
@@ -1451,16 +1467,19 @@ export class HttpClient {
         : {};
       // Spec 5161 — one capture entry per attempt; the sink itself is read once
       // per call (AsyncLocalStorage keeps it in scope across the awaits).
+      // `pushRawEntry` redacts the URL and scrubs secret values itself.
       const entry = sink
         ? pushRawEntry(sink, {
             attempt,
             method: (axiosConfig.method ?? 'GET').toUpperCase(),
-            url: axiosConfig.url ? redactUrl(axiosConfig.url) : '(no url)',
+            url: axiosConfig.url ?? '(no url)',
             status: null,
             elapsed_ms: 0,
             body_bytes: 0,
             truncated: false,
-            request_body: captureRequestBody(axiosConfig.data),
+            ...(withheld
+              ? { bodies_withheld: withheld }
+              : { request_body: captureRequestBody(axiosConfig.data, sink) }),
           })
         : null;
       const startedAt = Date.now();
@@ -1721,6 +1740,7 @@ export class HttpClient {
     }
     if (hop.crossOrigin) delete next.auth;
     if (plan.requestCrawl && typeof plan.requestCrawl === 'object') next.crawl = plan.requestCrawl;
+    if (plan.rawCapture === false) next.rawCapture = false;
     this.logger.debug(
       `${this.describeRequest(config)} redirects (${hop.status ?? '3xx'}) to ${this.redactUrl(hop.href)}; ` +
         `re-issued under its own crawl policy (hop ${hop.hops}, ${CRAWL_EXTRA_ENV.PACE_REDIRECTS})`,
@@ -2158,6 +2178,10 @@ export class HttpClient {
   /**
    * Spec 5161 — record a settled response into the capture sink. Non-2xx
    * never reaches here (axios throws), so this handles success bodies only.
+   * `updateRawEntry` / `retainBody` redact and scrub everything they store
+   * (follow-redirects' `responseUrl` carries the serialized `params` and any
+   * userinfo, so `final_url` needs it as much as `url`), and keep no body for
+   * an entry with `bodies_withheld`.
    */
   private recordCapturedResponse(
     sink: RawCaptureSink,
@@ -2165,13 +2189,13 @@ export class HttpClient {
     response: AxiosResponse,
     startedAt: number,
   ): void {
-    entry.status = response.status;
-    entry.elapsed_ms = Date.now() - startedAt;
-    entry.content_type = headerString(response, 'content-type');
     const finalUrl = response.request?.res?.responseUrl as string | undefined;
-    if (finalUrl && finalUrl !== entry.url) {
-      entry.final_url = redactUrl(finalUrl);
-    }
+    updateRawEntry(sink, entry, {
+      status: response.status,
+      elapsed_ms: Date.now() - startedAt,
+      content_type: headerString(response, 'content-type'),
+      ...(finalUrl ? { final_url: finalUrl } : {}),
+    });
     retainBody(sink, entry, normalizeBody(response.data, entry.content_type));
   }
 
@@ -2182,20 +2206,23 @@ export class HttpClient {
     error: any,
     startedAt: number,
   ): void {
-    entry.elapsed_ms = Date.now() - startedAt;
-    const response = error.response as AxiosResponse | undefined;
-    if (response) {
-      entry.status = response.status;
-      entry.content_type = headerString(response, 'content-type');
-      const finalUrl = response.request?.res?.responseUrl as string | undefined;
-      if (finalUrl && finalUrl !== entry.url) {
-        entry.final_url = redactUrl(finalUrl);
-      }
-      // Error payloads usually carry the actual diagnostic — capture the body.
-      retainBody(sink, entry, normalizeBody(response.data, entry.content_type));
-    }
     const message = typeof error?.message === 'string' ? error.message : String(error);
-    entry.error = sanitizeErrorText(message);
+    const response = error?.response as AxiosResponse | undefined;
+    if (!response) {
+      updateRawEntry(sink, entry, { elapsed_ms: Date.now() - startedAt, error: message });
+      return;
+    }
+    const finalUrl = response.request?.res?.responseUrl as string | undefined;
+    updateRawEntry(sink, entry, {
+      elapsed_ms: Date.now() - startedAt,
+      status: response.status,
+      content_type: headerString(response, 'content-type'),
+      ...(finalUrl ? { final_url: finalUrl } : {}),
+      error: message,
+    });
+    // Error payloads usually carry the actual diagnostic — capture the body,
+    // redacted: a failed token exchange can echo the submitted client_secret.
+    retainBody(sink, entry, normalizeBody(response.data, entry.content_type));
   }
 
   /** `Retry-After` as milliseconds: delta-seconds or an HTTP-date. Null when absent/unparseable. */

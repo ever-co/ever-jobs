@@ -16,6 +16,7 @@ import {
   htmlToPlainText,
   markdownConverter,
   extractEmails,
+  registerServerRawCaptureSecrets,
   toDateOnly,
 } from '@ever-jobs/common';
 import {
@@ -127,6 +128,10 @@ export class FranceTravailService implements IScraper {
   }
 
   private async getAccessToken(): Promise<string | null> {
+    // Spec 5161 (`include_raw`): scrub the credentials and the token from every
+    // captured entry of this scrape — the token is cached across scrapes. All
+    // three are server-held: env credentials and the token they obtained.
+    registerServerRawCaptureSecrets([this.clientId, this.clientSecret, this.accessToken]);
     if (this.accessToken && Date.now() < this.tokenExpiresAt) {
       return this.accessToken;
     }
@@ -142,11 +147,13 @@ export class FranceTravailService implements IScraper {
         scope: 'api_offresdemploiv2 o2dsoffre',
       }).toString();
 
-      const response = await client.post(FRANCETRAVAIL_TOKEN_URL, body);
+      // `rawCapture: false`: the body carries client_secret, the answer the token.
+      const response = await client.post(FRANCETRAVAIL_TOKEN_URL, body, { rawCapture: false });
       const data = response.data as FranceTravailTokenResponse;
 
       this.accessToken = data.access_token;
       this.tokenExpiresAt = Date.now() + (data.expires_in - 60) * 1000;
+      registerServerRawCaptureSecrets(this.accessToken);
 
       this.logger.log('France Travail OAuth token obtained');
       return this.accessToken;

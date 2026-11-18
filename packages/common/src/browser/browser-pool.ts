@@ -16,10 +16,11 @@ import { join } from 'path';
 import { getRawCapture } from '../context';
 import {
   captureRequestBody,
-  normalizeBody,
   pushRawEntry,
-  redactUrl,
-  retainBody,
+  rawCaptureMaxSourceBytes,
+  rawCaptureWithholdReason,
+  retainBufferBody,
+  updateRawEntry,
 } from '../http/raw-capture';
 import { EVER_JOBS_DEFAULT_USER_AGENT } from '../http/crawl/defaults';
 import { assertPublicHostname, assertPublicProxy, assertPublicResolution } from '../http/crawl/egress-guard';
@@ -935,6 +936,10 @@ const RAW_CAPTURE_RESOURCE_TYPES = new Set(['document', 'xhr', 'fetch']);
  * Listeners attach to the page, never the context — persistent contexts are
  * shared across sources and would leak other sources' traffic into the sink.
  * Pages die with their listeners, so no cleanup is needed.
+ *
+ * Bodies of a chain whose first URL looks like a token / auth endpoint are
+ * never read (`rawCaptureWithholdReason`), and no body is pulled out of
+ * Chromium once the source's capture budget is spent.
  */
 export function attachRawCapture(page: Page): void {
   const sink = getRawCapture();
@@ -944,6 +949,8 @@ export function attachRawCapture(page: Page): void {
   const responses = new Map<Request, Response>();
   /** Body reads keyed by the chain head, started on `response`. */
   const pendingBodies = new Map<Request, Promise<Buffer | null>>();
+  /** Chain heads whose body was not read because the source budget was spent. */
+  const overBudget = new Set<Request>();
   const startTimes = new Map<Request, number>();
   /** One entry per redirect chain, keyed by its head request. */
   const entryByHead = new Map<Request, RawHttpEntry>();
@@ -965,22 +972,26 @@ export function attachRawCapture(page: Page): void {
     const head = headOf(request);
     let entry = entryByHead.get(head);
     if (!entry) {
+      // `pushRawEntry` redacts the URL and scrubs secret values itself.
+      const withheld = rawCaptureWithholdReason(head.url());
       const pushed = pushRawEntry(sink, {
         attempt: 0,
         method: head.method(),
-        url: redactUrl(head.url()),
+        url: head.url(),
         status: null,
         elapsed_ms: 0,
         body_bytes: 0,
         truncated: false,
-        request_body: captureRequestBody(head.postData()),
+        ...(withheld
+          ? { bodies_withheld: withheld }
+          : { request_body: captureRequestBody(head.postData(), sink) }),
       });
       if (!pushed) return null;
       entry = pushed;
       entryByHead.set(head, entry);
     }
     if (request !== head && request.url() !== head.url()) {
-      entry.final_url = redactUrl(request.url());
+      updateRawEntry(sink, entry, { final_url: request.url() });
     }
     return entry;
   };
@@ -1006,6 +1017,13 @@ export function attachRawCapture(page: Page): void {
     if (!recordable(request)) return;
     const head = headOf(request);
     responses.set(head, response);
+    // Never pull a token / auth response out of Chromium, nor any body once
+    // the source budget is spent (it could not be retained anyway).
+    if (rawCaptureWithholdReason(head.url())) return;
+    if (sink.retained_bytes >= rawCaptureMaxSourceBytes()) {
+      overBudget.add(head);
+      return;
+    }
     pendingBodies.set(head, response.body().catch(() => null));
   });
 
@@ -1015,37 +1033,30 @@ export function attachRawCapture(page: Page): void {
     if (!entry) return;
     entry.elapsed_ms = elapsedOf(request);
     if (failure !== null) {
-      entry.error = failure;
+      updateRawEntry(sink, entry, { error: failure });
       return;
     }
-    const response = responses.get(headOf(request));
+    const head = headOf(request);
+    const response = responses.get(head);
     if (response) {
       entry.status = response.status();
       entry.content_type = response.headers()['content-type'];
     }
-    const head = headOf(request);
+    if (overBudget.has(head)) entry.truncated = true;
     const bodyPromise = pendingBodies.get(head);
     if (bodyPromise) {
       const contentType = entry.content_type;
       const tracked = bodyPromise
         .then((buf) => {
+          if (sink.closed) return;
           if (buf === null) {
             entry.truncated = true;
             return;
           }
-          const text = buf.toString('utf8');
-          let value: unknown = text;
-          if (contentType?.includes('json')) {
-            try {
-              value = JSON.parse(text);
-            } catch {
-              /* keep the raw text */
-            }
-          }
-          retainBody(sink, entry, normalizeBody(value, contentType));
+          retainBufferBody(sink, entry, buf, contentType);
         })
         .catch(() => {
-          entry.truncated = true;
+          if (!sink.closed) entry.truncated = true;
         });
       sink.pending.push(tracked);
     }

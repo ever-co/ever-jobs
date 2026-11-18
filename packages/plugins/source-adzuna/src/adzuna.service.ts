@@ -16,7 +16,16 @@ import {
   Site,
   Country,
 } from '@ever-jobs/models';
-import { createHttpClient, extractEmails, htmlToPlainText, markdownConverter, parseLocationList, toDateOnly } from '@ever-jobs/common';
+import {
+  createHttpClient,
+  extractEmails,
+  htmlToPlainText,
+  markdownConverter,
+  parseLocationList,
+  registerRawCaptureSecrets,
+  registerServerRawCaptureSecrets,
+  toDateOnly,
+} from '@ever-jobs/common';
 import {
   ADZUNA_API_BASE_URL,
   ADZUNA_HEADERS,
@@ -63,15 +72,30 @@ export class AdzunaService implements IScraper {
   }
 
   async scrape(input: ScraperInputDto): Promise<JobResponseDto> {
-    const appId = input.auth?.adzuna?.appId ?? this.defaultAppId;
-    const appKey = input.auth?.adzuna?.appKey ?? this.defaultAppKey;
+    // Per-request credentials are used as a pair, never mixed with the
+    // server's: app_id and app_key are issued together, so a mix cannot
+    // authenticate, and it would put a server credential in the same request
+    // as a caller-chosen value (fork-sync hardening).
+    const callerAuth = input.auth?.adzuna;
+    const fromCaller = Boolean(callerAuth?.appId || callerAuth?.appKey);
+    const appId = fromCaller ? callerAuth?.appId : this.defaultAppId;
+    const appKey = fromCaller ? callerAuth?.appKey : this.defaultAppKey;
 
     if (!appId || !appKey) {
-      this.logger.warn('Skipping Adzuna search — credentials not configured');
-      return new JobResponseDto(
-        [],
-        new ScrapeDiagnostics('bad_input', 'Adzuna credentials not configured'),
-      );
+      const detail = fromCaller
+        ? 'Adzuna per-request auth needs both appId and appKey'
+        : 'Adzuna credentials not configured';
+      this.logger.warn(`Skipping Adzuna search — ${detail}`);
+      return new JobResponseDto([], new ScrapeDiagnostics('bad_input', detail));
+    }
+
+    // Spec 5161 (`include_raw`): the keys travel as query params, which end up
+    // in the captured `final_url` — scrub them wherever they appear. Caller
+    // values are scrubbed after the server's, so they cannot probe them.
+    if (fromCaller) {
+      registerRawCaptureSecrets([appId, appKey]);
+    } else {
+      registerServerRawCaptureSecrets([appId, appKey]);
     }
 
     const resultsWanted = input.resultsWanted ?? ADZUNA_DEFAULT_RESULTS;
