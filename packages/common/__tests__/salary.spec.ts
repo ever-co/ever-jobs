@@ -586,6 +586,22 @@ describe('extractSalary — a currency written only after the maximum (T-2634)',
     expect(render(extractSalary('from $40,000 per year; 5 - 7 USD'))).toBe('yearly 40000-null USD');
   });
 
+  it('skips a range after a benefit word, as it does a "to" range', () => {
+    // The bonus, budget or relocation figure is not the pay; the reading
+    // develop gave (a single bound, or nothing) stays.
+    expect(
+      render(extractSalary('Sign-on bonus 5,000 - 10,000 USD. Salary from $90,000 per year')),
+    ).toBe('yearly 90000-null USD');
+    expect(render(extractSalary('Learning budget: 1,000 - 2,000 USD per year'))).toBe('null');
+    expect(
+      render(extractSalary('Relocation budget 5,000 - 10,000 USD. Compensation: up to $120,000')),
+    ).toBe('yearly null-120000 USD');
+    // A skipped benefit range does not hide the salary range after it.
+    expect(
+      render(extractSalary('Signing bonus 5,000 - 10,000 USD; salary 90,000 - 110,000 USD')),
+    ).toBe('yearly 90000-110000 USD');
+  });
+
   it('does not change how EUR amounts with comma thousands are read', () => {
     // The continental number shape reads "60,000" as 60, which the guard refuses.
     expect(render(extractSalary('60,000 - 80,000 EUR'))).toBe('null');

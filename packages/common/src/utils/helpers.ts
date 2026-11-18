@@ -569,7 +569,9 @@ export interface ExtractSalaryOptions {
  *   T-2634 — it also reads a dash range whose currency follows only the
  *   maximum (`"60,000 - 80,000 USD"`, `"60K-80K USD"`), after the anchored
  *   shapes; its raw minimum must reach `lowerLimit` unless a `k` suffix or a
- *   pay-period token is present, so `"5 - 7 USD"` stays unread.
+ *   pay-period token is present, so `"5 - 7 USD"` stays unread, and one
+ *   whose nearest keyword before it is a benefit word
+ *   (`"sign-on bonus 5,000 - 10,000 USD"`) is skipped, as a `to` range is.
  * - `'legacy'` — the grammar before Spec 1695: dash separators only, no
  *   pay-period tokens (a token after the first amount breaks the match, one
  *   after the second is ignored), interval from magnitude unless
@@ -1137,9 +1139,12 @@ function buildSalaryRegexTrailing(symbolAlt: string, numSrc: string): RegExp {
  * Its minimum carries no currency, so it gets the bare path's prose guard: a
  * match whose raw minimum is under `lowerLimit` is skipped (`"5 - 7 USD"`)
  * unless a `k` suffix or a pay-period token marks it as pay
- * (`"60K-80K USD"`, `"20 - 25 USD/hr"`). A skipped match never hides a later
- * reading: the scan goes on, and with no match the caller falls through to
- * the `to` range, single-bound and other fallbacks as before.
+ * (`"60K-80K USD"`, `"20 - 25 USD/hr"`). A match whose nearest keyword before
+ * it, in its clause, is a benefit word (`"Sign-on bonus 5,000 - 10,000 USD"`,
+ * `"learning budget 1,000 - 2,000 USD"`) is skipped too, as a `to` range and a
+ * single bound are: that amount is not the pay. A skipped match never hides a
+ * later reading: the scan goes on, and with no match the caller falls through
+ * to the `to` range, single-bound and other fallbacks as before.
  */
 function selectTrailingCurrencyRange(
   text: string,
@@ -1149,6 +1154,7 @@ function selectTrailingCurrencyRange(
 ): RangeCandidate | null {
   pattern.lastIndex = 0;
   for (let found = pattern.exec(text); found !== null; found = pattern.exec(text)) {
+    if (salaryContextBefore(text, found.index).nearest === 'benefit') continue;
     const groups = found.groups ?? {};
     const rawMin = parseSalaryNumber(groups.min ?? '', locale);
     const kSuffixed = /k/i.test(`${groups.minK ?? ''}${groups.maxK ?? ''}`);
