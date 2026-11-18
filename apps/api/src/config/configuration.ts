@@ -7,6 +7,8 @@ import {
 import { resolvePersistSearch } from './store-config';
 import { resolveShutdownDrainTimeoutMs } from './shutdown-config';
 import { resolveTrustProxy } from './trust-proxy-config';
+import { resolveDeadlineAllowUnbounded, resolveSearchDeadlineMaxMs } from './search-deadline-config';
+import { resolveIncludeRawConfig } from './include-raw-config';
 import {
   crawlBuiltinHostsDisabled,
   crawlFleetSize,
@@ -43,6 +45,8 @@ export default () => {
     return Number.isNaN(n) ? fallback : n;
   };
 
+  const fanoutDeadlineMs = resolveFanoutDeadlineMs(process.env);
+
   return {
     port: parseInt(process.env.PORT, 3001),
 
@@ -52,6 +56,13 @@ export default () => {
       apiKeys: parseList(process.env.API_KEYS),
       headerName: process.env.API_KEY_HEADER_NAME || 'x-api-key',
     },
+
+    // Raw HTTP capture (`?include_raw=true`, Spec 5161; fork-sync hardening).
+    // Operator opt-in, off by default; a request also needs API key auth on
+    // and a valid admin key listed in `apiKeys`
+    // (EVER_JOBS_INCLUDE_RAW_API_KEYS; see `../auth/include-raw-access.ts`).
+    // `maxConcurrent` bounds the capture searches running at once.
+    rawCapture: resolveIncludeRawConfig(process.env),
 
     // Rate Limiting
     rateLimit: {
@@ -110,13 +121,23 @@ export default () => {
        * Spec 1721: `EVER_JOBS_FANOUT_DEADLINE_MS`, falling back to
        * `EVER_JOBS_SEARCH_DEADLINE_MS`.
        */
-      deadlineMs: resolveFanoutDeadlineMs(process.env),
+      deadlineMs: fanoutDeadlineMs,
       /**
        * Server-side ceiling for the per-request `?deadline_ms` override
-       * (Spec 5164). `0`/unset = uncapped; when set, a request deadline of
-       * `0` (unbounded) or above this value is rejected 400.
+       * (Spec 5164; fork-sync hardening). `EVER_JOBS_SEARCH_DEADLINE_MAX_MS`
+       * unset → the fan-out deadline above, so callers can only shorten it;
+       * `0`, negative or non-numeric → logged and treated as unset (fail
+       * closed). A caller value above it (or `0` = none) is capped to it.
+       * `0` here means "no ceiling" and only happens when the fan-out
+       * deadline itself is off. See `search-deadline-config.ts`.
        */
-      deadlineMaxMs: parseInt(process.env.EVER_JOBS_SEARCH_DEADLINE_MAX_MS, 0),
+      deadlineMaxMs: resolveSearchDeadlineMaxMs(process.env, fanoutDeadlineMs),
+      /**
+       * `EVER_JOBS_SEARCH_DEADLINE_ALLOW_UNBOUNDED=true`: callers may pass
+       * `deadline_ms=0` (no deadline) or any value above `deadlineMaxMs`.
+       * Off by default.
+       */
+      deadlineAllowUnbounded: resolveDeadlineAllowUnbounded(process.env),
       /**
        * Spec 1720 / FR-12 — `EVER_JOBS_MAX_RESULTS_WANTED` (default 1000)
        * clamps `resultsWanted` per source; `EVER_JOBS_MAX_JOBS_PER_SEARCH`
