@@ -33,6 +33,12 @@ import {
 import { DEFAULT_MAX_JOBS_PER_SEARCH, DEFAULT_MAX_RESULTS_WANTED } from '../config/search-config';
 import { INCLUDE_RAW_ENABLED_ENV_VAR } from '../config/include-raw-config';
 import {
+  collectRawCaptureSecrets,
+  redactRawEntry,
+  redactRawText,
+  redactRawUrl,
+} from './raw-entry-redaction';
+import {
   COMPLETE_SEARCH,
   ProblemSource,
   SearchCompleteness,
@@ -90,23 +96,32 @@ const WITHHELD_ERROR_MAX_CHARS = 300;
  * Reduce a raw entry to request metadata: status, URLs, content type, sizes
  * and timing. `body` and `request_body` are dropped. An allow-list, so a
  * field added to `RawHttpEntry` later stays out until it is listed here.
+ *
+ * The URLs and the error text that remain are credential-scrubbed
+ * (`redactRawUrl` / `redactRawText`, with `secrets` from
+ * `collectRawCaptureSecrets`): a keyed source puts its key in exactly these
+ * fields. The error is scrubbed BEFORE it is capped, so the cap can never
+ * cut a secret into a prefix the scrub no longer recognises.
  */
-export function toMetadataOnlyRawEntry(entry: RawHttpEntry): WithheldRawHttpEntry {
+export function toMetadataOnlyRawEntry(
+  entry: RawHttpEntry,
+  secrets: readonly string[] = [],
+): WithheldRawHttpEntry {
   const meta: WithheldRawHttpEntry = {
     seq: entry.seq,
     attempt: entry.attempt,
     method: entry.method,
-    url: entry.url,
+    url: redactRawUrl(entry.url, secrets),
     status: entry.status,
     elapsed_ms: entry.elapsed_ms,
     body_bytes: entry.body_bytes,
     truncated: entry.truncated,
     body_withheld: RAW_BODY_WITHHELD_CALLER_URL,
   };
-  if (entry.final_url !== undefined) meta.final_url = entry.final_url;
+  if (entry.final_url !== undefined) meta.final_url = redactRawUrl(entry.final_url, secrets);
   if (entry.content_type !== undefined) meta.content_type = entry.content_type;
   if (typeof entry.error === 'string') {
-    meta.error = entry.error.slice(0, WITHHELD_ERROR_MAX_CHARS);
+    meta.error = redactRawText(entry.error, secrets).slice(0, WITHHELD_ERROR_MAX_CHARS);
   }
   return meta;
 }
@@ -1144,6 +1159,10 @@ export class JobsService implements OnModuleInit {
     // (`companyUrl`, or a host-shaped `companySlug`) gets metadata only:
     // returning bodies would make the server a read proxy for any URL the
     // egress guard allows, fetched from the server's own address.
+    //
+    // Every entry, full or metadata-only, is also scrubbed of the server's
+    // credentials (env-sourced plugin keys, the request's own `auth` values,
+    // credential-named fields, keyed URL paths): see `raw-entry-redaction.ts`.
     const rawBySource: Record<string, RawHttpEntry[]> = {};
     if (captureRaw) {
       if (withholdRawBodies) {
@@ -1152,13 +1171,16 @@ export class JobsService implements OnModuleInit {
             'returning request metadata only, no bodies',
         );
       }
+      const secrets = collectRawCaptureSecrets(process.env, input.auth);
       for (let index = 0; index < sinks.length; index++) {
         const sink = sinks[index];
         if (!sink) continue;
         await drainRawCapture(sink);
-        rawBySource[selectedScrapers[index].site] = withholdRawBodies
-          ? sink.entries.map(toMetadataOnlyRawEntry)
-          : sink.entries.slice();
+        rawBySource[selectedScrapers[index].site] = sink.entries.map((entry) =>
+          withholdRawBodies
+            ? toMetadataOnlyRawEntry(entry, secrets)
+            : redactRawEntry(entry, secrets),
+        );
       }
     }
 

@@ -1650,6 +1650,125 @@ describe('JobsService', () => {
           expect(entry).not.toHaveProperty('body_withheld');
         });
       });
+
+      describe('credential scrub (fork-sync hardening, finding 5)', () => {
+        // Obvious fakes standing in for the operator's third-party credentials.
+        const FAKE_ENV = {
+          JOOBLE_API_KEY: 'FAKE-JOOBLE-KEY-0000-1111',
+          ADZUNA_APP_ID: 'FAKEID01',
+          ADZUNA_APP_KEY: 'FAKE_ADZUNA_KEY_123456',
+          PERSONIO_CLIENT_ID: 'FAKE_PERSONIO_CLIENT_ID',
+          PERSONIO_CLIENT_SECRET: 'FAKE_PERSONIO_SECRET_123456',
+        };
+        const ISSUED_TOKEN = 'FAKE_ISSUED_TOKEN_424242';
+        const CALLER_KEY = 'FAKE_CALLER_SUPPLIED_KEY_5555';
+        const saved: Record<string, string | undefined> = {};
+
+        beforeAll(() => {
+          for (const [name, value] of Object.entries(FAKE_ENV)) {
+            saved[name] = process.env[name];
+            process.env[name] = value;
+          }
+        });
+        afterAll(() => {
+          for (const name of Object.keys(FAKE_ENV)) {
+            if (saved[name] === undefined) delete process.env[name];
+            else process.env[name] = saved[name];
+          }
+        });
+
+        /** What the Jooble, Adzuna and Personio plugins put in a capture. */
+        function keyedSourceScraper(): IScraper {
+          return {
+            scrape: jest.fn().mockImplementation(async () => {
+              const sink = getRawCapture();
+              sink?.entries.push(
+                {
+                  seq: 0, attempt: 0, method: 'POST',
+                  url: `https://jooble.org/api/${FAKE_ENV.JOOBLE_API_KEY}`,
+                  status: 200, elapsed_ms: 3, body_bytes: 2, truncated: false, body: { jobs: [] },
+                },
+                {
+                  seq: 1, attempt: 0, method: 'GET',
+                  url: 'https://api.adzuna.com/v1/api/jobs/gb/search/1',
+                  final_url:
+                    'https://api.adzuna.com/v1/api/jobs/gb/search/1' +
+                    `?app_id=${FAKE_ENV.ADZUNA_APP_ID}&app_key=${FAKE_ENV.ADZUNA_APP_KEY}&what=x`,
+                  status: 401, elapsed_ms: 3, body_bytes: 2, truncated: false,
+                  error: `GET https://api.adzuna.com/v1/x?app_key=${FAKE_ENV.ADZUNA_APP_KEY} failed`,
+                },
+                {
+                  seq: 2, attempt: 0, method: 'POST',
+                  url: 'https://api.personio.de/v1/auth',
+                  status: 200, elapsed_ms: 3, body_bytes: 2, truncated: false,
+                  request_body: {
+                    client_id: FAKE_ENV.PERSONIO_CLIENT_ID,
+                    client_secret: FAKE_ENV.PERSONIO_CLIENT_SECRET,
+                  },
+                  body: { success: true, data: { token: ISSUED_TOKEN } },
+                },
+                {
+                  seq: 3, attempt: 0, method: 'GET',
+                  url: `https://partner.example.test/feed?apikey=${CALLER_KEY}`,
+                  status: 200, elapsed_ms: 3, body_bytes: 2, truncated: false,
+                  body: `<echo>${CALLER_KEY}</echo>`,
+                },
+              );
+              return new JobResponseDto([]);
+            }),
+          };
+        }
+
+        const leaked = (raw: unknown): string[] => {
+          const serialized = JSON.stringify(raw);
+          return [...Object.values(FAKE_ENV), ISSUED_TOKEN, CALLER_KEY].filter((value) =>
+            serialized.includes(value),
+          );
+        };
+
+        it('returns full entries with no server or caller credential in any field', async () => {
+          const result = await createCaptureService([
+            [Site.LINKEDIN, keyedSourceScraper()],
+          ]).searchJobsWithDiagnostics(
+            new ScraperInputDto({
+              siteType: [Site.LINKEDIN],
+              auth: { jooble: { apiKey: CALLER_KEY } } as never,
+            }),
+            { captureRaw: true },
+          );
+          const entries = result.rawBySource[Site.LINKEDIN];
+          expect(entries).toHaveLength(4);
+          expect(leaked(result.rawBySource)).toEqual([]);
+          expect(entries[0].url).toBe('https://jooble.org/api/REDACTED');
+          expect(entries[1].final_url).toContain('app_id=REDACTED&app_key=REDACTED&what=x');
+          expect(entries[2].request_body).toEqual({
+            client_id: 'REDACTED',
+            client_secret: 'REDACTED',
+          });
+          expect(entries[2].body).toEqual({ success: true, data: { token: 'REDACTED' } });
+          // Structure and non-credential fields survive.
+          expect(entries[0].body).toEqual({ jobs: [] });
+          expect(entries.map((e) => e.status)).toEqual([200, 401, 200, 200]);
+        });
+
+        it('scrubs url, final_url and error on the metadata-only form too', async () => {
+          const result = await createCaptureService([
+            [Site.LINKEDIN, keyedSourceScraper()],
+          ]).searchJobsWithDiagnostics(
+            new ScraperInputDto({
+              siteType: [Site.LINKEDIN],
+              companyUrl: 'https://target.example.test/page',
+            }),
+            { captureRaw: true },
+          );
+          const entries = result.rawBySource[Site.LINKEDIN];
+          expect(entries.every((e) => (e as { body_withheld?: string }).body_withheld)).toBe(true);
+          expect(leaked(result.rawBySource)).toEqual([]);
+          expect(entries[0].url).toBe('https://jooble.org/api/REDACTED');
+          expect(entries[1].final_url).not.toContain(FAKE_ENV.ADZUNA_APP_KEY);
+          expect(entries[1].error).not.toContain(FAKE_ENV.ADZUNA_APP_KEY);
+        });
+      });
     });
   });
 });
