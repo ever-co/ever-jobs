@@ -367,3 +367,56 @@ describe('ld+json extraction and mapping: linear time (fork-sync hardening)', ()
     expect(postings[1].locations[0]?.city).toBe('c0');
   });
 });
+
+describe('parseJobPostingLd: address caps (fork-sync hardening)', () => {
+  const addresses = (n: number, prefix = 'c') =>
+    Array.from({ length: n }, (_, i) => ({ addressLocality: `${prefix}${i}` }));
+  // Generous bound: these pages took 2-8 s when every address was its own
+  // uncapped mapping call; slow CI CPUs must never flake here.
+  const BOUND_MS = 1000;
+
+  it('maps at most 100 addresses per posting, skipping non-objects without counting them', () => {
+    const [posting] = parseJobPostingLd(
+      page({
+        ...baseJob,
+        jobLocation: [
+          'not a place',
+          { address: ['skip', null, ...addresses(60, 'a')] },
+          { address: addresses(60, 'b') },
+        ],
+      }),
+    );
+    expect(posting.title).toBe('Staff Engineer');
+    expect(posting.locations).toHaveLength(100);
+    expect(posting.locations[59].city).toBe('a59');
+    expect(posting.locations[99].city).toBe('b39');
+    const node = jobPostingLdFromNode({ ...baseJob, jobLocation: { address: addresses(150) } });
+    expect(node?.locations).toHaveLength(100);
+  });
+
+  it('maps at most 2000 addresses per page across its postings', () => {
+    const postings = parseJobPostingLd(
+      page(Array.from({ length: 25 }, () => ({ ...baseJob, jobLocation: { address: addresses(100) } }))),
+    );
+    expect(postings).toHaveLength(25);
+    expect(postings.map((p) => p.locations.length)).toEqual([
+      ...Array.from({ length: 20 }, () => 100),
+      ...Array.from({ length: 5 }, () => 0),
+    ]);
+    // every posting keeps its other fields
+    expect(postings.every((p) => p.title === 'Staff Engineer')).toBe(true);
+  });
+
+  it.each([
+    ['100k empty addresses (293 KiB)', { ...baseJob, jobLocation: { address: Array.from({ length: 100_000 }, () => ({})) } }],
+    ['33k places with an empty address', { ...baseJob, jobLocation: Array.from({ length: 33_000 }, () => ({ address: {} })) }],
+    ['10k postings with an empty address', Array.from({ length: 10_000 }, () => ({ '@type': 'JobPosting', jobLocation: { address: {} } }))],
+  ])('maps a page of %s in linear time', (_label, payload) => {
+    const html = page(payload);
+    const started = Date.now();
+    const postings = parseJobPostingLd(html);
+    expect(Date.now() - started).toBeLessThan(BOUND_MS);
+    expect(postings.length).toBeGreaterThan(0);
+    expect(postings.every((p) => p.locations.length === 0)).toBe(true);
+  });
+});

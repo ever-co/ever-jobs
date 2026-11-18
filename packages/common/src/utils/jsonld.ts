@@ -143,6 +143,22 @@ export function extractLdJsonBlocks(html: string): unknown[] {
 }
 
 /**
+ * `jobLocation[].address` objects mapped per `JobPosting`, and per page (all
+ * postings of one {@link parseJobPostingLd} call together); address objects
+ * past either cap are skipped. Each one is a structured-location mapping, so
+ * without a cap a page of `"address":[{},{},...]` (3 bytes per entry) held
+ * the event loop for seconds (fork-sync hardening). Real postings list a
+ * handful of locations; a listing page, a few per posting.
+ */
+const MAX_JSONLD_ADDRESSES_PER_POSTING = 100;
+const MAX_JSONLD_ADDRESSES_PER_PAGE = 2000;
+
+/** Address mappings left for the current page. */
+interface AddressBudget {
+  left: number;
+}
+
+/**
  * Extract every schema.org `JobPosting` from the page's ld+json blocks,
  * normalised to {@link JobPostingLd}. Handles single-object, array, `@graph`
  * and `ItemList` containers, and `@type` given as a string or an array.
@@ -153,7 +169,8 @@ export function parseJobPostingLd(html: string): JobPostingLd[] {
   for (const block of extractLdJsonBlocks(html)) {
     collectJobPostings(block, nodes);
   }
-  return nodes.map(mapJobPosting);
+  const budget: AddressBudget = { left: MAX_JSONLD_ADDRESSES_PER_PAGE };
+  return nodes.map((node) => mapJobPosting(node, budget));
 }
 
 /**
@@ -182,7 +199,9 @@ export function jobPostingLdFromNode(
   }
   const nodes: Record<string, unknown>[] = [];
   collectJobPostings(parsed, nodes);
-  return nodes.length > 0 ? mapJobPosting(nodes[0]) : null;
+  return nodes.length > 0
+    ? mapJobPosting(nodes[0], { left: MAX_JSONLD_ADDRESSES_PER_PAGE })
+    : null;
 }
 
 /** Convenience: map a {@link JobPostingLdSalary} to a {@link CompensationDto}. */
@@ -231,7 +250,10 @@ function collectJobPostings(
   }
 }
 
-function mapJobPosting(node: Record<string, unknown>): JobPostingLd {
+function mapJobPosting(
+  node: Record<string, unknown>,
+  budget: AddressBudget,
+): JobPostingLd {
   return {
     title: firstString(node.title) ?? firstString(node.name),
     description: firstString(node.description),
@@ -243,17 +265,22 @@ function mapJobPosting(node: Record<string, unknown>): JobPostingLd {
     url: firstString(node.url),
     applyUrl: applyUrl(node.potentialAction),
     remote: firstString(node.jobLocationType)?.toUpperCase() === 'TELECOMMUTE',
-    locations: mapLocations(node.jobLocation),
+    locations: mapLocations(node.jobLocation, budget),
     baseSalary: mapSalary(node.baseSalary),
   };
 }
 
-function mapLocations(value: unknown): JobPostingLdLocation[] {
+function mapLocations(value: unknown, budget: AddressBudget): JobPostingLdLocation[] {
   const out: JobPostingLdLocation[] = [];
+  let left = Math.min(MAX_JSONLD_ADDRESSES_PER_POSTING, budget.left);
   for (const place of asArray(value)) {
+    if (left <= 0) break;
     if (!isObject(place)) continue;
     for (const address of asArray(place.address)) {
+      if (left <= 0) break;
       if (!isObject(address)) continue;
+      left--;
+      budget.left--;
       const dto = toLocationDto(address, {
         prefer: { country: 'addressCountry.name' },
       });
