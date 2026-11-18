@@ -285,7 +285,7 @@ describe('JobsController — Spec 1700', () => {
     const jobs = JOBS();
     const { controller, analyticsService } = createController({ jobs });
     await controller.analyzeJobs(new ScraperInputDto({ searchTerm: 'x' }));
-    expect(analyticsService.analyze).toHaveBeenCalledWith(jobs);
+    expect(analyticsService.analyze).toHaveBeenCalledWith(jobs, { enforceAnnualSalary: undefined });
   });
 
   describe('body validation through the global ValidationPipe', () => {

@@ -1,5 +1,11 @@
 # API Changelog
 
+### [Unreleased] - 2026-11-17
+
+#### Fixed
+
+- **`POST /api/jobs/analyze` no longer annualises a legacy-grammar description salary twice** (T-2605). This removes the known limit of the 2026-11-16 T-2522 entry below. With `EVER_JOBS_SALARY_GRAMMAR=legacy` and `enforceAnnualSalary: true`, a salary parsed from the job description arrives already yearly but labelled with its source interval (`Pay: $20 - $25/hr` gives `hourly` 41,600 - 52,000), and `summary.salaryStats` multiplied it by 2080 again (86,528,000 - 108,160,000). The analysis now takes such a job (`salarySource: 'description'`) as yearly. Everything else is annualised as before: other grammars, requests without `enforceAnnualSalary`, and directly scraped salaries. The CLI's `search --analyze` and `compare` use the same rule. The response shape is unchanged.
+
 ### [Unreleased] - 2026-11-16
 
 #### Added

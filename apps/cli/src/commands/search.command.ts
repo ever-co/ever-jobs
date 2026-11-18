@@ -256,7 +256,10 @@ export class SearchCommand extends CommandRunner {
 
     // Append analysis if --analyze flag is set
     if (options.analyze && jobs.length > 0) {
-      const analysis = this.analyticsService.analyze(jobs);
+      // T-2605 — the flag the jobs were scraped with (--enforce-annual-salary, or the --stdin JSON).
+      const analysis = this.analyticsService.analyze(jobs, {
+        enforceAnnualSalary: input.enforceAnnualSalary,
+      });
       console.error('');
       console.error('=== Analysis ===');
       console.error(`Total: ${analysis.summary.totalJobs} jobs`);

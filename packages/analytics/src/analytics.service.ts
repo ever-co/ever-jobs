@@ -1,12 +1,21 @@
 import { Injectable } from '@nestjs/common';
-import { convertToAnnual, hasSalaryAmount } from '@ever-jobs/common';
+import { activeSalaryGrammar, convertToAnnual, hasSalaryAmount } from '@ever-jobs/common';
 import {
   CompensationDto, JobPostDto, JobSummaryDto, CompanyInsightDto,
-  SiteComparisonDto, JobAnalysisDto,
+  SiteComparisonDto, JobAnalysisDto, SalarySource,
 } from '@ever-jobs/models';
 
 /** Currency assumed when a compensation does not name one (the `CompensationDto` default). */
 const DEFAULT_CURRENCY = 'USD';
+
+/** T-2605 — options of {@link AnalyticsService.analyze} and {@link AnalyticsService.summarize}. */
+export interface AnalyzeOptions {
+  /**
+   * The `enforceAnnualSalary` the jobs were scraped with
+   * (`ScraperInputDto.enforceAnnualSalary`). Default `false`.
+   */
+  enforceAnnualSalary?: boolean;
+}
 
 /** A bound counts only when it is a finite number above zero, as in `hasSalaryAmount`. */
 function isUsableAmount(value: number | null | undefined): value is number {
@@ -24,14 +33,18 @@ function currencyOf(compensation: CompensationDto): string {
  * monthly × 12); the job's own compensation is never changed. A missing
  * (or unusable) bound falls back to the other one; callers pass only
  * compensations for which `hasSalaryAmount` holds, so one bound is present.
+ * With `alreadyYearly` (T-2605) the amounts are taken as they are.
  */
-function annualRange(compensation: CompensationDto): { low: number; high: number } {
+function annualRange(
+  compensation: CompensationDto,
+  alreadyYearly = false,
+): { low: number; high: number } {
   const annual = {
     interval: compensation.interval,
     minAmount: isUsableAmount(compensation.minAmount) ? compensation.minAmount : null,
     maxAmount: isUsableAmount(compensation.maxAmount) ? compensation.maxAmount : null,
   };
-  convertToAnnual(annual);
+  if (!alreadyYearly) convertToAnnual(annual);
   return {
     low: (annual.minAmount ?? annual.maxAmount) as number,
     high: (annual.maxAmount ?? annual.minAmount) as number,
@@ -67,9 +80,9 @@ export class AnalyticsService {
    * Generate a full analysis of scraped jobs:
    * summary stats, company intelligence, and site comparison.
    */
-  analyze(jobs: JobPostDto[]): JobAnalysisDto {
+  analyze(jobs: JobPostDto[], options: AnalyzeOptions = {}): JobAnalysisDto {
     return new JobAnalysisDto({
-      summary: this.summarize(jobs),
+      summary: this.summarize(jobs, options),
       companies: this.analyzeCompanies(jobs),
       siteComparison: this.compareSites(jobs),
     });
@@ -85,13 +98,14 @@ export class AnalyticsService {
    * common currency only, which `currency` reports. A compensation whose
    * interval is missing or unknown is used as given.
    *
-   * Known limit: with `EVER_JOBS_SALARY_GRAMMAR=legacy` and
-   * `enforceAnnualSalary`, a salary parsed from the description keeps its
-   * source interval on amounts that are already yearly (the legacy rule,
-   * pinned in `packages/common/__tests__/salary.spec.ts`), so it is
-   * annualised a second time here. The default grammar is not affected.
+   * T-2605 — with `EVER_JOBS_SALARY_GRAMMAR=legacy` and
+   * `options.enforceAnnualSalary`, a salary parsed from the description
+   * (`salarySource: 'description'`) is already yearly but keeps its source
+   * interval (the legacy rule, pinned in
+   * `packages/common/__tests__/salary.spec.ts`), so its amounts are taken as
+   * they are instead of being annualised a second time.
    */
-  summarize(jobs: JobPostDto[]): JobSummaryDto {
+  summarize(jobs: JobPostDto[], options: AnalyzeOptions = {}): JobSummaryDto {
     const remoteCount = jobs.filter((j) => j.isRemote).length;
     const withSalary = jobs.filter((j) => hasSalaryAmount(j.compensation));
 
@@ -100,9 +114,16 @@ export class AnalyticsService {
     if (withSalary.length > 0) {
       const compensations = withSalary.map((j) => j.compensation!);
       const currency = mostCommonCurrency(compensations);
-      const ranges = compensations
-        .filter((c) => currencyOf(c) === currency)
-        .map(annualRange);
+      const legacyAnnualised =
+        (options.enforceAnnualSalary ?? false) && activeSalaryGrammar() === 'legacy';
+      const ranges = withSalary
+        .filter((j) => currencyOf(j.compensation!) === currency)
+        .map((j) =>
+          annualRange(
+            j.compensation!,
+            legacyAnnualised && j.salarySource === SalarySource.DESCRIPTION,
+          ),
+        );
       const lows = ranges.map((r) => r.low);
       const highs = ranges.map((r) => r.high);
 
