@@ -595,6 +595,15 @@ function resolveSalaryGrammar(option: SalaryGrammar | undefined): SalaryGrammar 
 }
 
 /**
+ * T-2605 — the process-wide {@link SalaryGrammar} in force right now: `legacy`
+ * when `EVER_JOBS_SALARY_GRAMMAR=legacy`, `extended` otherwise. This is the
+ * grammar {@link postProcessCompensation} applies when the caller passes none.
+ */
+export function activeSalaryGrammar(): SalaryGrammar {
+  return resolveSalaryGrammar(undefined);
+}
+
+/**
  * Spec 012 / T03 — `extractSalary` result envelope. Shape unchanged
  * from the original (FR-10), now exported as a public type so plugin
  * authors can write `Promise<ExtractSalaryResult>`-typed adapters.
@@ -628,6 +637,17 @@ const SALARY_SYMBOL_ALTERNATIONS: ReadonlyMap<string, string> = new Map([
   ['DKK', '\\bDKK\\b|\\bkr\\b'],
   ['PLN', 'zł|\\bPLN\\b'],
 ]);
+
+/**
+ * T-2633 — currencies in which {@link extractSalary} reads a range with no
+ * stated period, whose minimum is under `monthlyThreshold` and whose maximum
+ * is at or above it (`"$25k - $35k"`), as yearly. The default thresholds are
+ * USD-sized bands (Spec 012 §3): in SEK / NOK / DKK and PLN a monthly salary
+ * routinely sits around 30,000 (`"25.000 kr - 35.000 kr"`), while a yearly
+ * one that low is far below full-time pay, so those currencies keep the
+ * earlier no-match instead of a yearly figure twelve times too small.
+ */
+const CROSSING_RANGE_YEARLY_CURRENCIES: ReadonlySet<string> = new Set(['USD', 'EUR', 'GBP', 'CHF']);
 
 /**
  * Per-locale regex source for a salary number. The continental and
@@ -1355,6 +1375,12 @@ function buildSingleBoundCandidates(
  * different tokens on one range (`"$20/hr - $40,000/yr"`) return the
  * all-`null` envelope. `enforceAnnualSalary` still annualises the amounts
  * and keeps the stated interval.
+ *
+ * T-2633 — in the extended grammar, a range with no stated period whose
+ * minimum is in the monthly band and whose maximum is at or above
+ * `monthlyThreshold` (`"$25k - $35k"`) is read as yearly instead of being
+ * dropped; the legacy grammar and the `kr` / `zł` currencies keep the
+ * earlier no-match (see {@link CROSSING_RANGE_YEARLY_CURRENCIES}).
  */
 export function extractSalary(
   salaryStr: string | null,
@@ -1569,6 +1595,20 @@ export function extractSalary(
     interval = CompensationInterval.HOURLY;
     annualMinSalary = minSalary * 2080;
     annualMaxSalary = maxSalary < hourlyThreshold ? maxSalary * 2080 : null;
+  } else if (
+    minSalary < monthlyThreshold &&
+    grammar !== 'legacy' &&
+    maxSalary >= monthlyThreshold &&
+    CROSSING_RANGE_YEARLY_CURRENCIES.has(detected.code)
+  ) {
+    // T-2633 — a minimum in the monthly band with a maximum at or above
+    // monthlyThreshold (`$25k - $35k`) is a low yearly range, not a monthly
+    // one with its ceiling nulled; both ends are read as yearly and the
+    // bounds checks below still apply. The legacy grammar keeps dropping it,
+    // and so do currencies where such a range is monthly pay (`kr`, `zł`).
+    interval = CompensationInterval.YEARLY;
+    annualMinSalary = minSalary;
+    annualMaxSalary = maxSalary;
   } else if (minSalary < monthlyThreshold) {
     interval = CompensationInterval.MONTHLY;
     annualMinSalary = minSalary * 12;

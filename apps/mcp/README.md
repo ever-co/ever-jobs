@@ -48,13 +48,18 @@ Search for jobs across all sources.
 | `location`    | string  | ❌       | Location filter (e.g. "San Francisco", "Remote")   |
 | `source`      | string  | ❌       | Specific source id (use `list_sources` to see all) |
 | `company`     | string  | ❌       | Company slug for ATS sources (e.g. "stripe")       |
-| `limit`       | number  | ❌       | Max results (default: 20, max: 100)                |
+| `limit`       | number  | ❌       | Most jobs returned in total (default: 20, max: 100; a value that is not a number counts as 20). The API applies it to each source and location, and the server then returns at most this many, after `remote_only` |
 | `remote_only` | boolean | ❌       | Filter to remote positions only                    |
 | `locations`   | string[] | ❌      | Several locations in one call (schema limit 10 items; the server searches the first `EVER_JOBS_SEARCH_MAX_LOCATIONS`, default 10). Each source runs once per location; same-source duplicates are removed; `location`, when also set, is searched first |
 | `exclude_title_terms` | string[] | ❌ | Drop jobs whose title contains any of these words or phrases (up to 50; literal, whole-word, trailing `*` = prefix, never a regex) |
 | `exclude_keywords` | string[] | ❌ | Drop jobs whose title or description contains any of these words or phrases (up to 50; same rules) |
 | `exclude_presets` | string[] | ❌ | Curated exclusion lists; `security_clearance` drops roles that require a security clearance or vetting |
 | `crawl`       | object  | ❌       | Per-request crawl policy (Spec 1690), camelCase    |
+
+The response's `total` is the number of jobs in `jobs`. When the list was cut to `limit`,
+`total_found` gives how many jobs were found (after `remote_only`). The cut takes each
+source's newest jobs in turn, so a search over several sources keeps jobs from each of
+them (the API sorts by site name, so a plain cut would keep only the first site's jobs).
 
 `crawl` is forwarded to the API unchanged as the `crawl` field (same key in every
 `EVER_JOBS_MCP_REQUEST_KEYS` style); see [`docs/CRAWL_POLICY.md`](../../docs/CRAWL_POLICY.md).
@@ -73,7 +78,8 @@ Give one of the two, or both from the same result: a few sources reuse an id acr
 with both the job that has both is returned. The API has no endpoint that returns a single job, so
 `get_job_details` makes no API request: it answers from the last 1000 jobs that `search_jobs`,
 `search_remote_jobs` and `get_salary_insights` received in this server process (the oldest are
-dropped first; a search that returns more than 1000 jobs keeps its first 1000). Any other job gets
+dropped first; when the API answers a search with more than 1000 jobs, every job the tool returned
+is kept, with the first of the others up to 1000 in all). Any other job gets
 the error `job not found in recent search results; call search_jobs first`.
 
 Details therefore work for jobs found by the same server process. The memory is lost when the
@@ -91,7 +97,7 @@ List all available job sources.
 
 ### `search_remote_jobs`
 
-Search for remote-only positions across all remote-first job boards (RemoteOK, Remotive, We Work Remotely, Jobicy, Himalayas, Arbeitnow).
+Search for remote-only positions across every remote-first job board (the sources that `list_sources` reports with type `remote`).
 
 Without `source`, or with a `source` that is not a remote board, every board that `list_sources` reports with type `remote` is searched, and `sources_searched` lists them. A remote `source` searches that board alone.
 
@@ -99,7 +105,7 @@ Without `source`, or with a `source` that is not a remote board, every board tha
 | --------- | ------ | -------- | -------------------------------- |
 | `query`   | string | ✅       | Job search query                 |
 | `source`  | string | ❌       | Specific remote source to target |
-| `limit`   | number | ❌       | Max results (default: 25)        |
+| `limit`   | number | ❌       | Most jobs returned (default: 25, max: 100) |
 
 ### `get_salary_insights`
 
@@ -109,7 +115,7 @@ Aggregate salary data from job search results. Returns min, max, median, P25, an
 | ---------- | ------ | -------- | -------------------------------------- |
 | `query`    | string | ✅       | Job title/role to research             |
 | `location` | string | ❌       | Location to focus on                   |
-| `limit`    | number | ❌       | Number of jobs to sample (default: 50) |
+| `limit`    | number | ❌       | Number of jobs to sample (default: 50, max: 100) |
 
 ### `compare_sources`
 
@@ -153,7 +159,7 @@ label such as "3 hours ago" at fetch time). A job without that detail has none o
 ## Source Coverage
 
 - **21** Job Boards (LinkedIn, Indeed, Glassdoor, Dice, Monster, Upwork, Exa, BuiltIn, Snagajob, Dribbble, ...)
-- **6** Remote Job Boards (RemoteOK, Remotive, We Work Remotely, Jobicy, Himalayas, Arbeitnow)
+- **13** Remote Job Boards (RemoteOK, Remotive, We Work Remotely, Jobicy, Himalayas, Arbeitnow, 4 Day Week, ...)
 - **4** Aggregator APIs (Adzuna, Reed, Jooble, CareerJet)
 - **22** ATS Platforms (Greenhouse, Lever, Ashby, Workable, SmartRecruiters, Rippling, Workday, ...)
 - **12** Company Career Pages (Google, Meta, Netflix, Stripe, OpenAI, Amazon, Apple, Microsoft, NVIDIA, TikTok, Uber, Cursor)
