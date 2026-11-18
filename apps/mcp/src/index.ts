@@ -197,7 +197,9 @@ function createServer(): Server {
         name: 'get_salary_insights',
         description:
           'Get salary insights and market data for a specific job title or role. ' +
-          'Returns min/max/median salary, percentiles, and sample jobs with salary data.',
+          'Returns min/max/median salary and percentiles as yearly amounts in stats.currency, the most ' +
+          'common currency among the jobs (jobs paid in another currency or with an unknown pay period ' +
+          'are left out of the stats), and sample jobs with salary data.',
         inputSchema: {
           type: 'object' as const,
           properties: {
