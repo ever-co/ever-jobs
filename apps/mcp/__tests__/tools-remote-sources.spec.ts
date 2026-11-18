@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import axios from 'axios';
 import { Site } from '@ever-jobs/models';
-import { compareSources, listSources, searchRemoteJobs } from '../src/tools';
+import { compareSources, listSources, MCP_REQUEST_KEYS_ENV_VAR, searchRemoteJobs } from '../src/tools';
 
 jest.mock('axios', () => ({
   __esModule: true,
@@ -76,8 +76,20 @@ function pluginRemoteSites(): string[] {
   return found.sort();
 }
 
+// The request-body tests read the default camelCase keys (`siteType`);
+// `EVER_JOBS_MCP_REQUEST_KEYS=snake` would send `site_type`, so it is cleared
+// per test and restored afterwards, as the neighbouring MCP suites do.
+let savedRequestKeys: string | undefined;
+
 beforeEach(() => {
   createMock.mockReset();
+  savedRequestKeys = process.env[MCP_REQUEST_KEYS_ENV_VAR];
+  delete process.env[MCP_REQUEST_KEYS_ENV_VAR];
+});
+
+afterEach(() => {
+  if (savedRequestKeys === undefined) delete process.env[MCP_REQUEST_KEYS_ENV_VAR];
+  else process.env[MCP_REQUEST_KEYS_ENV_VAR] = savedRequestKeys;
 });
 
 describe('MCP catalogue — remote boards (T-2635)', () => {
