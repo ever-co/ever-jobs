@@ -77,6 +77,17 @@ describe('UpworkTokenProvider — client_credentials', () => {
     expect(posts[0].config.headers.Authorization).toBeUndefined();
   });
 
+  it('opts the token call out of raw capture (include_raw must never return its bodies)', async () => {
+    const tokens = new UpworkTokenProvider(
+      clientCreds(),
+      UpworkGrantType.CLIENT_CREDENTIALS,
+    );
+    await tokens.getAccessToken();
+
+    expect(posts[0].url).toBe(UPWORK_TOKEN_URL);
+    expect(posts[0].config.rawCapture).toBe(false);
+  });
+
   it('caches the token so a fan-out costs one token request', async () => {
     const tokens = new UpworkTokenProvider(
       clientCreds(),

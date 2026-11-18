@@ -16,7 +16,15 @@ import {
   Site,
   Country,
 } from '@ever-jobs/models';
-import { createHttpClient, extractEmails, htmlToPlainText, markdownConverter, parseLocationList, toDateOnly } from '@ever-jobs/common';
+import {
+  createHttpClient,
+  extractEmails,
+  htmlToPlainText,
+  markdownConverter,
+  parseLocationList,
+  registerRawCaptureSecrets,
+  toDateOnly,
+} from '@ever-jobs/common';
 import {
   ADZUNA_API_BASE_URL,
   ADZUNA_HEADERS,
@@ -73,6 +81,10 @@ export class AdzunaService implements IScraper {
         new ScrapeDiagnostics('bad_input', 'Adzuna credentials not configured'),
       );
     }
+
+    // Spec 5161 (`include_raw`): the keys travel as query params, which end up
+    // in the captured `final_url` — scrub them wherever they appear.
+    registerRawCaptureSecrets([appId, appKey]);
 
     const resultsWanted = input.resultsWanted ?? ADZUNA_DEFAULT_RESULTS;
     const pageSize = Math.min(resultsWanted, ADZUNA_MAX_PAGE_SIZE);

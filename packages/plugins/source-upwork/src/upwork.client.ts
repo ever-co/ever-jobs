@@ -1,6 +1,6 @@
 import { Logger } from '@nestjs/common';
 import { UpworkAuthDto, UpworkGrantType } from '@ever-jobs/models';
-import { createHttpClient } from '@ever-jobs/common';
+import { createHttpClient, registerRawCaptureSecrets } from '@ever-jobs/common';
 
 import {
   UPWORK_TOKEN_URL,
@@ -119,6 +119,14 @@ export class UpworkTokenProvider {
    *   which is the only reliable signal that a token with unknown expiry died.
    */
   async getAccessToken(force = false): Promise<string> {
+    // Spec 5161 (`include_raw`): scrub the credentials and tokens from every
+    // captured entry of this scrape — a provider and its token outlive one scrape.
+    registerRawCaptureSecrets([
+      this.auth.clientId,
+      this.auth.clientSecret,
+      this.refreshToken,
+      this.cachedToken,
+    ]);
     if (!force && !this.needsToken && this.cachedToken) {
       return this.cachedToken;
     }
@@ -130,6 +138,7 @@ export class UpworkTokenProvider {
 
     this.cachedToken = token.access_token;
     if (token.refresh_token) this.refreshToken = token.refresh_token;
+    registerRawCaptureSecrets([this.cachedToken, this.refreshToken]);
     this.cachedExpiresAt = token.expires_in
       ? Date.now() +
         (token.expires_in - UPWORK_TOKEN_EXPIRY_SKEW_SECONDS) * 1000
@@ -167,11 +176,14 @@ export class UpworkTokenProvider {
     });
 
     try {
+      // `rawCapture: false`: the body carries client_secret (and a refresh
+      // token), the answer — or an error that echoes them — the tokens.
       const res = await this.http.post<UpworkTokenResponse>(
         UPWORK_TOKEN_URL,
         body.toString(),
         {
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          rawCapture: false,
         },
       );
       const data = res.data;

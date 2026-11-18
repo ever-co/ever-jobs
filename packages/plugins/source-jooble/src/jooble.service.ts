@@ -16,7 +16,13 @@ import {
   getJobTypeFromString,
   Site,
 } from '@ever-jobs/models';
-import { createHttpClient, extractEmails, parseLocationList, toDateOnly } from '@ever-jobs/common';
+import {
+  createHttpClient,
+  extractEmails,
+  parseLocationList,
+  registerRawCaptureSecrets,
+  toDateOnly,
+} from '@ever-jobs/common';
 import {
   JOOBLE_API_BASE_URL,
   JOOBLE_HEADERS,
@@ -73,6 +79,10 @@ export class JoobleService implements IScraper {
       this.logger.warn('Skipping Jooble search — API key not configured');
       return new JobResponseDto([]);
     }
+
+    // Spec 5161 (`include_raw`): the key is the last URL path segment — scrub
+    // it from every captured entry (the jooble.org path rule redacts it too).
+    registerRawCaptureSecrets(apiKey);
 
     const resultsWanted = input.resultsWanted ?? JOOBLE_DEFAULT_RESULTS;
     const apiUrl = `${JOOBLE_API_BASE_URL}/${apiKey}`;
