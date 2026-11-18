@@ -214,7 +214,9 @@ describe('a body cut by the size cap never keeps half a secret (review issue 3)'
     process.env.RAW_CAPTURE_MAX_BODY_BYTES = '64';
     const longSecret = `FAKE_LONG_SECRET_${'A'.repeat(20_000)}`;
     const sink = createRawCaptureSink();
-    registerRawCaptureSecrets(longSecret, sink);
+    // Server-held: since round 4 a caller value this long is ignored
+    // (RAW_CAPTURE_MAX_CALLER_SECRET_LENGTH); a server secret of any length is not.
+    registerServerRawCaptureSecrets(longSecret, sink);
     const entry = pushRawEntry(sink, { ...baseEntry })!;
     retainBody(sink, entry, normalizeBody(`head ${longSecret} tail`, 'text/plain'));
 
