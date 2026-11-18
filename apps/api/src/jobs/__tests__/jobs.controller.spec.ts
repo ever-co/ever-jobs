@@ -504,9 +504,21 @@ describe('JobsController', () => {
         new ScraperInputDto({ searchTerm: 'node' }),
       );
 
-      expect(analyticsService.analyze).toHaveBeenCalledWith(jobs);
+      expect(analyticsService.analyze).toHaveBeenCalledWith(jobs, { enforceAnnualSalary: undefined });
       expect(result.summary).toBeDefined();
       expect(result.summary.totalJobs).toBe(1);
+    });
+
+    // T-2605 — the summary needs the flag the jobs were scraped with.
+    it('passes enforceAnnualSalary to the analysis', async () => {
+      const jobs = [makeJob()];
+      const { controller, analyticsService } = createController({ jobs });
+
+      await controller.analyzeJobs(
+        new ScraperInputDto({ searchTerm: 'node', enforceAnnualSalary: true }),
+      );
+
+      expect(analyticsService.analyze).toHaveBeenCalledWith(jobs, { enforceAnnualSalary: true });
     });
   });
 
