@@ -16,7 +16,7 @@ unchanged and the fork tip stays an ancestor of `develop`; a squash would make t
 re-present every file. Nothing the fork wrote is reverted. Its new features (`include_raw`,
 `deadline_ms`, the location-object mapper, the 10 new plugins) stay, behind safe defaults.
 
-The work ran in five steps:
+The work ran in six steps:
 
 1. **Review, read-only.** Five lanes covered the diff from the merge base `a4621490`: http/core, API,
    the new plugins, the changed plugins, and utils/config/metadata. No fork code ran. Every
@@ -41,9 +41,14 @@ The work ran in five steps:
      `EVER_JOBS_INCLUDE_RAW_API_KEYS`, and an API-layer scrub.
    - **redos:** the first fix rebuilt the alias tables on every call, which made each call about 4×
      slower. The tables are now built once, and one scan is shared per parent.
-5. **Merge the four lanes, then verify again.** A read-only final pass re-checked the repair commits
-   and the combined branch (lanes http, api, redos and combined). The type-check, docs-lint and the
-   targeted suites ran on the merged branch.
+5. **Merge the four lanes, then verify again.** A read-only final pass (lanes http, api, redos and
+   combined) re-checked the repair commits and the merged branch. It found one regression from the
+   repair: the new key-name text rules ran before the value scrub, so a secret with `;`, `&`, `)` or
+   a space kept its tail. It also found that the API pass duplicated common's scrubber without the tiers
+   and re-serialized every JSON body.
+6. **Round 3 on the merged branch.** Value scrub first. One env-name classifier. The API pass is a
+   thin call into the tiered common scrubber. CDATA and value-attribute XML, the axios and
+   `URLSearchParams` encodings, and a deadline below 1 ms are handled. A last adversarial check followed.
 
 ## 2. Checks
 
