@@ -673,7 +673,10 @@ export class JobsController {
     const jobs = hasExclusionInput(input)
       ? applyJobExclusions(found, exclusionSpecFromInput(input)).kept
       : found;
-    const analysis = this.analyticsService.analyze(jobs);
+    // T-2605 — the summary needs the flag the jobs were scraped with.
+    const analysis = this.analyticsService.analyze(jobs, {
+      enforceAnnualSalary: input.enforceAnnualSalary,
+    });
     this.logger.log(`Analysis complete: ${analysis.summary.totalJobs} jobs, ${analysis.companies.length} companies`);
     return analysis;
   }

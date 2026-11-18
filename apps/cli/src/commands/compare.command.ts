@@ -146,7 +146,10 @@ export class CompareCommand extends CommandRunner {
       searchTerm,
       totalJobs: allJobs.length,
       siteComparison: comparison,
-      summary: this.analyticsService.summarize(allJobs),
+      // T-2605 — the flag the jobs were scraped with (compare has no flag for it, so false).
+      summary: this.analyticsService.summarize(allJobs, {
+        enforceAnnualSalary: baseInput.enforceAnnualSalary,
+      }),
       // Spec 1700 — present only when exclusions were requested.
       ...(exclusions ? { excludedJobs: excludedTotal } : {}),
     };

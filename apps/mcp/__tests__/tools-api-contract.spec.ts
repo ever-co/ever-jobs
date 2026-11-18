@@ -1,7 +1,9 @@
 import axios from 'axios';
 import { Site } from '@ever-jobs/models';
 import {
+  MCP_DEFAULT_SEARCH_LIMIT,
   MCP_LOCATION_FORMAT_ENV_VAR,
+  MCP_MAX_SEARCH_LIMIT,
   MCP_RECENT_JOBS_LIMIT,
   MCP_REQUEST_KEYS_ENV_VAR,
   buildSearchRequestBody,
@@ -9,6 +11,8 @@ import {
   displayApiUrl,
   formatJobLocation,
   getJobDetails,
+  getSalaryInsights,
+  normalizeSearchLimit,
   listSources,
   readLocationFormat,
   readSearchRequestKeyStyle,
@@ -357,6 +361,147 @@ describe('searchJobs — wire contract', () => {
   });
 });
 
+/**
+ * T-2585 — `limit` is the most jobs a search tool returns. The API applies
+ * `resultsWanted` per source (and per location when `locations` is set), so an
+ * unfiltered search can answer with far more jobs than were asked for.
+ */
+describe('search tools — limit caps the jobs returned (T-2585)', () => {
+  function apiJobs(count: number, isRemote: boolean, idPrefix: string) {
+    return Array.from({ length: count }, (_, i) => ({
+      id: `${idPrefix}${i}`,
+      title: 'Engineer',
+      companyName: 'Acme',
+      jobUrl: `https://acme.example.com/${idPrefix}${i}`,
+      site: 'lever',
+      isRemote,
+      location: null,
+      compensation: { minAmount: 90_000 + i, maxAmount: 120_000 + i, currency: 'USD' },
+    }));
+  }
+
+  it('returns at most `limit` jobs, in API order, and reports how many were found', async () => {
+    mockClient({ post: { jobs: apiJobs(150, false, 'j') } });
+    const result = await searchJobs({ query: 'x', limit: 20 });
+
+    expect(result.jobs).toHaveLength(20);
+    expect(result.jobs.map((j) => j.id)).toEqual(Array.from({ length: 20 }, (_, i) => `j${i}`));
+    expect(result.total).toBe(20);
+    expect(result.total_found).toBe(150);
+  });
+
+  it('applies remote_only before the cut, so remote jobs listed after the others are kept', async () => {
+    mockClient({ post: { jobs: [...apiJobs(100, false, 'onsite'), ...apiJobs(50, true, 'remote')] } });
+    const result = await searchJobs({ query: 'x', limit: 20, remoteOnly: true });
+
+    expect(result.jobs).toHaveLength(20);
+    expect(result.jobs.every((j) => j.is_remote)).toBe(true);
+    expect(result.jobs.map((j) => j.id)).toEqual(Array.from({ length: 20 }, (_, i) => `remote${i}`));
+    expect(result.total).toBe(20);
+    expect(result.total_found).toBe(50);
+  });
+
+  it('treats a limit that is not a number as the default 20 (sent and returned)', async () => {
+    const client = mockClient({ post: { jobs: apiJobs(150, false, 'j') } });
+    const result = await searchJobs({ query: 'x', limit: 'abc' as unknown as number });
+
+    expect(client.post.mock.calls[0][1]).toHaveProperty('resultsWanted', 20);
+    expect(result.jobs).toHaveLength(20);
+    expect(result.total_found).toBe(150);
+  });
+
+  it('leaves a response within the limit as it was, with no total_found', async () => {
+    mockClient({ post: { jobs: apiJobs(5, false, 'j') } });
+    const result = await searchJobs({ query: 'x', limit: 20 });
+
+    expect(result.jobs).toHaveLength(5);
+    expect(result.total).toBe(5);
+    expect(result).not.toHaveProperty('total_found');
+  });
+
+  it('search_remote_jobs returns at most its default of 25 jobs', async () => {
+    mockClient({ post: { jobs: apiJobs(150, true, 'r') } });
+    const result = await searchRemoteJobs({ query: 'x' });
+
+    expect(result.jobs).toHaveLength(25);
+    expect(result.total_found).toBe(150);
+  });
+
+  it('get_salary_insights samples at most `limit` jobs', async () => {
+    mockClient({ post: { jobs: apiJobs(150, false, 'j') } });
+    const insights = await getSalaryInsights({ query: 'x', limit: 30 });
+
+    expect(insights.totalJobsSearched).toBe(30);
+    expect(insights.jobsWithSalary).toBe(30);
+  });
+
+  /** The API sorts by site name, then newest first (`JobsService.searchJobs`). */
+  function sortedBySite(perSite: Record<string, number>, isRemote = false) {
+    return Object.keys(perSite)
+      .sort()
+      .flatMap((site) => apiJobs(perSite[site], isRemote, `${site}-`).map((job) => ({ ...job, site })));
+  }
+
+  it('shares the cut across sources instead of keeping only the first site in alphabetical order', async () => {
+    mockClient({ post: { jobs: sortedBySite({ lever: 30, adzuna: 30, indeed: 30 }) } });
+    const result = await searchJobs({ query: 'x', limit: 20 });
+
+    expect(result.jobs).toHaveLength(20);
+    expect(result.total_found).toBe(90);
+    const perSource = result.jobs.reduce<Record<string, number>>((acc, j) => {
+      acc[j.source] = (acc[j.source] ?? 0) + 1;
+      return acc;
+    }, {});
+    expect(perSource).toEqual({ adzuna: 7, indeed: 7, lever: 6 });
+    // Each source keeps its newest jobs, and the list keeps the API's order.
+    expect(result.jobs.map((j) => j.id)).toEqual([
+      ...Array.from({ length: 7 }, (_, i) => `adzuna-${i}`),
+      ...Array.from({ length: 7 }, (_, i) => `indeed-${i}`),
+      ...Array.from({ length: 6 }, (_, i) => `lever-${i}`),
+    ]);
+  });
+
+  it('gives a source with few jobs all of them and fills the rest from the others', async () => {
+    mockClient({ post: { jobs: sortedBySite({ adzuna: 2, indeed: 50 }) } });
+    const result = await searchJobs({ query: 'x', limit: 10 });
+
+    expect(result.jobs.map((j) => j.id)).toEqual([
+      'adzuna-0',
+      'adzuna-1',
+      ...Array.from({ length: 8 }, (_, i) => `indeed-${i}`),
+    ]);
+  });
+
+  it('search_remote_jobs keeps jobs from every remote board that answered', async () => {
+    const boards = { arbeitnow: 25, himalayas: 25, jobicy: 25, remoteok: 25, remotive: 25 };
+    mockClient({ post: { jobs: sortedBySite(boards, true) } });
+    const result = await searchRemoteJobs({ query: 'x' });
+
+    expect(result.jobs).toHaveLength(25);
+    expect(new Set(result.jobs.map((j) => j.source))).toEqual(new Set(Object.keys(boards)));
+  });
+});
+
+describe('normalizeSearchLimit (T-2585)', () => {
+  it('gives the default 20 for a missing, non-numeric or below-1 limit', () => {
+    for (const input of [undefined, null, 'abc', '', '  ', NaN, -Infinity, 0, -5, 0.5, true, [5], {}]) {
+      expect(normalizeSearchLimit(input)).toBe(MCP_DEFAULT_SEARCH_LIMIT);
+    }
+    expect(MCP_DEFAULT_SEARCH_LIMIT).toBe(20);
+  });
+
+  it('rounds down to a whole number and caps it at 100', () => {
+    expect(normalizeSearchLimit(1)).toBe(1);
+    expect(normalizeSearchLimit(30)).toBe(30);
+    expect(normalizeSearchLimit(2.7)).toBe(2);
+    expect(normalizeSearchLimit('30')).toBe(30);
+    expect(normalizeSearchLimit(100)).toBe(100);
+    expect(normalizeSearchLimit(500)).toBe(MCP_MAX_SEARCH_LIMIT);
+    expect(normalizeSearchLimit(Infinity)).toBe(MCP_MAX_SEARCH_LIMIT);
+    expect(MCP_MAX_SEARCH_LIMIT).toBe(100);
+  });
+});
+
 describe('API key and unreachable API', () => {
   const API_ENV = ['EVER_JOBS_API_KEY', 'EVER_JOBS_API_KEY_HEADER', 'EVER_JOBS_API_URL'];
   let saved: Record<string, string | undefined>;
@@ -600,7 +745,10 @@ describe('getJobDetails — answers from recent search results (T-2586)', () => 
     }));
     mockClient({ post: { jobs } });
     const search = await searchJobs({ query: 'x' });
-    expect(search.jobs).toHaveLength(total);
+    // searchJobs returns at most `limit` jobs (T-2585); the memory still takes
+    // the first MCP_RECENT_JOBS_LIMIT of the API's answer.
+    expect(search.jobs).toHaveLength(MCP_DEFAULT_SEARCH_LIMIT);
+    expect(search.total_found).toBe(total);
     expect(recentJobCount()).toBe(MCP_RECENT_JOBS_LIMIT);
 
     await expect(getJobDetails({ jobId: search.jobs[0].id })).resolves.toMatchObject({ title: 'One 0' });
@@ -608,6 +756,35 @@ describe('getJobDetails — answers from recent search results (T-2586)', () => 
       title: `One ${MCP_RECENT_JOBS_LIMIT - 1}`,
     });
     await expect(getJobDetails({ jobId: `one-${MCP_RECENT_JOBS_LIMIT}` })).rejects.toThrow(NOT_FOUND);
+  });
+
+  it('remembers every job a wide search returns, even ones listed past the first MCP_RECENT_JOBS_LIMIT', async () => {
+    // 20 sources x 100 jobs, sorted by site name as the API does: the cut to
+    // `limit` takes 5 jobs from each source, so half of them sit past index 1000.
+    const sites = Array.from({ length: 20 }, (_, s) => `site${String(s).padStart(2, '0')}`);
+    const jobs = sites.flatMap((site) =>
+      Array.from({ length: 100 }, (_, i) => ({
+        id: `wide-${site}-${i}`,
+        title: `Wide ${site} ${i}`,
+        jobUrl: `https://acme.example.com/wide-${site}-${i}`,
+        site,
+      })),
+    );
+    mockClient({ post: { jobs } });
+    const search = await searchJobs({ query: 'x', limit: 100 });
+
+    expect(search.jobs).toHaveLength(100);
+    expect(search.total_found).toBe(2000);
+    expect(new Set(search.jobs.map((j) => j.source))).toEqual(new Set(sites));
+    expect(recentJobCount()).toBeLessThanOrEqual(MCP_RECENT_JOBS_LIMIT);
+
+    const missing: string[] = [];
+    for (const job of search.jobs) {
+      const byId = await getJobDetails({ jobId: job.id }).catch(() => null);
+      const byUrl = await getJobDetails({ jobUrl: job.url }).catch(() => null);
+      if (byId?.id !== job.id || byUrl?.id !== job.id) missing.push(job.id);
+    }
+    expect(missing).toEqual([]);
   });
 
   it('given job_id and job_url, answers the job that has both when a later search reused the id', async () => {

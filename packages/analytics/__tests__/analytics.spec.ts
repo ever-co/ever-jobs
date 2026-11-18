@@ -1,6 +1,8 @@
 import 'reflect-metadata';
 import { AnalyticsService } from '@ever-jobs/analytics';
-import { JobPostDto, LocationDto, CompensationDto, CompensationInterval, JobType } from '@ever-jobs/models';
+import {
+  JobPostDto, LocationDto, CompensationDto, CompensationInterval, JobType, SalarySource,
+} from '@ever-jobs/models';
 
 function makeJob(overrides: Partial<{
   title: string;
@@ -8,6 +10,7 @@ function makeJob(overrides: Partial<{
   site: string;
   isRemote: boolean;
   compensation: any;
+  salarySource: SalarySource;
   location: any;
   jobType: JobType[];
   emails: string[];
@@ -20,10 +23,18 @@ function makeJob(overrides: Partial<{
     site: overrides.site ?? 'linkedin',
     isRemote: overrides.isRemote ?? false,
     compensation: overrides.compensation,
+    salarySource: overrides.salarySource,
     location: overrides.location,
     jobType: overrides.jobType ?? null,
     emails: overrides.emails ?? null,
   });
+}
+
+const GRAMMAR_ENV = 'EVER_JOBS_SALARY_GRAMMAR';
+
+/** An hourly compensation with the given amounts, in USD. */
+function hourly(minAmount: number, maxAmount: number): CompensationDto {
+  return new CompensationDto({ interval: CompensationInterval.HOURLY, minAmount, maxAmount, currency: 'USD' });
 }
 
 describe('AnalyticsService', () => {
@@ -151,6 +162,91 @@ describe('AnalyticsService', () => {
       const result = service.summarize(jobs);
       expect(result.bySite['linkedin']).toBe(2);
       expect(result.bySite['indeed']).toBe(1);
+    });
+
+    // T-2605 — under EVER_JOBS_SALARY_GRAMMAR=legacy with enforceAnnualSalary,
+    // postProcessCompensation parses a description salary pre-annualised but
+    // keeps its source interval ('Pay: $20 - $25/hr' → hourly 41600-52000,
+    // pinned in packages/common/__tests__/salary.spec.ts). Those amounts are
+    // yearly already and must not be multiplied by 2080 again.
+    describe('legacy grammar, description salary under enforceAnnualSalary (T-2605)', () => {
+      const shellGrammar = process.env[GRAMMAR_ENV];
+
+      beforeEach(() => {
+        delete process.env[GRAMMAR_ENV];
+      });
+
+      afterEach(() => {
+        if (shellGrammar === undefined) delete process.env[GRAMMAR_ENV];
+        else process.env[GRAMMAR_ENV] = shellGrammar;
+      });
+
+      it('takes a description-sourced salary as already yearly', () => {
+        process.env[GRAMMAR_ENV] = 'legacy';
+        const compensation = hourly(41600, 52000);
+        const jobs = [makeJob({ compensation, salarySource: SalarySource.DESCRIPTION })];
+        const result = service.summarize(jobs, { enforceAnnualSalary: true });
+        expect(result.withSalaryCount).toBe(1);
+        expect(result.salaryStats).toEqual({
+          minSalary: 41600,
+          maxSalary: 52000,
+          avgSalary: 41600,
+          currency: 'USD',
+        });
+        // The job itself is not changed.
+        expect(compensation).toMatchObject({ interval: CompensationInterval.HOURLY, minAmount: 41600, maxAmount: 52000 });
+      });
+
+      it('mixes a description-sourced salary with a yearly direct one without annualising it again', () => {
+        process.env[GRAMMAR_ENV] = 'legacy';
+        const jobs = [
+          makeJob({ compensation: hourly(41600, 52000), salarySource: SalarySource.DESCRIPTION }),
+          makeJob({
+            compensation: new CompensationDto({ interval: CompensationInterval.YEARLY, minAmount: 90000, maxAmount: 120000, currency: 'USD' }),
+            salarySource: SalarySource.DIRECT_DATA,
+          }),
+        ];
+        const result = service.summarize(jobs, { enforceAnnualSalary: true });
+        expect(result.salaryStats).toEqual({
+          minSalary: 41600,
+          maxSalary: 120000,
+          avgSalary: 65800, // (41600 + 90000) / 2
+          currency: 'USD',
+        });
+      });
+
+      it('passes enforceAnnualSalary from analyze() to the summary', () => {
+        process.env[GRAMMAR_ENV] = 'legacy';
+        const jobs = [makeJob({ compensation: hourly(41600, 52000), salarySource: SalarySource.DESCRIPTION })];
+        const result = service.analyze(jobs, { enforceAnnualSalary: true });
+        expect(result.summary.salaryStats).toMatchObject({ minSalary: 41600, maxSalary: 52000 });
+      });
+
+      // Controls: every other case is annualised as before.
+      it('still annualises a description-sourced hourly salary without enforceAnnualSalary', () => {
+        process.env[GRAMMAR_ENV] = 'legacy';
+        const jobs = [makeJob({ compensation: hourly(20, 25), salarySource: SalarySource.DESCRIPTION })];
+        expect(service.summarize(jobs).salaryStats).toMatchObject({ minSalary: 41600, maxSalary: 52000 });
+        expect(service.summarize(jobs, { enforceAnnualSalary: false }).salaryStats)
+          .toMatchObject({ minSalary: 41600, maxSalary: 52000 });
+        expect(service.analyze(jobs).summary.salaryStats).toMatchObject({ minSalary: 41600, maxSalary: 52000 });
+      });
+
+      it('still annualises a direct_data hourly salary under the legacy grammar', () => {
+        process.env[GRAMMAR_ENV] = 'legacy';
+        const jobs = [makeJob({ compensation: hourly(20, 25), salarySource: SalarySource.DIRECT_DATA })];
+        expect(service.summarize(jobs, { enforceAnnualSalary: true }).salaryStats)
+          .toMatchObject({ minSalary: 41600, maxSalary: 52000 });
+      });
+
+      it('still annualises a description-sourced hourly salary under the default grammar', () => {
+        const jobs = [makeJob({ compensation: hourly(20, 25), salarySource: SalarySource.DESCRIPTION })];
+        expect(service.summarize(jobs, { enforceAnnualSalary: true }).salaryStats)
+          .toMatchObject({ minSalary: 41600, maxSalary: 52000 });
+        process.env[GRAMMAR_ENV] = 'extended';
+        expect(service.summarize(jobs, { enforceAnnualSalary: true }).salaryStats)
+          .toMatchObject({ minSalary: 41600, maxSalary: 52000 });
+      });
     });
   });
 
