@@ -1,4 +1,6 @@
-import { OnModuleInit, Injectable, Logger, Optional, BadRequestException } from '@nestjs/common';
+import {
+  OnModuleInit, Injectable, Logger, Optional, BadRequestException, ForbiddenException,
+} from '@nestjs/common';
 import {
   Site, ScraperInputDto, JobPostDto, JobResponseDto, IScraper,
   Country,
@@ -21,6 +23,7 @@ import { MetricsService } from '../metrics/metrics.service';
 import { buildCallerCrawlOverride, callerRequestTimeout, searchStopOn503 } from './crawl-policy.mapping';
 import {
   SearchRunOptions,
+  callerSuppliesFetchTarget,
   clampResultsWanted,
   describeTerm,
   isListMode,
@@ -28,6 +31,7 @@ import {
   parseSiteCategories,
 } from './search-input';
 import { DEFAULT_MAX_JOBS_PER_SEARCH, DEFAULT_MAX_RESULTS_WANTED } from '../config/search-config';
+import { INCLUDE_RAW_ENABLED_ENV_VAR } from '../config/include-raw-config';
 import {
   COMPLETE_SEARCH,
   ProblemSource,
@@ -62,6 +66,49 @@ function unresolvedDomainsMessage(domains: ReadonlyArray<string>): string {
   return domains
     .map((domain) => `domain \`${domain}\` → token \`${deriveSiteToken(domain)}\` is not a registered plugin`)
     .join('; ');
+}
+
+/**
+ * Why a raw entry carries no body (Spec 5161 hardening, fork sync): the
+ * caller chose the URL the source fetched (see `callerSuppliesFetchTarget`).
+ */
+export const RAW_BODY_WITHHELD_CALLER_URL = 'caller_supplied_url';
+
+/** A metadata-only raw entry, flagged with why its bodies are missing. */
+export type WithheldRawHttpEntry = RawHttpEntry & {
+  body_withheld: typeof RAW_BODY_WITHHELD_CALLER_URL;
+};
+
+/**
+ * Longest `error` text kept on a metadata-only entry. Transport errors
+ * ("timeout of 12000ms exceeded", "net::ERR_ABORTED") fit easily; the cap
+ * only makes sure no free text grows into a body substitute.
+ */
+const WITHHELD_ERROR_MAX_CHARS = 300;
+
+/**
+ * Reduce a raw entry to request metadata: status, URLs, content type, sizes
+ * and timing. `body` and `request_body` are dropped. An allow-list, so a
+ * field added to `RawHttpEntry` later stays out until it is listed here.
+ */
+export function toMetadataOnlyRawEntry(entry: RawHttpEntry): WithheldRawHttpEntry {
+  const meta: WithheldRawHttpEntry = {
+    seq: entry.seq,
+    attempt: entry.attempt,
+    method: entry.method,
+    url: entry.url,
+    status: entry.status,
+    elapsed_ms: entry.elapsed_ms,
+    body_bytes: entry.body_bytes,
+    truncated: entry.truncated,
+    body_withheld: RAW_BODY_WITHHELD_CALLER_URL,
+  };
+  if (entry.final_url !== undefined) meta.final_url = entry.final_url;
+  if (entry.content_type !== undefined) meta.content_type = entry.content_type;
+  if (typeof entry.error === 'string') {
+    meta.error = entry.error.slice(0, WITHHELD_ERROR_MAX_CHARS);
+  }
+  return meta;
 }
 
 
@@ -527,6 +574,18 @@ export class JobsService implements OnModuleInit {
     // `cacheParams` and into every plugin's `scraperInput`, so a field would
     // leak into the cache key and reach plugins.
     const captureRaw = options.captureRaw === true;
+    // Fork-sync hardening — the operator switch is checked here as well as in
+    // the controller (which also requires an admin key), so no other entry
+    // point can turn capture on while the operator has it off.
+    if (captureRaw && this.configService.get<boolean>('rawCapture.enabled', false) !== true) {
+      throw new ForbiddenException(
+        `include_raw is disabled on this server (${INCLUDE_RAW_ENABLED_ENV_VAR})`,
+      );
+    }
+    // Decided on the caller's own input, before the companyUrl fallback below
+    // fills in `companySlug`: when the caller chose the URL, raw entries keep
+    // only metadata (see `toMetadataOnlyRawEntry`).
+    const withholdRawBodies = captureRaw && callerSuppliesFetchTarget(input);
     // Spec 5164 — a per-request deadline override arrives the same way
     // (options, never a DTO field) so it stays out of `cacheParams` and out
     // of every plugin's input.
@@ -1080,13 +1139,26 @@ export class JobsService implements OnModuleInit {
     // scrape keeps writing to its sink after `withDeadline` rejects, and
     // browser plugins often leave the final response's body read pending when
     // they return — the bounded drain is what keeps that body.
+    //
+    // Fork-sync hardening — a request whose fetch target came from the caller
+    // (`companyUrl`, or a host-shaped `companySlug`) gets metadata only:
+    // returning bodies would make the server a read proxy for any URL the
+    // egress guard allows, fetched from the server's own address.
     const rawBySource: Record<string, RawHttpEntry[]> = {};
     if (captureRaw) {
+      if (withholdRawBodies) {
+        this.logger.warn(
+          'include_raw: the caller chose the fetch target (companyUrl / companySlug); ' +
+            'returning request metadata only, no bodies',
+        );
+      }
       for (let index = 0; index < sinks.length; index++) {
         const sink = sinks[index];
         if (!sink) continue;
         await drainRawCapture(sink);
-        rawBySource[selectedScrapers[index].site] = sink.entries.slice();
+        rawBySource[selectedScrapers[index].site] = withholdRawBodies
+          ? sink.entries.map(toMetadataOnlyRawEntry)
+          : sink.entries.slice();
       }
     }
 

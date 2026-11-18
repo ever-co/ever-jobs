@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { BadRequestException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException } from '@nestjs/common';
 import {
   ScraperInputDto,
   JobPostDto,
@@ -222,6 +222,8 @@ import {
   clampConcurrency,
   DEFAULT_SEARCH_CONCURRENCY,
   MAX_SEARCH_CONCURRENCY,
+  RAW_BODY_WITHHELD_CALLER_URL,
+  toMetadataOnlyRawEntry,
 } from '../jobs.service';
 
 const ATS_SITES = new Set<string>([
@@ -297,6 +299,8 @@ function createService(
     deadlineMs?: number;
     /** Hosts declared by plugins via `companyDomains` (Spec 5086). */
     declaredDomains?: Record<string, Site>;
+    /** `rawCapture.enabled` — the include_raw operator switch; off like production. */
+    rawCaptureEnabled?: boolean;
   } = {},
 ): JobsService {
   const scraperMap = new Map<Site, IScraper>(
@@ -353,6 +357,7 @@ function createService(
       }
       if (key === 'search.concurrency') return overrides.concurrency ?? 64;
       if (key === 'search.deadlineMs') return overrides.deadlineMs ?? 0;
+      if (key === 'rawCapture.enabled') return overrides.rawCaptureEnabled ?? false;
       return def;
     },
   };
@@ -1451,8 +1456,12 @@ describe('JobsService', () => {
 
       const oneSource = new ScraperInputDto({ siteType: [Site.LINKEDIN] });
 
+      /** The operator has `EVER_JOBS_INCLUDE_RAW_ENABLED=true` (fork-sync hardening). */
+      const createCaptureService = (entries: Parameters<typeof createService>[0]) =>
+        createService(entries, { rawCaptureEnabled: true });
+
       it('400s when the request resolves to zero sources', async () => {
-        const service = createService([[Site.LINKEDIN, capturingScraper()]]);
+        const service = createCaptureService([[Site.LINKEDIN, capturingScraper()]]);
         // A domain that resolves to nothing leaves selectedScrapers empty.
         await expect(
           service.searchJobsWithDiagnostics(
@@ -1463,7 +1472,7 @@ describe('JobsService', () => {
       });
 
       it('400s when the request resolves to more than one source', async () => {
-        const service = createService([
+        const service = createCaptureService([
           [Site.LINKEDIN, capturingScraper()],
           [Site.INDEED, capturingScraper()],
         ]);
@@ -1476,7 +1485,7 @@ describe('JobsService', () => {
       });
 
       it('returns captured entries under the source site key', async () => {
-        const service = createService([[Site.LINKEDIN, capturingScraper([{ title: 'X' }])]]);
+        const service = createCaptureService([[Site.LINKEDIN, capturingScraper([{ title: 'X' }])]]);
         const result = await service.searchJobsWithDiagnostics(oneSource, {
           captureRaw: true,
         });
@@ -1487,7 +1496,7 @@ describe('JobsService', () => {
       });
 
       it('returns an empty rawBySource when captureRaw is not set', async () => {
-        const service = createService([[Site.LINKEDIN, capturingScraper()]]);
+        const service = createCaptureService([[Site.LINKEDIN, capturingScraper()]]);
         const result = await service.searchJobsWithDiagnostics(oneSource);
         expect(result.rawBySource).toEqual({});
       });
@@ -1499,7 +1508,7 @@ describe('JobsService', () => {
             throw new Error('boom');
           }),
         };
-        const service = createService([[Site.LINKEDIN, failing]]);
+        const service = createCaptureService([[Site.LINKEDIN, failing]]);
         const result = await service.searchJobsWithDiagnostics(oneSource, {
           captureRaw: true,
         });
@@ -1523,7 +1532,7 @@ describe('JobsService', () => {
             return inner!.scrape(input);
           }),
         };
-        const service = createService([
+        const service = createCaptureService([
           [Site.AMAZON, company],
           [Site.ASHBY, ashby, true],
         ]);
@@ -1538,7 +1547,7 @@ describe('JobsService', () => {
       });
 
       it('gives diagnostic-only selectors no key in rawBySource', async () => {
-        const service = createService([[Site.LINKEDIN, capturingScraper()]]);
+        const service = createCaptureService([[Site.LINKEDIN, capturingScraper()]]);
         const result = await service.searchJobsWithDiagnostics(
           new ScraperInputDto({
             siteType: [Site.LINKEDIN],
@@ -1548,7 +1557,142 @@ describe('JobsService', () => {
         );
         expect(Object.keys(result.rawBySource)).toEqual([Site.LINKEDIN]);
       });
+
+      it('is refused with 403 while the operator switch is off (fork-sync hardening)', async () => {
+        const scraper = capturingScraper();
+        const service = createService([[Site.LINKEDIN, scraper]]);
+        await expect(
+          service.searchJobsWithDiagnostics(oneSource, { captureRaw: true }),
+        ).rejects.toBeInstanceOf(ForbiddenException);
+        expect(scraper.scrape).not.toHaveBeenCalled();
+      });
+
+      describe('caller-chosen fetch target (fork-sync hardening)', () => {
+        // An obvious fake standing in for content only the server could read.
+        const SECRET = 'FAKE_SECRET_123456';
+
+        /** One capture entry carrying both bodies and every metadata field. */
+        function fullEntryScraper(): IScraper {
+          return {
+            scrape: jest.fn().mockImplementation(async () => {
+              getRawCapture()?.entries.push({
+                seq: 0,
+                attempt: 1,
+                method: 'POST',
+                url: 'https://target.example.test/page',
+                final_url: 'https://target.example.test/page/final',
+                status: 500,
+                error: 'Request failed with status code 500',
+                elapsed_ms: 42,
+                content_type: 'text/html',
+                request_body: { query: SECRET },
+                body: `<html>${SECRET}</html>`,
+                body_bytes: 1234,
+                truncated: false,
+              });
+              return new JobResponseDto([]);
+            }),
+          };
+        }
+
+        const search = (fields: Partial<ScraperInputDto>) =>
+          createCaptureService([[Site.LINKEDIN, fullEntryScraper()]]).searchJobsWithDiagnostics(
+            new ScraperInputDto({ siteType: [Site.LINKEDIN], ...fields }),
+            { captureRaw: true },
+          );
+
+        it('keeps only metadata when the request carries a companyUrl', async () => {
+          const result = await search({ companyUrl: 'https://target.example.test/page' });
+
+          expect(result.rawBySource[Site.LINKEDIN]).toEqual([
+            {
+              seq: 0,
+              attempt: 1,
+              method: 'POST',
+              url: 'https://target.example.test/page',
+              final_url: 'https://target.example.test/page/final',
+              status: 500,
+              error: 'Request failed with status code 500',
+              elapsed_ms: 42,
+              content_type: 'text/html',
+              body_bytes: 1234,
+              truncated: false,
+              body_withheld: RAW_BODY_WITHHELD_CALLER_URL,
+            },
+          ]);
+          expect(JSON.stringify(result.rawBySource)).not.toContain(SECRET);
+        });
+
+        it.each([
+          ['a dotted host', 'target.example.test'],
+          ['a host with a path', 'target.example.test/x?'],
+          ['userinfo', 'tenant@target.example.test'],
+          ['a fragment', 'target#'],
+        ])('keeps only metadata for a companySlug with %s', async (_label, companySlug) => {
+          const result = await search({ companySlug });
+          const [entry] = result.rawBySource[Site.LINKEDIN];
+          expect(entry).not.toHaveProperty('body');
+          expect(entry).not.toHaveProperty('request_body');
+          expect(entry).toMatchObject({ status: 500, body_bytes: 1234 });
+          expect(JSON.stringify(result.rawBySource)).not.toContain(SECRET);
+        });
+
+        it.each([
+          ['no caller target', {}],
+          ['a plain tenant slug', { companySlug: 'acme-corp' }],
+          ['a Workday compound slug', { companySlug: 'acme:5:External' }],
+          ['a blank companyUrl', { companyUrl: '   ' }],
+        ])('keeps bodies with %s', async (_label, fields) => {
+          const result = await search(fields as Partial<ScraperInputDto>);
+          const [entry] = result.rawBySource[Site.LINKEDIN];
+          expect(entry.body).toBe(`<html>${SECRET}</html>`);
+          expect(entry.request_body).toEqual({ query: SECRET });
+          expect(entry).not.toHaveProperty('body_withheld');
+        });
+      });
     });
   });
 });
 
+describe('toMetadataOnlyRawEntry (Spec 5161, fork-sync hardening)', () => {
+  const base: RawHttpEntry = {
+    seq: 3,
+    attempt: 0,
+    method: 'GET',
+    url: 'https://target.example.test/a',
+    status: 200,
+    elapsed_ms: 7,
+    body_bytes: 10,
+    truncated: true,
+    body: 'FAKE_SECRET_123456',
+    request_body: { q: 'FAKE_SECRET_123456' },
+  };
+
+  it('is an allow-list: a field it does not know is dropped too', () => {
+    const extended = { ...base, response_headers: { 'set-cookie': 'FAKE_SECRET_123456' } };
+    const meta = toMetadataOnlyRawEntry(extended as RawHttpEntry);
+    expect(JSON.stringify(meta)).not.toContain('FAKE_SECRET_123456');
+    expect(meta).toEqual({
+      seq: 3,
+      attempt: 0,
+      method: 'GET',
+      url: 'https://target.example.test/a',
+      status: 200,
+      elapsed_ms: 7,
+      body_bytes: 10,
+      truncated: true,
+      body_withheld: RAW_BODY_WITHHELD_CALLER_URL,
+    });
+  });
+
+  it('caps the error text', () => {
+    const meta = toMetadataOnlyRawEntry({ ...base, error: 'x'.repeat(5_000) });
+    expect(meta.error).toHaveLength(300);
+  });
+
+  it('leaves the input entry untouched', () => {
+    const entry = { ...base };
+    toMetadataOnlyRawEntry(entry);
+    expect(entry.body).toBe('FAKE_SECRET_123456');
+  });
+});
