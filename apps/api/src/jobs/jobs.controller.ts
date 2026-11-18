@@ -248,17 +248,21 @@ export class JobsController {
     type: Boolean,
     description:
       'Raw HTTP capture for a single source (Spec 5161), an operator debugging aid. Off unless the server sets ' +
-      `${INCLUDE_RAW_ENABLED_ENV_VAR}=true (403 otherwise), and it needs API key auth on (503 otherwise) and a valid ` +
-      'admin key in the API key header, as for admin routes (503 when no API_KEYS are configured, 401 for a missing ' +
-      `or unknown key), that is also listed in ${INCLUDE_RAW_API_KEYS_ENV_VAR} (503 while that list is empty, 403 ` +
-      'for a key not in it). Credentials are scrubbed from every entry (the server\'s API keys and secrets, ' +
+      `${INCLUDE_RAW_ENABLED_ENV_VAR}=true (403 otherwise). It needs API key auth on (ENABLE_API_KEY_AUTH=true; ` +
+      '503 otherwise) and a valid key in the API key header: a missing or unknown key gets 403 from the global API ' +
+      'key guard before the search runs, and no configured API_KEYS gets 503. The key must also be listed in ' +
+      `${INCLUDE_RAW_API_KEYS_ENV_VAR} (503 while that list is empty, 403 for a key not in it). Credentials are ` +
+      'scrubbed from every entry (the server\'s API keys and secrets, the request\'s own auth values, ' +
       'credential-named query params and JSON fields such as tokens, keyed URL paths), shown as "REDACTED". ' +
       'Valid only when the request resolves to exactly one source; otherwise 400. At most ' +
       `${INCLUDE_RAW_MAX_CONCURRENT_ENV_VAR} (default 2) capture searches run at once; more get 429. Skips the cache ` +
-      'read and adds `raw_by_source` to the JSON response (not to ndjson). When the request names its own target ' +
-      '(`companyUrl`, or a `companySlug` that can name a host), each entry keeps only metadata (status, url, ' +
-      'final_url, content_type, body_bytes, elapsed_ms) and carries `body_withheld: "caller_supplied_url"` instead ' +
-      'of `body` / `request_body`.',
+      'read and adds `raw_by_source` to the JSON response (not to ndjson). Two flags say why bodies are missing: ' +
+      '`bodies_withheld: "opt_out" | "auth_endpoint"`, set by the capture layer when the plugin opted the request ' +
+      'out or the URL is a token / auth endpoint (that entry has no `body` / `request_body`); and ' +
+      '`body_withheld: "caller_supplied_url"`, set by the API when the request names its own target ' +
+      '(`companyUrl`, or a `companySlug` that can name a host): then every entry keeps only metadata (status, url, ' +
+      'final_url, content_type, body_bytes, elapsed_ms, and `bodies_withheld` when set) instead of `body` / ' +
+      '`request_body`.',
   })
   @ApiQuery({
     name: 'deadline_ms',
@@ -298,14 +302,10 @@ export class JobsController {
       'Invalid input, e.g. an unknown siteCategories value or a companyDomain that maps to no plugin (also for ndjson — checked before the stream starts)',
   })
   @ApiResponse({
-    status: 401,
-    description: 'include_raw with a missing or unknown API key (admin semantics)',
-  })
-  @ApiResponse({
     status: 403,
     description:
-      `include_raw while the server has it disabled, or with a key not in ${INCLUDE_RAW_API_KEYS_ENV_VAR}; ` +
-      'or, with API key auth on, a missing or invalid API key',
+      'With API key auth on, a missing or unknown API key (the global API key guard, before the search runs); ' +
+      `include_raw while the server has it disabled, or with a key not in ${INCLUDE_RAW_API_KEYS_ENV_VAR}`,
   })
   @ApiResponse({ status: 429, description: 'Rate limit exceeded, or too many include_raw searches at once' })
   @ApiResponse({
@@ -400,7 +400,7 @@ export class JobsController {
     // time; the service 400s when the selection resolves to anything else.
     // Fork-sync hardening: it returns data fetched with the server's identity
     // and credentials, so it needs the operator opt-in AND an admin key that
-    // is also in EVER_JOBS_INCLUDE_RAW_API_KEYS (403 / 503 / 401; see
+    // is also in EVER_JOBS_INCLUDE_RAW_API_KEYS (403 / 503; see
     // `assertIncludeRawAllowed`). Checked before any cache or scrape work, and for
     // format=ndjson too: NDJSON ignores the flag, but the answer to an
     // unauthorised include_raw request should not depend on the format.

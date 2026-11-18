@@ -1809,6 +1809,18 @@ describe('toMetadataOnlyRawEntry (Spec 5161, fork-sync hardening)', () => {
     expect(meta.error).toHaveLength(300);
   });
 
+  it('keeps the capture layer bodies_withheld reason next to body_withheld (round 3)', () => {
+    const meta = toMetadataOnlyRawEntry({
+      ...base,
+      method: 'POST',
+      url: 'https://api.personio.de/v1/auth',
+      bodies_withheld: 'auth_endpoint',
+    });
+    expect(meta).toMatchObject({ bodies_withheld: 'auth_endpoint', body_withheld: RAW_BODY_WITHHELD_CALLER_URL });
+    expect(meta).not.toHaveProperty('body');
+    expect(meta).not.toHaveProperty('request_body');
+  });
+
   it('leaves the input entry untouched', () => {
     const entry = { ...base };
     toMetadataOnlyRawEntry(entry);

@@ -12,8 +12,8 @@ import {
   createRawCaptureSink, drainRawCapture, runWithRawCapture, normalizeJobPost,
   resolveSearchLocations, clampMaxLocations, runWithHttpMemo, httpMemoMethodsFromEnv,
   runWithScrapeContext, readCrawlPolicyEnv, getEffectiveCrawlPolicy, crawlCallerProxiesAllowed,
-  crawlCallerProxiesAllowedFor, resolveCallerOverrides,
-  type CallerOverridesResolution, type CrawlPolicyEnvConfig,
+  crawlCallerProxiesAllowedFor, resolveCallerOverrides, scrubRawErrorText, scrubRawUrl,
+  type CallerOverridesResolution, type RawCaptureScrubber, type CrawlPolicyEnvConfig,
   type CrawlPolicyOverride, type PluginCrawlPolicy, type ScrapeContext,
 } from '@ever-jobs/common';
 import type { RawCaptureSink, RawHttpEntry } from '@ever-jobs/models';
@@ -32,12 +32,7 @@ import {
 } from './search-input';
 import { DEFAULT_MAX_JOBS_PER_SEARCH, DEFAULT_MAX_RESULTS_WANTED } from '../config/search-config';
 import { INCLUDE_RAW_ENABLED_ENV_VAR } from '../config/include-raw-config';
-import {
-  collectRawCaptureSecrets,
-  redactRawEntry,
-  redactRawText,
-  redactRawUrl,
-} from './raw-entry-redaction';
+import { collectRawCaptureSecrets, redactRawEntry } from './raw-entry-redaction';
 import {
   COMPLETE_SEARCH,
   ProblemSource,
@@ -93,35 +88,42 @@ export type WithheldRawHttpEntry = RawHttpEntry & {
 const WITHHELD_ERROR_MAX_CHARS = 300;
 
 /**
- * Reduce a raw entry to request metadata: status, URLs, content type, sizes
- * and timing. `body` and `request_body` are dropped. An allow-list, so a
- * field added to `RawHttpEntry` later stays out until it is listed here.
+ * Reduce a raw entry to request metadata: status, URLs, content type, sizes,
+ * timing and the capture layer's `bodies_withheld` reason (`opt_out` /
+ * `auth_endpoint`, so a withheld token call stays recognisable). `body` and
+ * `request_body` are dropped. An allow-list, so a field added to
+ * `RawHttpEntry` later stays out until it is listed here.
+ *
+ * Two flags can appear together and are kept apart on purpose:
+ * `bodies_withheld` comes from the capture layer, `body_withheld` from this
+ * API (the caller chose the fetch target).
  *
  * The URLs and the error text that remain are credential-scrubbed
- * (`redactRawUrl` / `redactRawText`, with `secrets` from
+ * (`scrubRawUrl` / `scrubRawErrorText` under `scrubber`, from
  * `collectRawCaptureSecrets`): a keyed source puts its key in exactly these
  * fields. The error is scrubbed BEFORE it is capped, so the cap can never
  * cut a secret into a prefix the scrub no longer recognises.
  */
 export function toMetadataOnlyRawEntry(
   entry: RawHttpEntry,
-  secrets: readonly string[] = [],
+  scrubber?: RawCaptureScrubber,
 ): WithheldRawHttpEntry {
   const meta: WithheldRawHttpEntry = {
     seq: entry.seq,
     attempt: entry.attempt,
     method: entry.method,
-    url: redactRawUrl(entry.url, secrets),
+    url: scrubRawUrl(entry.url, scrubber),
     status: entry.status,
     elapsed_ms: entry.elapsed_ms,
     body_bytes: entry.body_bytes,
     truncated: entry.truncated,
     body_withheld: RAW_BODY_WITHHELD_CALLER_URL,
   };
-  if (entry.final_url !== undefined) meta.final_url = redactRawUrl(entry.final_url, secrets);
+  if (entry.final_url !== undefined) meta.final_url = scrubRawUrl(entry.final_url, scrubber);
   if (entry.content_type !== undefined) meta.content_type = entry.content_type;
+  if (entry.bodies_withheld !== undefined) meta.bodies_withheld = entry.bodies_withheld;
   if (typeof entry.error === 'string') {
-    meta.error = redactRawText(entry.error, secrets).slice(0, WITHHELD_ERROR_MAX_CHARS);
+    meta.error = scrubRawErrorText(entry.error, scrubber).slice(0, WITHHELD_ERROR_MAX_CHARS);
   }
   return meta;
 }
@@ -1160,9 +1162,9 @@ export class JobsService implements OnModuleInit {
     // returning bodies would make the server a read proxy for any URL the
     // egress guard allows, fetched from the server's own address.
     //
-    // Every entry, full or metadata-only, is also scrubbed of the server's
-    // credentials (env-sourced plugin keys, the request's own `auth` values,
-    // credential-named fields, keyed URL paths): see `raw-entry-redaction.ts`.
+    // Every entry, full or metadata-only, is also scrubbed once more by the
+    // capture layer's rules, now with the request's own `auth` values too
+    // (env credentials first, `auth` values second): see `raw-entry-redaction.ts`.
     const rawBySource: Record<string, RawHttpEntry[]> = {};
     if (captureRaw) {
       if (withholdRawBodies) {
@@ -1171,15 +1173,15 @@ export class JobsService implements OnModuleInit {
             'returning request metadata only, no bodies',
         );
       }
-      const secrets = collectRawCaptureSecrets(process.env, input.auth);
+      const scrubber = collectRawCaptureSecrets(process.env, input.auth);
       for (let index = 0; index < sinks.length; index++) {
         const sink = sinks[index];
         if (!sink) continue;
         await drainRawCapture(sink);
         rawBySource[selectedScrapers[index].site] = sink.entries.map((entry) =>
           withholdRawBodies
-            ? toMetadataOnlyRawEntry(entry, secrets)
-            : redactRawEntry(entry, secrets),
+            ? toMetadataOnlyRawEntry(entry, scrubber)
+            : redactRawEntry(entry, scrubber),
         );
       }
     }

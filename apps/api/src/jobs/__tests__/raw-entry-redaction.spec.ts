@@ -1,21 +1,15 @@
 import type { RawHttpEntry } from '@ever-jobs/models';
-import {
-  RAW_REDACTED,
-  collectRawCaptureSecrets,
-  isSecretEnvName,
-  isSensitiveFieldName,
-  redactRawEntry,
-  redactRawJson,
-  redactRawPayload,
-  redactRawText,
-  redactRawUrl,
-} from '../raw-entry-redaction';
+import { collectRawCaptureSecrets, redactRawEntry } from '../raw-entry-redaction';
 
 /**
  * Credential scrub for `include_raw` entries (Spec 5161, fork-sync hardening,
- * finding 5). Every value below is an obvious fake.
+ * finding 5), now a thin last pass over the capture layer's own rules
+ * (round 3). The name classifiers, URL and body rules it used to carry are
+ * tested where they live, in `packages/common/__tests__/raw-capture-*.spec.ts`.
+ * Every value below is an obvious fake.
  */
 describe('raw-entry-redaction', () => {
+  const REDACTED = 'REDACTED';
   const JOOBLE_KEY = 'FAKE-JOOBLE-KEY-0000-1111';
   const ADZUNA_ID = 'FAKEID01';
   const ADZUNA_KEY = 'FAKE_ADZUNA_KEY_123456';
@@ -40,6 +34,7 @@ describe('raw-entry-redaction', () => {
     EVER_JOBS_STORE: 'postgres-main',
   };
   const secrets = collectRawCaptureSecrets(env);
+  const noSecrets = collectRawCaptureSecrets({});
   const ALL_FAKES = [
     JOOBLE_KEY, ADZUNA_ID, ADZUNA_KEY, PERSONIO_ID, PERSONIO_SECRET, UPWORK_SECRET,
     CAREERONESTOP_USER, ISSUED_TOKEN,
@@ -58,29 +53,21 @@ describe('raw-entry-redaction', () => {
   });
 
   describe('the reviewer reproductions', () => {
-    it('Jooble: the key in the URL path is gone', () => {
-      const out = redactRawEntry(
-        entry({ method: 'POST', url: `https://jooble.org/api/${JOOBLE_KEY}` }),
-        secrets,
-      );
-      expect(out.url).toBe(`https://jooble.org/api/${RAW_REDACTED}`);
-      // Even with no env secrets, the host rule alone removes it.
-      expect(redactRawUrl(`https://jooble.org/api/${JOOBLE_KEY}`, [])).toBe(
-        `https://jooble.org/api/${RAW_REDACTED}`,
-      );
+    it('Jooble: the key in the URL path is gone, by the host rule alone too', () => {
+      const url = `https://jooble.org/api/${JOOBLE_KEY}`;
+      expect(redactRawEntry(entry({ method: 'POST', url }), secrets).url).toBe(`https://jooble.org/api/${REDACTED}`);
+      expect(redactRawEntry(entry({ url }), noSecrets).url).toBe(`https://jooble.org/api/${REDACTED}`);
     });
 
     it('Adzuna: app_id and app_key are gone from final_url', () => {
       const finalUrl =
         `https://api.adzuna.com/v1/api/jobs/gb/search/1?app_id=${ADZUNA_ID}` +
         `&app_key=${ADZUNA_KEY}&what=engineer`;
-      const out = redactRawEntry(entry({ final_url: finalUrl }), secrets);
-      expect(out.final_url).toBe(
+      expect(redactRawEntry(entry({ final_url: finalUrl }), secrets).final_url).toBe(
         'https://api.adzuna.com/v1/api/jobs/gb/search/1?app_id=REDACTED&app_key=REDACTED&what=engineer',
       );
-      // The field-name rule alone catches them too.
-      expect(redactRawUrl(finalUrl, [])).not.toContain(ADZUNA_KEY);
-      expect(redactRawUrl(finalUrl, [])).not.toContain(ADZUNA_ID);
+      // The key-name rule alone removes the key.
+      expect(redactRawEntry(entry({ final_url: finalUrl }), noSecrets).final_url).not.toContain(ADZUNA_KEY);
     });
 
     it('Personio: client_secret in request_body and the issued token in body are gone', () => {
@@ -93,50 +80,48 @@ describe('raw-entry-redaction', () => {
         }),
         secrets,
       );
-      expect(out.request_body).toEqual({ client_id: RAW_REDACTED, client_secret: RAW_REDACTED });
-      expect(out.body).toEqual({ success: true, data: { token: RAW_REDACTED } });
+      expect(out.request_body).toEqual({ client_id: REDACTED, client_secret: REDACTED });
+      expect(out.body).toEqual({ success: true, data: { token: REDACTED } });
     });
 
-    it('OAuth token responses: access and refresh tokens are gone', () => {
+    it('OAuth token responses: access and refresh tokens are gone, key order kept', () => {
       const body = {
         access_token: ISSUED_TOKEN,
         refresh_token: 'FAKE_REFRESH_TOKEN_777',
         token_type: 'bearer',
         expires_in: 3600,
       };
-      const out = redactRawPayload(body, secrets) as Record<string, unknown>;
-      expect(out.access_token).toBe(RAW_REDACTED);
-      expect(out.refresh_token).toBe(RAW_REDACTED);
+      const out = redactRawEntry(entry({ body }), secrets).body as Record<string, unknown>;
+      expect(out.access_token).toBe(REDACTED);
+      expect(out.refresh_token).toBe(REDACTED);
       expect(out.expires_in).toBe(3600);
       expect(Object.keys(out)).toEqual(['access_token', 'refresh_token', 'token_type', 'expires_in']);
     });
 
     it('a token response served as text is parsed and scrubbed', () => {
       const text = JSON.stringify({ access_token: ISSUED_TOKEN, scope: 'api' });
-      const out = redactRawPayload(text, secrets) as string;
+      const out = redactRawEntry(entry({ body: text }), secrets).body as string;
       expect(out).not.toContain(ISSUED_TOKEN);
-      expect(JSON.parse(out)).toEqual({ access_token: RAW_REDACTED, scope: 'api' });
+      expect(JSON.parse(out)).toEqual({ access_token: REDACTED, scope: 'api' });
     });
 
     it('an error body that echoes the submitted secret loses it (value scrub)', () => {
       const body = `<error>invalid_client: ${UPWORK_SECRET} rejected</error>`;
-      expect(redactRawPayload(body, secrets)).toBe(
-        `<error>invalid_client: ${RAW_REDACTED} rejected</error>`,
-      );
+      expect(redactRawEntry(entry({ body }), secrets).body).toBe(`<error>invalid_client: ${REDACTED} rejected</error>`);
     });
 
     it('a form-encoded body loses its credential params', () => {
-      const form =
-        `grant_type=client_credentials&client_id=SOMEID&client_secret=${encodeURIComponent('a b+c')}`;
-      expect(redactRawPayload(form, [])).toBe(
-        'grant_type=client_credentials&client_id=REDACTED&client_secret=REDACTED',
+      const form = `grant_type=client_credentials&client_id=SOMEID&client_secret=${encodeURIComponent('a b+c')}`;
+      expect(redactRawEntry(entry({ request_body: form }), noSecrets).request_body).toBe(
+        'grant_type=client_credentials&client_id=SOMEID&client_secret=REDACTED',
       );
     });
 
     it('CareerOneStop: the user id in the path is gone', () => {
       const url = `https://api.careeronestop.org/v2/jobsearch/${CAREERONESTOP_USER}/nurse/NY/25/0/0/0/10/30`;
-      const out = redactRawUrl(url, []);
-      expect(out).toBe('https://api.careeronestop.org/v2/jobsearch/REDACTED/nurse/NY/25/0/0/0/10/30');
+      expect(redactRawEntry(entry({ url }), noSecrets).url).toBe(
+        'https://api.careeronestop.org/v2/jobsearch/REDACTED/nurse/NY/25/0/0/0/10/30',
+      );
     });
 
     it('no fake credential survives anywhere in a serialized entry', () => {
@@ -157,137 +142,54 @@ describe('raw-entry-redaction', () => {
     });
   });
 
-  describe('collectRawCaptureSecrets', () => {
-    it('keeps credential-named env values and skips settings', () => {
-      expect(secrets).toEqual(
-        expect.arrayContaining([JOOBLE_KEY, ADZUNA_ID, ADZUNA_KEY, PERSONIO_SECRET, CAREERONESTOP_USER]),
+  describe('round 3: the API pass uses the capture layer tiers and rules', () => {
+    const talrooUrl = (id: string) =>
+      `https://api.jobs2careers.com/api/search.php?id=${id}&pass=FAKEPASS_99887766&format=json&q=x`;
+
+    it('a caller auth value overlapping a server publisher id cannot expose its tail', () => {
+      const talrooEnv = { TALROO_PUBLISHER_ID: 'pubFAKE8842', TALROO_PUBLISHER_PASS: 'FAKEPASS_99887766' };
+      const urls = new Set<string>();
+      for (const guess of ['p', 'Q']) {
+        const scrubber = collectRawCaptureSecrets(talrooEnv, { jooble: { apiKey: `search.php?id=${guess}` } });
+        urls.add(redactRawEntry(entry({ url: talrooUrl('pubFAKE8842') }), scrubber).url);
+      }
+      // One answer for a right and a wrong first character: nothing to learn.
+      expect([...urls]).toEqual([
+        'https://api.jobs2careers.com/api/search.php?id=REDACTED&pass=REDACTED&format=json&q=x',
+      ]);
+    });
+
+    it('a 6-digit publisher id is not exposed by an overlapping caller value either', () => {
+      const scrubber = collectRawCaptureSecrets(
+        { TALROO_PUBLISHER_ID: '123456', TALROO_PUBLISHER_PASS: 'FAKEPASS_99887766' },
+        { jooble: { apiKey: 'php?id=1' } },
       );
-      expect(secrets).not.toContain('true');
-      expect(secrets).not.toContain('x-api-key');
-      expect(secrets).not.toContain('123456');
-      expect(secrets).not.toContain('postgres-main');
-    });
-
-    it('adds each entry of a list value and the URL-encoded form', () => {
-      const out = collectRawCaptureSecrets({
-        API_KEYS: 'FAKE_KEY_AAAAAA, FAKE_KEY_BBBBBB',
-        SOME_TOKEN: 'FAKE/TOKEN+WITH=CHARS',
-      });
-      expect(out).toEqual(
-        expect.arrayContaining([
-          'FAKE_KEY_AAAAAA',
-          'FAKE_KEY_BBBBBB',
-          'FAKE/TOKEN+WITH=CHARS',
-          encodeURIComponent('FAKE/TOKEN+WITH=CHARS'),
-        ]),
-      );
-    });
-
-    it('takes credential-named strings from the request auth block, not the rest', () => {
-      const out = collectRawCaptureSecrets(
-        {},
-        { adzuna: { appId: 'FAKE_CALLER_ID_1', appKey: 'FAKE_CALLER_KEY_1' }, workable: { subdomain: 'acmecorp' } },
-      );
-      expect(out).toEqual(expect.arrayContaining(['FAKE_CALLER_ID_1', 'FAKE_CALLER_KEY_1']));
-      expect(out).not.toContain('acmecorp');
-    });
-
-    it('orders longest first so a secret containing another is replaced whole', () => {
-      const out = collectRawCaptureSecrets({ A_TOKEN: 'FAKE_ABCDEF', B_TOKEN: 'FAKE_ABCDEF_LONGER' });
-      expect(out.indexOf('FAKE_ABCDEF_LONGER')).toBeLessThan(out.indexOf('FAKE_ABCDEF'));
-      expect(redactRawText('x FAKE_ABCDEF_LONGER y', out)).toBe(`x ${RAW_REDACTED} y`);
-    });
-  });
-
-  describe('name classifiers', () => {
-    it.each([
-      'JOOBLE_API_KEY', 'ADZUNA_APP_KEY', 'ADZUNA_APP_ID', 'PERSONIO_CLIENT_SECRET',
-      'PERSONIO_CLIENT_ID', 'UPWORK_REFRESH_TOKEN', 'CAREERONESTOP_USER_ID', 'TALROO_PUBLISHER_PASS',
-      'TALROO_PUBLISHER_ID', 'CAREERJET_AFFID', 'BULLHORN_CORP_TOKEN', 'API_KEYS', 'npm_config_authtoken',
-    ])('%s is a credential env name', (name) => {
-      expect(isSecretEnvName(name)).toBe(true);
-    });
-
-    it.each([
-      'API_KEY_HEADER_NAME', 'JOBSBYLEVEL_MAX_PAGES', 'SESSIONNAME', 'EVER_JOBS_STORE', 'TZ',
-      'SOME_TOKEN_URL', 'UPWORK_GRANT_TYPE', 'KEYWORDS_DEFAULT',
-    ])('%s is not', (name) => {
-      expect(isSecretEnvName(name)).toBe(false);
-    });
-
-    it.each([
-      'client_secret', 'clientSecret', 'app_key', 'app_id', 'api_key', 'apiKey', 'x-api-key', 'key',
-      'access_token', 'refresh_token', 'token', 'password', 'publisherPass', 'sig', 'signature',
-      'Authorization', 'set-cookie', 'private_key',
-    ])('field %s is sensitive', (name) => {
-      expect(isSensitiveFieldName(name)).toBe(true);
-    });
-
-    it.each(['title', 'keywords', 'location', 'what', 'page', 'company', 'description', 'id', 'url'])(
-      'field %s is not',
-      (name) => {
-        expect(isSensitiveFieldName(name)).toBe(false);
-      },
-    );
-  });
-
-  describe('redactRawUrl', () => {
-    it('removes userinfo', () => {
-      expect(redactRawUrl('https://user:FAKEPASS@example.test/x', [])).toBe(
-        'https://REDACTED@example.test/x',
+      expect(redactRawEntry(entry({ url: talrooUrl('123456') }), scrubber).url).toBe(
+        'https://api.jobs2careers.com/api/search.php?id=REDACTED&pass=REDACTED&format=json&q=x',
       );
     });
 
-    it('redacts credential params in the fragment too', () => {
-      expect(redactRawUrl('https://example.test/cb#access_token=abcdefgh&state=1', [])).toBe(
-        'https://example.test/cb#access_token=REDACTED&state=1',
+    it('a publisher id serialized by URLSearchParams is matched', () => {
+      const scrubber = collectRawCaptureSecrets({ TALROO_PUBLISHER_ID: 'pub~1234!x' });
+      const query = new URLSearchParams({ id: 'pub~1234!x', q: 'x' }).toString();
+      expect(redactRawEntry(entry({ url: `https://api.jobs2careers.com/api/search.php?${query}` }), scrubber).url).toBe(
+        'https://api.jobs2careers.com/api/search.php?id=REDACTED&q=x',
       );
     });
 
-    it('leaves an ordinary URL alone', () => {
-      const url = 'https://boards.example.test/jobs/12345?page=2&q=engineer#top';
-      expect(redactRawUrl(url, secrets)).toBe(url);
+    it('keeps a JSON text body with nothing to redact exactly as received', () => {
+      const text = '{\n  "id": 12345678901234567890,\n  "title": "Engineer",\n  "a": 1,\n  "a": 2\n}';
+      expect(redactRawEntry(entry({ body: text, body_bytes: text.length }), secrets).body).toBe(text);
     });
 
-    it('does not throw on a relative or malformed URL', () => {
-      expect(redactRawUrl(`/api/${JOOBLE_KEY}?key=%E0%A4%A`, secrets)).toBe(
-        `/api/${RAW_REDACTED}?key=REDACTED`,
-      );
-    });
-  });
-
-  describe('redactRawJson', () => {
-    it('keeps structure, null and booleans; never changes the input', () => {
-      const input = { token: null, secret: false, list: [1, 'a', { apiKey: 'FAKE_K_123456' }] };
-      const snapshot = JSON.stringify(input);
-      expect(redactRawJson(input, [])).toEqual({
-        token: null,
-        secret: false,
-        list: [1, 'a', { apiKey: RAW_REDACTED }],
-      });
-      expect(JSON.stringify(input)).toBe(snapshot);
+    it('keeps an empty value under a credential key empty, as the capture layer does', () => {
+      expect(redactRawEntry(entry({ body: '{"access_token":""}' }), secrets).body).toBe('{"access_token":""}');
+      expect(redactRawEntry(entry({ body: { access_token: '' } }), secrets).body).toEqual({ access_token: '' });
     });
 
-    it('a numeric credential is redacted by value', () => {
-      expect(redactRawJson({ user: 4242424242 }, ['4242424242'])).toEqual({ user: RAW_REDACTED });
-    });
-
-    it('a __proto__ key stays an own field and changes no prototype', () => {
-      const parsed = JSON.parse('{"__proto__":{"polluted":true},"ok":1}');
-      const out = redactRawJson(parsed, []) as Record<string, unknown>;
-      expect(Object.getPrototypeOf(out)).toBe(Object.prototype);
-      expect(({} as Record<string, unknown>).polluted).toBeUndefined();
-      expect(Object.keys(out)).toEqual(['__proto__', 'ok']);
-    });
-
-    it('handles very deep nesting without a stack overflow, and cycles', () => {
-      let deep: Record<string, unknown> = { token: 'FAKE_DEEP_TOKEN' };
-      for (let i = 0; i < 50_000; i++) deep = { child: deep };
-      expect(() => redactRawJson(deep, [])).not.toThrow();
-
-      const cyclic: Record<string, unknown> = { a: 1 };
-      cyclic.self = cyclic;
-      expect(redactRawJson(cyclic, [])).toEqual({ a: 1, self: '[Circular]' });
+    it('leaves setting values such as the API key header name in place', () => {
+      const body = '<p>Send your key in the x-api-key header.</p>';
+      expect(redactRawEntry(entry({ body }), secrets).body).toBe(body);
     });
   });
 
