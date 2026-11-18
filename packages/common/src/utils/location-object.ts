@@ -157,30 +157,108 @@ const DEFAULT_LIMITS: Required<LocationObjectLimits> = {
 const MAX_SELECTOR_SEGMENTS = 8;
 const MAX_ARRAY_DEPTH = 4;
 
+/*
+ * Work bounds (fork-sync hardening). Scraped JSON-LD and feed payloads are
+ * untrusted, and the mapper runs synchronously on the API event loop, so every
+ * loop below is bounded by these caps rather than by the payload's shape.
+ * Before them, a 35 KiB JSON-LD address with ~1000 keys and a ~1000-entry
+ * `address` array cost ~94 s of CPU (each clone re-read every key against
+ * every alias and re-serialized the growing extras per field).
+ */
+
+/**
+ * `address`/`postalAddress` array entries expanded into sibling locations;
+ * object entries past this are ignored.
+ */
+const MAX_ADDRESS_EXPANSION = 20;
+
+/**
+ * Own keys read from any one object (in `Object.keys` order); later keys are
+ * ignored everywhere: alias matching, `in` selector and other key lookups,
+ * address clones and extras. Real location objects and postings carry a few
+ * dozen keys at most.
+ */
+const MAX_OBJECT_KEYS = 200;
+
 function isObject(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
-function asArray(v: unknown): unknown[] {
-  if (v == null) return [];
-  return Array.isArray(v) ? v : [v];
+/**
+ * The single object in `v` (a value or an array of values), or `null` when
+ * there is none or more than one. Stops at the second object instead of
+ * filtering the whole array.
+ */
+function soleObject(v: unknown): Record<string, unknown> | null {
+  if (!Array.isArray(v)) return isObject(v) ? v : null;
+  let found: Record<string, unknown> | null = null;
+  for (const item of v) {
+    if (!isObject(item)) continue;
+    if (found) return null;
+    found = item;
+  }
+  return found;
 }
 
 function normKey(k: string): string {
   return k.toLowerCase();
 }
 
-/** Case-insensitive own-key lookup; returns the actual key or undefined. */
-function ownKey(obj: Record<string, unknown>, wanted: string): string | undefined {
-  const w = normKey(wanted);
-  for (const k of Object.keys(obj)) {
-    if (normKey(k) === w) return k;
+/** The capped own keys of one object, read once per mapping call. */
+interface KeyIndex {
+  /** First {@link MAX_OBJECT_KEYS} own enumerable keys, `Object.keys` order. */
+  keys: string[];
+  /** Lower-cased key to the first key spelled that way; built on first lookup. */
+  byLower?: Map<string, string>;
+}
+
+/**
+ * Per-call cache (one per `toLocationDtos` call): each input object's keys
+ * are enumerated and lower-cased once, however many address clones, alias
+ * lookups or extras passes touch it. The mapper never mutates its input, and
+ * its own mutable `extras` object is tracked separately, never indexed here.
+ */
+type KeyCache = WeakMap<object, KeyIndex>;
+
+function keyIndex(cache: KeyCache, obj: Record<string, unknown>): KeyIndex {
+  let idx = cache.get(obj);
+  if (!idx) {
+    const all = Object.keys(obj);
+    idx = { keys: all.length > MAX_OBJECT_KEYS ? all.slice(0, MAX_OBJECT_KEYS) : all };
+    cache.set(obj, idx);
   }
-  return undefined;
+  return idx;
+}
+
+/** The capped own keys of `obj`. */
+function ownKeys(cache: KeyCache, obj: Record<string, unknown>): string[] {
+  return keyIndex(cache, obj).keys;
+}
+
+/** Case-insensitive own-key lookup; returns the actual key or undefined. */
+function ownKey(
+  cache: KeyCache,
+  obj: Record<string, unknown>,
+  wanted: string,
+): string | undefined {
+  const idx = keyIndex(cache, obj);
+  if (!idx.byLower) {
+    const byLower = new Map<string, string>();
+    for (const k of idx.keys) {
+      const lower = normKey(k);
+      if (!byLower.has(lower)) byLower.set(lower, k);
+    }
+    idx.byLower = byLower;
+  }
+  return idx.byLower.get(normKey(wanted));
 }
 
 /** Resolve a case-insensitive dotted path on own enumerable properties. */
-function resolvePath(root: unknown, dotted: string): { value: unknown; path: string } | null {
+function resolvePath(
+  cache: KeyCache,
+  root: unknown,
+  dotted: string,
+): { value: unknown; path: string } | null {
   const segments = dotted.split('.');
   if (segments.length > MAX_SELECTOR_SEGMENTS) return null;
   let cur: unknown = root;
@@ -193,7 +271,7 @@ function resolvePath(root: unknown, dotted: string): { value: unknown; path: str
       return null;
     }
     if (!isObject(cur)) return null;
-    const key = ownKey(cur, seg);
+    const key = ownKey(cache, cur, seg);
     if (key === undefined) return null;
     cur = cur[key];
     walked.push(key);
@@ -214,6 +292,7 @@ function scalarValue(v: unknown, slot: Slot): string | null {
 
 /** Leaf-scalar candidates for an object-valued alias, no priority. */
 function objectCandidates(
+  cache: KeyCache,
   v: Record<string, unknown>,
   slot: Slot,
   pathPrefix: string,
@@ -222,7 +301,7 @@ function objectCandidates(
   if (!leaves) return [];
   const out: Array<{ value: string; path: string }> = [];
   for (const leaf of leaves) {
-    const key = ownKey(v, leaf);
+    const key = ownKey(cache, v, leaf);
     if (key === undefined) continue;
     const s = scalarValue(v[key], slot);
     if (s !== null) out.push({ value: s, path: `${pathPrefix}.${key}` });
@@ -241,7 +320,7 @@ interface Candidate {
  */
 function collectCandidates(
   obj: Record<string, unknown>,
-  aliases: Record<Slot, string[]>,
+  resolved: Resolved,
   pathPrefix: string,
   consumed: Set<string>,
 ): Record<Slot, Candidate[]> {
@@ -254,37 +333,36 @@ function collectCandidates(
     name: [],
     text: [],
   };
-  for (const key of Object.keys(obj)) {
-    const k = normKey(key);
-    for (const slot of SLOTS) {
-      for (const alias of aliases[slot]) {
-        const segs = alias.split('.').map(normKey);
-        if (segs[0] !== k) continue;
-        if (segs.length === 1) {
-          const raw = obj[key];
-          const path = pathPrefix ? `${pathPrefix}.${key}` : key;
-          const s = scalarValue(raw, slot);
+  const cache = resolved.keyCache;
+  for (const key of ownKeys(cache, obj)) {
+    // One map lookup per key instead of splitting all ~70 aliases per key.
+    const refs = resolved.aliasIndex.get(normKey(key));
+    if (!refs) continue;
+    for (const { slot, rest } of refs) {
+      if (rest === null) {
+        const raw = obj[key];
+        const path = pathPrefix ? `${pathPrefix}.${key}` : key;
+        const s = scalarValue(raw, slot);
+        if (s !== null) {
+          out[slot].push({ value: s, path });
+          consumed.add(path);
+        } else if (isObject(raw)) {
+          for (const c of objectCandidates(cache, raw, slot, path)) {
+            out[slot].push(c);
+            consumed.add(c.path);
+          }
+        }
+      } else {
+        // Dotted alias: resolve inside this key's subtree.
+        const sub = resolvePath(cache, obj[key], rest);
+        if (sub) {
+          const s = scalarValue(sub.value, slot);
           if (s !== null) {
+            const path = pathPrefix
+              ? `${pathPrefix}.${key}.${sub.path}`
+              : `${key}.${sub.path}`;
             out[slot].push({ value: s, path });
             consumed.add(path);
-          } else if (isObject(raw)) {
-            for (const c of objectCandidates(raw, slot, path)) {
-              out[slot].push(c);
-              consumed.add(c.path);
-            }
-          }
-        } else {
-          // Dotted alias: resolve inside this key's subtree.
-          const sub = resolvePath(obj[key], segs.slice(1).join('.'));
-          if (sub) {
-            const s = scalarValue(sub.value, slot);
-            if (s !== null) {
-              const path = pathPrefix
-                ? `${pathPrefix}.${key}.${sub.path}`
-                : `${key}.${sub.path}`;
-              out[slot].push({ value: s, path });
-              consumed.add(path);
-            }
           }
         }
       }
@@ -293,9 +371,22 @@ function collectCandidates(
   return out;
 }
 
+/** One alias, pre-split: its slot and its lower-cased tail after segment 1. */
+interface AliasRef {
+  slot: Slot;
+  /** Remaining dotted path (lower-cased), or `null` for a one-segment alias. */
+  rest: string | null;
+}
+
 interface Resolved {
   aliasSets: Record<Slot, string[]>;
+  /**
+   * Lower-cased first alias segment to every alias starting with it, in
+   * `SLOTS` order then alias order (the order candidates are collected in).
+   */
+  aliasIndex: Map<string, AliasRef[]>;
   prefer: Partial<Record<Slot, string>>;
+  keyCache: KeyCache;
 }
 
 /** Merge default aliases with caller `aliases`/`nameKeys`/`textKeys`. */
@@ -351,7 +442,22 @@ function resolveAliases(opts: LocationObjectOptions): Resolved {
     }
     prefer[slot] = p;
   }
-  return { aliasSets, prefer };
+
+  // Split every alias once per call, not once per (key x alias) pair.
+  const aliasIndex = new Map<string, AliasRef[]>();
+  for (const slot of SLOTS) {
+    for (const alias of aliasSets[slot]) {
+      const segs = alias.split('.').map(normKey);
+      const ref: AliasRef = {
+        slot,
+        rest: segs.length === 1 ? null : segs.slice(1).join('.'),
+      };
+      const refs = aliasIndex.get(segs[0]);
+      if (refs) refs.push(ref);
+      else aliasIndex.set(segs[0], [ref]);
+    }
+  }
+  return { aliasSets, aliasIndex, prefer, keyCache: new WeakMap() };
 }
 
 /** Canonical group key for a slot value (comparison, never stored). */
@@ -473,10 +579,11 @@ function resolveSlot(
   }
   if (winner) {
     for (const c of winner) consumedPaths.add(c.path);
+    const won = new Set(winner);
     return {
       value: pickStored(slot, winner, prefer, countryResolved),
       consumedPaths,
-      alternates: candidates.filter((c) => !winner!.includes(c)),
+      alternates: candidates.filter((c) => !won.has(c)),
     };
   }
   return { value: null, consumedPaths, alternates: candidates };
@@ -490,6 +597,7 @@ interface ExtrasCtx {
   keep?: string[];
   drop?: string[];
   omitted: boolean;
+  keyCache: KeyCache;
 }
 
 function pathListed(list: string[] | undefined, path: string): boolean {
@@ -532,7 +640,9 @@ function jsonSafe(v: unknown, depth: number, ctx: ExtrasCtx, seen: Set<unknown>)
     return out;
   }
   const out: Record<string, unknown> = {};
-  for (const k of Object.keys(v as Record<string, unknown>)) {
+  const keys = ownKeys(ctx.keyCache, v as Record<string, unknown>);
+  for (let i = 0; i < keys.length; i++) {
+    const k = keys[i];
     const sv = jsonSafe((v as Record<string, unknown>)[k], depth + 1, ctx, seen);
     if (sv !== undefined) {
       Object.defineProperty(out, k, {
@@ -541,6 +651,11 @@ function jsonSafe(v: unknown, depth: number, ctx: ExtrasCtx, seen: Set<unknown>)
         writable: true,
         configurable: true,
       });
+    }
+    if (ctx.nodes >= ctx.limits.maxNodes) {
+      // Every later key would be dropped anyway; stop walking them.
+      if (i < keys.length - 1) ctx.omitted = true;
+      break;
     }
   }
   seen.delete(v);
@@ -553,6 +668,7 @@ function buildExtras(
   pathPrefix: string,
   consumed: Set<string>,
   opts: LocationObjectOptions,
+  keyCache: KeyCache,
   incomingExtras?: Record<string, unknown> | null,
 ): { extras: Record<string, unknown> | null; omitted: boolean } {
   const ctx: ExtrasCtx = {
@@ -561,8 +677,18 @@ function buildExtras(
     keep: opts.keep,
     drop: opts.drop,
     omitted: false,
+    keyCache,
   };
+  const maxBytes = ctx.limits.maxBytes;
   const extras: Record<string, unknown> = {};
+  // UTF-8 size of `JSON.stringify(extras)`, kept current as fields land
+  // instead of re-serializing the whole object for every field (which was
+  // quadratic in the number of keys).
+  let size = 2; // '{}'
+  /** UTF-8 size of each landed `"key":value` member, for overwrites. */
+  const memberBytes = new Map<string, number>();
+  /** Lower-cased landed keys, for the incoming-extras collision check. */
+  const landedLower = new Set<string>();
   const addField = (key: string, value: unknown, relPath: string) => {
     if (consumed.has(relPath)) return;
     if (ctx.drop && pathListed(ctx.drop, relPath)) return;
@@ -572,11 +698,23 @@ function buildExtras(
     }
     const sv = jsonSafe(value, 1, ctx, new Set());
     if (sv === undefined) return;
-    const bytes = Buffer.byteLength(JSON.stringify(sv), 'utf8');
-    if (Buffer.byteLength(JSON.stringify(extras), 'utf8') + bytes > ctx.limits.maxBytes) {
+    // A JSON string takes at least its UTF-16 length + 2 quotes in UTF-8, so
+    // an oversized string is rejected without serializing it.
+    if (typeof sv === 'string' && size + sv.length + 2 > maxBytes) {
       ctx.omitted = true;
       return;
     }
+    const bytes = Buffer.byteLength(JSON.stringify(sv), 'utf8');
+    if (size + bytes > maxBytes) {
+      ctx.omitted = true;
+      return;
+    }
+    const member = Buffer.byteLength(JSON.stringify(key), 'utf8') + 1 + bytes;
+    const prev = memberBytes.get(key);
+    // A new member also adds its ',' separator; an overwrite swaps sizes.
+    size += prev === undefined ? member + (memberBytes.size > 0 ? 1 : 0) : member - prev;
+    memberBytes.set(key, member);
+    landedLower.add(normKey(key));
     Object.defineProperty(extras, key, {
       value: sv,
       enumerable: true,
@@ -584,15 +722,23 @@ function buildExtras(
       configurable: true,
     });
   };
-  for (const key of Object.keys(obj)) {
+  // Every value serializes to at least one byte, so once the size reaches
+  // the cap nothing else can land: stop walking the remaining keys.
+  const full = (): boolean => size >= maxBytes;
+  for (const key of ownKeys(keyCache, obj)) {
+    if (full()) {
+      ctx.omitted = true;
+      break;
+    }
     if (normKey(key) === 'extras' && isObject(obj[key])) {
       // Incoming extras flatten into output extras (never extras.extras);
       // raw fields win collisions.
-      for (const ek of Object.keys(obj[key] as Record<string, unknown>)) {
+      const incoming = obj[key] as Record<string, unknown>;
+      for (const ek of ownKeys(keyCache, incoming)) {
+        if (full()) break;
         const rel = pathPrefix ? `${pathPrefix}.${ek}` : ek;
-        const rawKey = ownKey(extras, ek);
-        if (rawKey === undefined) {
-          addField(ek, (obj[key] as Record<string, unknown>)[ek], rel);
+        if (!landedLower.has(normKey(ek))) {
+          addField(ek, incoming[ek], rel);
         }
       }
       continue;
@@ -600,7 +746,7 @@ function buildExtras(
     const rel = pathPrefix ? `${pathPrefix}.${key}` : key;
     addField(key, obj[key], rel);
   }
-  return { extras: Object.keys(extras).length ? extras : null, omitted: ctx.omitted };
+  return { extras: memberBytes.size ? extras : null, omitted: ctx.omitted };
 }
 
 // ─── location mapping ────────────────────────────────────────────────
@@ -614,7 +760,7 @@ function mapOne(
   if (depth > MAX_ARRAY_DEPTH) return null;
 
   const collected = new Set<string>();
-  const candidates = collectCandidates(obj, resolved.aliasSets, '', collected);
+  const candidates = collectCandidates(obj, resolved, '', collected);
 
   // Resolve country first (state equivalence depends on it).
   const countryRes = resolveSlot('country', candidates.country, resolved.prefer, null);
@@ -633,12 +779,9 @@ function mapOne(
   for (const slot of ['city', 'state', 'postalCode', 'streetAddress', 'name', 'text'] as Slot[]) {
     const res = resolveSlot(slot, candidates[slot], resolved.prefer, countryResolved);
     values[slot] = res.value;
-    // unclaimed alternates survive in extras under the slot's source keys
+    // unclaimed alternates survive in extras under the slot's source keys:
+    // buildExtras copies every unconsumed leaf, so nothing to look up here
     for (const alt of res.alternates) {
-      const leaf = alt.path.split('.').pop()!;
-      if (ownKey(obj, leaf) !== undefined) {
-        // leave residual: leaf is already copied by buildExtras unless consumed
-      }
       alternates[alt.path] = alt.value;
     }
     for (const p of res.consumedPaths) consumedPaths.add(p);
@@ -646,7 +789,7 @@ function mapOne(
 
   // Address descent: root slots win; address fills missing; conflicts → extras.
   for (const addrKey of ['address', 'postalAddress']) {
-    const key = ownKey(obj, addrKey);
+    const key = ownKey(resolved.keyCache, obj, addrKey);
     if (key === undefined) continue;
     const raw = obj[key];
     if (typeof raw === 'string') {
@@ -657,12 +800,11 @@ function mapOne(
       }
       continue;
     }
-    const addresses = asArray(raw).filter(isObject);
-    if (addresses.length === 0) continue;
     // Expand arrays into separate locations is handled by the caller via
     // `toLocationDtos` on the address node; here only a single address fills.
-    if (addresses.length === 1) {
-      const sub = collectCandidates(addresses[0], resolved.aliasSets, key, collected);
+    const address = soleObject(raw);
+    if (address) {
+      const sub = collectCandidates(address, resolved, key, collected);
       let filledAny = false;
       for (const slot of SLOTS) {
         if (values[slot] == null && sub[slot].length) {
@@ -681,7 +823,7 @@ function mapOne(
     values.country || values.streetAddress || values.postalCode;
   if (!meaningful) return null;
 
-  const { extras } = buildExtras(obj, '', consumedPaths, opts);
+  const { extras } = buildExtras(obj, '', consumedPaths, opts, resolved.keyCache);
 
   const dto = new LocationDto({
     name: (values.name as string) ?? null,
@@ -746,14 +888,19 @@ function dedupeKey(dto: LocationDto): string {
   );
 }
 
+/**
+ * Map `input` into `out`, stopping once `out` holds `limit` DTOs (the first
+ * DTOs are the same either way, so `toLocationDto` skips mapping the rest).
+ */
 function mapInput(
   input: unknown,
   resolved: Resolved,
   opts: LocationObjectOptions,
   out: LocationDto[],
   depth: number,
+  limit: number,
 ): void {
-  if (depth > MAX_ARRAY_DEPTH) return;
+  if (depth > MAX_ARRAY_DEPTH || out.length >= limit) return;
   if (typeof input === 'string') {
     const normalized = input.replace(/\s+/g, ' ').trim();
     if (!normalized) return;
@@ -770,22 +917,29 @@ function mapInput(
     return;
   }
   if (Array.isArray(input)) {
-    for (const item of input) mapInput(item, resolved, opts, out, depth + 1);
+    for (const item of input) {
+      if (out.length >= limit) return;
+      mapInput(item, resolved, opts, out, depth + 1, limit);
+    }
     return;
   }
   if (isObject(input)) {
     // Expand `address`/`postalAddress` arrays into sibling locations.
     const expanded: Record<string, unknown>[] = [input];
     for (const addrKey of ['address', 'postalAddress']) {
-      const key = ownKey(input, addrKey);
+      const key = ownKey(resolved.keyCache, input, addrKey);
       if (key === undefined) continue;
       const raw = input[key];
       if (Array.isArray(raw) && raw.length > 1 && raw.some(isObject)) {
         expanded.length = 0;
+        // Each clone copies the parent's (capped) keys, so clones x keys is
+        // bounded by MAX_ADDRESS_EXPANSION x MAX_OBJECT_KEYS.
+        const parentKeys = ownKeys(resolved.keyCache, input);
         for (const entry of raw) {
           if (!isObject(entry)) continue;
+          if (expanded.length >= MAX_ADDRESS_EXPANSION) break;
           const clone: Record<string, unknown> = {};
-          for (const k of Object.keys(input)) {
+          for (const k of parentKeys) {
             if (k !== key) clone[k] = input[k];
           }
           clone[key] = entry;
@@ -795,19 +949,18 @@ function mapInput(
       }
     }
     for (const item of expanded) {
+      if (out.length >= limit) return;
       const dto = mapOne(item, resolved, opts, depth);
       if (dto) out.push(dto);
     }
   }
 }
 
-/**
- * Map a location object, string, or array to `LocationDto`s. Reads own
- * runtime keys only — feed interfaces don't gate discovery.
- */
-export function toLocationDtos(
+/** Shared body of {@link toLocationDtos} / {@link toLocationDto}. */
+function mapLocations(
   input: unknown,
-  opts: LocationObjectOptions = {},
+  opts: LocationObjectOptions,
+  limit: number,
 ): LocationDto[] {
   const resolved = resolveAliases(opts);
   let selected: unknown = input;
@@ -816,10 +969,10 @@ export function toLocationDtos(
     const paths = Array.isArray(opts.in) ? opts.in : [opts.in];
     selected = undefined;
     for (const p of paths) {
-      const hit = isObject(input) ? resolvePath(input, p) : null;
+      const hit = isObject(input) ? resolvePath(resolved.keyCache, input, p) : null;
       if (hit) {
         const probe: LocationDto[] = [];
-        mapInput(hit.value, resolved, { ...opts, in: undefined }, probe, 0);
+        mapInput(hit.value, resolved, { ...opts, in: undefined }, probe, 0, limit);
         if (probe.length) {
           const seen = new Set<string>();
           return probe.filter((d) => {
@@ -835,7 +988,7 @@ export function toLocationDtos(
   }
 
   const out: LocationDto[] = [];
-  mapInput(selected, resolved, opts, out, 0);
+  mapInput(selected, resolved, opts, out, 0, limit);
   const seen = new Set<string>();
   return out.filter((d) => {
     const k = dedupeKey(d);
@@ -845,10 +998,24 @@ export function toLocationDtos(
   });
 }
 
-/** First usable mapped location, or `null`. */
+/**
+ * Map a location object, string, or array to `LocationDto`s. Reads own
+ * runtime keys only — feed interfaces don't gate discovery.
+ */
+export function toLocationDtos(
+  input: unknown,
+  opts: LocationObjectOptions = {},
+): LocationDto[] {
+  return mapLocations(input, opts, Number.POSITIVE_INFINITY);
+}
+
+/**
+ * First usable mapped location, or `null`. Same result as
+ * `toLocationDtos(input, opts)[0]`, but stops mapping after that first DTO.
+ */
 export function toLocationDto(
   input: unknown,
   opts: LocationObjectOptions = {},
 ): LocationDto | null {
-  return toLocationDtos(input, opts)[0] ?? null;
+  return mapLocations(input, opts, 1)[0] ?? null;
 }

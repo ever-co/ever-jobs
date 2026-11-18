@@ -286,6 +286,83 @@ describe('toLocationDtos — street/postal-only results', () => {
   });
 });
 
+describe('toLocationDtos: work bounds (fork-sync hardening)', () => {
+  const junkKeys = (n: number, prefix = 'junk'): Record<string, unknown> => {
+    const o: Record<string, unknown> = {};
+    for (let i = 0; i < n; i++) o[`${prefix}${i}`] = 'x'.repeat(30);
+    return o;
+  };
+  const addresses = (n: number, keysEach = 0) =>
+    Array.from({ length: n }, (_, i) => ({ addressLocality: `c${i}`, ...junkKeys(keysEach, 'k') }));
+  // Generous bounds: the uncapped mapper took ~8 s on the 300 x 300 shape
+  // and ~94 s on a 35 KiB JSON-LD page; slow CI CPUs must never flake here.
+  const BOUND_MS = 2000;
+
+  it('maps a 300 x 300 nested-address object (address key first) quickly', () => {
+    const input = JSON.parse(JSON.stringify({ address: addresses(300, 300), ...junkKeys(300) }));
+    let started = Date.now();
+    const all = toLocationDtos(input);
+    expect(Date.now() - started).toBeLessThan(BOUND_MS);
+    // expansion is capped: only the first 20 address entries become locations
+    expect(all.map((l) => l.city)).toEqual(Array.from({ length: 20 }, (_, i) => `c${i}`));
+    started = Date.now();
+    const first = toLocationDto(input, { prefer: { country: 'addressCountry.name' } });
+    expect(Date.now() - started).toBeLessThan(BOUND_MS);
+    expect(first?.city).toBe('c0');
+  });
+
+  it('maps the reported 300 x 300 shape (junk keys first, address last) quickly', () => {
+    const input = JSON.parse(JSON.stringify({ ...junkKeys(300), address: addresses(300) }));
+    const started = Date.now();
+    toLocationDtos(input);
+    toLocationDto(input);
+    expect(Date.now() - started).toBeLessThan(BOUND_MS);
+  });
+
+  it('expands at most 20 address entries and skips non-objects without counting them', () => {
+    const out = toLocationDtos({
+      name: 'Offices',
+      address: ['skip', null, ...addresses(25)],
+    });
+    expect(out).toHaveLength(20);
+    expect(out[19].city).toBe('c19');
+  });
+
+  it('reads at most the first 200 keys of an object', () => {
+    const within = { ...junkKeys(199), city: 'Berlin' };
+    expect(toLocationDto(within)?.city).toBe('Berlin');
+    const past = { ...junkKeys(200), city: 'Berlin' };
+    expect(toLocationDto(past)).toBeNull();
+  });
+
+  it('keeps extras within maxBytes and still lands later small fields', () => {
+    const out = toLocationDto(
+      { city: 'X', a: 'aaaa', b: 'b'.repeat(24), c: 1 },
+      { extrasLimits: { maxBytes: 30 } },
+    );
+    // '{"a":"aaaa"}' is 12 bytes; "b" (26 bytes) would overflow 30; 1 fits.
+    expect(out?.extras).toEqual({ a: 'aaaa', c: 1 });
+  });
+
+  it('caps the serialized extras of a large object at the default 4 KiB', () => {
+    const input: Record<string, unknown> = { city: 'Berlin', ...junkKeys(190) };
+    const started = Date.now();
+    const out = toLocationDto(input);
+    expect(Date.now() - started).toBeLessThan(BOUND_MS);
+    const bytes = Buffer.byteLength(JSON.stringify(out?.extras), 'utf8');
+    expect(bytes).toBeLessThanOrEqual(4096);
+    expect(bytes).toBeGreaterThan(4096 - 40);
+  });
+
+  it('toLocationDto matches the first toLocationDtos result', () => {
+    const input = { name: 'HQ', locationId: 'L1', address: addresses(5, 3) };
+    expect(toLocationDto(input)).toEqual(toLocationDtos(input)[0]);
+    expect(toLocationDto(input, { in: 'address' })).toEqual(
+      toLocationDtos(input, { in: 'address' })[0],
+    );
+  });
+});
+
 describe('toLocationDtos — parseTextFallback', () => {
   it('parses selected text into missing slots without overwriting', () => {
     const out = toLocationDtos(
