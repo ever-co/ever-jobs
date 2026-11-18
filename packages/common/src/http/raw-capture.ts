@@ -37,7 +37,12 @@ import { getRawCapture } from '../context/request-context';
  * whole to match.
  *
  * `drainRawCapture` runs layers 1–3 over every entry once more before the sink
- * closes, so a field written outside these helpers is still scrubbed.
+ * closes, so a field written outside these helpers is still scrubbed. The API
+ * runs them a last time over `raw_by_source` (`createRawCaptureScrubber`,
+ * `scrubRawEntry`) with the request's own `auth` values in the caller tier.
+ *
+ * Which environment variables hold credentials is decided in one place,
+ * `isSecretEnvName`, for every pass.
  */
 
 const DEFAULT_MAX_BODY_BYTES = 5_242_880; // 5 MiB
@@ -54,8 +59,20 @@ export const RAW_CAPTURE_CUT_SLACK_BYTES = 16_384;
 /** What a removed credential is replaced with. */
 export const RAW_CAPTURE_REDACTED = 'REDACTED';
 
-/** Shortest secret value that is scrubbed; shorter ones would mangle ordinary text. */
+/**
+ * Shortest registered secret value that is scrubbed (`registerRawCaptureSecrets`,
+ * `registerServerRawCaptureSecrets`, whose values carry no name); shorter ones
+ * would mangle ordinary text.
+ */
 export const RAW_CAPTURE_MIN_SECRET_LENGTH = 8;
+
+/**
+ * Shortest value scrubbed when its NAME says it is a credential: a
+ * credential-named environment variable (`isSecretEnvName`) or a
+ * credential-named field of a request's `auth` block (`rawCaptureAuthSecrets`).
+ * Short account ids used as credentials (a 6-digit publisher id) count.
+ */
+export const RAW_CAPTURE_MIN_CREDENTIAL_LENGTH = 6;
 
 function envCap(name: string, fallback: number): number {
   const n = Number(process.env[name]);
@@ -147,12 +164,15 @@ function carriesSecret(value: unknown): boolean {
  * - Ceipal routes every tenant call through `https://api.ceipal.com/{apiKey}/job-postings/`.
  * - Jooble posts to `https://jooble.org/api/{apiKey}` (`source-jooble`): the key is
  *   the last segment, index 1. A one-segment page such as `/jobs-python` is left alone.
+ * - CareerOneStop puts the account's user id in the path:
+ *   `https://api.careeronestop.org/v2/jobsearch/{userId}/…` (`source-careeronestop`).
  *
  * Add a row here if another one appears.
  */
 export const SENSITIVE_PATH_SEGMENTS: Record<string, number> = {
   'api.ceipal.com': 0,
   'jooble.org': 1,
+  'api.careeronestop.org': 2,
 };
 
 /** Scheme + authority of an absolute URL, e.g. `https://api.ceipal.com:443`. */
@@ -335,30 +355,146 @@ export function rawCaptureWithholdReason(
 // Secret values
 // ---------------------------------------------------------------------------
 
-/** Environment variable names whose values are treated as secrets. */
-const ENV_SECRET_NAME = /KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|CLIENT_ID|APP_ID/i;
+/**
+ * Env-name fragments that mark a credential wherever they appear, inside a
+ * word too (`AUTHTOKEN`, `APIKEYS`, `CAREERJET_AFFID`).
+ */
+const ENV_SECRET_PART = /KEY|SECRET|TOKEN|PASSWORD|PASSWD|PASSPHRASE|CREDENTIAL|COOKIE|BEARER|SIGNATURE|AFFID/;
 
-/** …unless the name says the value is a location or setting, not a credential. */
-const ENV_NOT_SECRET_SUFFIX = /_(?:URL|URI|HOST|PORT|PATH|FILE|DIR|ENDPOINT)$/i;
+/** Env-name words that mark a credential only as a whole word (`TALROO_PUBLISHER_PASS`, `DB_PWD`). */
+const ENV_SECRET_WORDS = new Set(['PASS', 'PWD']);
 
 /**
- * Values of credential-named environment variables (`*_KEY`, `*_SECRET`,
- * `*_TOKEN`, `*_PASSWORD`, `*_CLIENT_ID`, `*_APP_ID`, …) at least
- * `RAW_CAPTURE_MIN_SECRET_LENGTH` long. A comma-separated value (`API_KEYS`)
- * also contributes each item.
+ * Words before an `ID` word that make `<X>_ID` an account id used as a
+ * credential (`ADZUNA_APP_ID`, `PERSONIO_CLIENT_ID`, `CAREERONESTOP_USER_ID`,
+ * `TALROO_PUBLISHER_ID`, `*_ACCOUNT_ID`).
+ */
+const ENV_SECRET_ID_PREFIXES = new Set([
+  'APP', 'CLIENT', 'USER', 'PUBLISHER', 'ACCOUNT', 'PARTNER', 'AFFILIATE', 'CONSUMER',
+  'DEVELOPER', 'CUSTOMER', 'SESSION',
+]);
+
+/**
+ * A last word that names a setting ABOUT a credential, not the credential:
+ * `API_KEY_HEADER_NAME`, `EVER_JOBS_API_KEY_HEADER`, `UPWORK_TOKEN_URL`,
+ * `UPWORK_GRANT_TYPE`, `SESSION_TTL`.
+ */
+const ENV_NOT_SECRET_LAST_WORDS = new Set([
+  'NAME', 'HEADER', 'URL', 'URI', 'ENDPOINT', 'HOST', 'PORT', 'PATH', 'FILE', 'DIR', 'MODE',
+  'TYPE', 'STYLE', 'STRATEGY', 'ENABLED', 'TTL', 'MS', 'SECONDS', 'LENGTH', 'COUNT', 'LIMIT',
+  'MAX', 'MIN', 'TIMEOUT',
+]);
+
+/** Setting values that are never credentials, whatever the variable is called. */
+const NON_SECRET_VALUES = /^(?:true|false|yes|no|on|off|null|undefined|none|enabled|disabled)$/i;
+
+const envNameCache = new Map<string, boolean>();
+
+/**
+ * Whether the environment variable `name` holds a credential, judged by its
+ * name alone. The one classifier for every raw-capture pass: the sink's
+ * server tier (`envSecretValues`) and the API's last pass over
+ * `raw_by_source` both use it.
+ *
+ * Words are split on anything but letters and digits. A credential: a
+ * fragment from `ENV_SECRET_PART` anywhere, a whole `PASS` / `PWD` word, or
+ * `ID` after an account word (`APP_ID`, `USER_ID`, `PUBLISHER_ID`, …). Not a
+ * credential: a name whose last word names a setting about one (`_NAME`,
+ * `_HEADER`, `_URL`, `_TYPE`, `_TTL`, … — so `API_KEY_HEADER_NAME=x-api-key`
+ * is kept), and `KEYWORD` / `KEYWORDS`, which are search terms, not keys.
+ */
+export function isSecretEnvName(name: string): boolean {
+  const cached = envNameCache.get(name);
+  if (cached !== undefined) return cached;
+
+  const words = name
+    .toUpperCase()
+    .replace(/KEYWORDS?/g, ' ')
+    .split(/[^A-Z0-9]+/)
+    .filter(Boolean);
+  const secret =
+    words.length > 0 &&
+    !ENV_NOT_SECRET_LAST_WORDS.has(words[words.length - 1]) &&
+    words.some(
+      (word, index) =>
+        ENV_SECRET_PART.test(word) ||
+        ENV_SECRET_WORDS.has(word) ||
+        (word === 'ID' && index > 0 && ENV_SECRET_ID_PREFIXES.has(words[index - 1])),
+    );
+
+  if (envNameCache.size >= KEY_NAME_CACHE_MAX) envNameCache.clear();
+  envNameCache.set(name, secret);
+  return secret;
+}
+
+/**
+ * Add a credential value, and each item of a comma-separated one (`API_KEYS`),
+ * when at least `RAW_CAPTURE_MIN_CREDENTIAL_LENGTH` long and not a plain
+ * setting value (`true`, `enabled`, …).
+ */
+function addCredentialValue(values: Set<string>, raw: string): void {
+  const add = (value: string): void => {
+    const trimmed = value.trim();
+    if (trimmed.length >= RAW_CAPTURE_MIN_CREDENTIAL_LENGTH && !NON_SECRET_VALUES.test(trimmed)) values.add(trimmed);
+  };
+  add(raw);
+  if (raw.includes(',')) raw.split(',').forEach(add);
+}
+
+/**
+ * Values of credential-named environment variables (`isSecretEnvName`: `*_KEY`,
+ * `*_SECRET`, `*_TOKEN`, `*_PASSWORD`, `*_PASS`, `*_PWD`, `*_CLIENT_ID`,
+ * `*_APP_ID`, `*_USER_ID`, `*_PUBLISHER_ID`, `*_ACCOUNT_ID`, `*_AFFID`, …) at
+ * least `RAW_CAPTURE_MIN_CREDENTIAL_LENGTH` long. A comma-separated value
+ * (`API_KEYS`) also contributes each item.
  */
 export function envSecretValues(env: NodeJS.ProcessEnv = process.env): string[] {
   const values = new Set<string>();
-  const add = (value: string): void => {
-    const trimmed = value.trim();
-    if (trimmed.length >= RAW_CAPTURE_MIN_SECRET_LENGTH) values.add(trimmed);
-  };
   for (const name of Object.keys(env)) {
-    if (!ENV_SECRET_NAME.test(name) || ENV_NOT_SECRET_SUFFIX.test(name)) continue;
     const value = env[name];
-    if (typeof value !== 'string' || value.length < RAW_CAPTURE_MIN_SECRET_LENGTH) continue;
-    add(value);
-    if (value.includes(',')) value.split(',').forEach(add);
+    if (typeof value !== 'string' || value.length < RAW_CAPTURE_MIN_CREDENTIAL_LENGTH) continue;
+    if (isSecretEnvName(name)) addCredentialValue(values, value);
+  }
+  return [...values];
+}
+
+/**
+ * `auth` field names (lower case, separators dropped) that hold an account id
+ * used as a credential. `isSensitiveKeyName` covers the rest (`apiKey`,
+ * `clientSecret`, `accessToken`, `corpToken`, …); `email` and `subdomain` are
+ * not credentials.
+ */
+const AUTH_ID_FIELDS = new Set([
+  'appid', 'clientid', 'userid', 'publisherid', 'accountid', 'partnerid', 'affiliateid', 'affid',
+  'consumerid', 'developerid', 'customerid',
+]);
+
+/** Upper bound on `auth` nodes visited by `rawCaptureAuthSecrets`. */
+const MAX_AUTH_NODES = 1_000;
+
+function isAuthCredentialField(key: string): boolean {
+  return isSensitiveKeyName(key) || AUTH_ID_FIELDS.has(key.toLowerCase().replace(/[^a-z0-9]/g, ''));
+}
+
+/**
+ * The credential values in a request's `auth` block (`input.auth`): every
+ * string under a credential-named field (`apiKey`, `clientSecret`, `appId`,
+ * `affId`, …, also inside an array under one), at least
+ * `RAW_CAPTURE_MIN_CREDENTIAL_LENGTH` long. A caller chose them, so they belong
+ * in the caller tier (`createRawCaptureScrubber({ caller })`).
+ */
+export function rawCaptureAuthSecrets(auth: unknown): string[] {
+  const values = new Set<string>();
+  const stack: Array<{ node: unknown; credential: boolean }> = [{ node: auth, credential: false }];
+  for (let visited = 0; stack.length > 0 && visited < MAX_AUTH_NODES; visited++) {
+    const { node, credential } = stack.pop() as { node: unknown; credential: boolean };
+    if (typeof node === 'string') {
+      if (credential) addCredentialValue(values, node);
+    } else if (node !== null && typeof node === 'object') {
+      for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
+        stack.push({ node: value, credential: credential || isAuthCredentialField(key) });
+      }
+    }
   }
   return [...values];
 }
@@ -392,7 +528,9 @@ function escapeRegExp(text: string): string {
 function secretVariants(secrets: Iterable<string>): string[] {
   const variants = new Set<string>();
   for (const secret of secrets) {
-    if (secret.length < RAW_CAPTURE_MIN_SECRET_LENGTH) continue;
+    // Callers apply their own minimum (8 for registered values, 6 for named
+    // credentials); this floor only keeps an explicit list from scrubbing words.
+    if (secret.length < RAW_CAPTURE_MIN_CREDENTIAL_LENGTH) continue;
     variants.add(secret);
     variants.add(JSON.stringify(secret).slice(1, -1));
     variants.add(new URLSearchParams([['', secret]]).toString().slice(1));
@@ -436,6 +574,8 @@ interface SecretScrubber {
   tiers: SecretTier[];
   /** Longest variant: how much a body cut mid-secret loses at its tail (`dropCutTail`). */
   longest: number;
+  /** Shortest variant: a shorter string, or a number with fewer digits, cannot hold one. */
+  shortest: number;
 }
 
 function buildTier(secrets: Iterable<string>): SecretTier | null {
@@ -447,12 +587,16 @@ function buildTier(secrets: Iterable<string>): SecretTier | null {
 function buildScrubber(server: Iterable<string>, caller: Iterable<string>): SecretScrubber | null {
   const tiers: SecretTier[] = [];
   let longest = 0;
+  let shortest = Number.POSITIVE_INFINITY;
   for (const tier of [buildTier(server), buildTier(caller)]) {
     if (!tier) continue;
     tiers.push(tier);
-    for (const variant of tier.variants) longest = Math.max(longest, variant.length);
+    for (const variant of tier.variants) {
+      longest = Math.max(longest, variant.length);
+      shortest = Math.min(shortest, variant.length);
+    }
   }
-  return tiers.length > 0 ? { tiers, longest } : null;
+  return tiers.length > 0 ? { tiers, longest, shortest } : null;
 }
 
 /** More occurrences than this of one tier's secrets in one string withholds the whole string. */
@@ -608,7 +752,7 @@ interface SanitizeState {
 }
 
 function scrubString(text: string, state: SanitizeState): string {
-  if (!state.scrubber || text.length < RAW_CAPTURE_MIN_SECRET_LENGTH) return text;
+  if (!state.scrubber || text.length < state.scrubber.shortest) return text;
   let scrubbed = text;
   for (const tier of state.scrubber.tiers) scrubbed = scrubTier(scrubbed, tier);
   if (scrubbed !== text) state.changed = true;
@@ -629,7 +773,7 @@ function sanitizeNode(value: unknown, state: SanitizeState, depth: number): unkn
   if (typeof value === 'string') return scrubString(value, state);
   if (typeof value === 'number') {
     // A numeric secret (an app id, say) parsed out of JSON text is a number, not a string.
-    if (!state.scrubber || Math.abs(value) < 10 ** (RAW_CAPTURE_MIN_SECRET_LENGTH - 1)) return value;
+    if (!state.scrubber || Math.abs(value) < 10 ** (state.scrubber.shortest - 1)) return value;
     const text = String(value);
     if (scrubString(text, state) === text) return value;
     return RAW_CAPTURE_REDACTED;
@@ -678,11 +822,19 @@ function sanitizeNode(value: unknown, state: SanitizeState, depth: number): unkn
     for (const key of Object.keys(source)) {
       const item = source[key];
       const outKey = scrubString(key, state);
+      let clean: unknown;
       if (isSensitiveKeyName(key) && carriesSecret(item)) {
-        out[outKey] = RAW_CAPTURE_REDACTED;
+        clean = RAW_CAPTURE_REDACTED;
         state.changed = true;
       } else {
-        out[outKey] = sanitizeNode(item, state, depth + 1);
+        clean = sanitizeNode(item, state, depth + 1);
+      }
+      // `JSON.parse` makes `__proto__` an own key; plain assignment would call
+      // the setter instead, change the copy's prototype and drop the key.
+      if (outKey === '__proto__') {
+        Object.defineProperty(out, outKey, { value: clean, enumerable: true, writable: true, configurable: true });
+      } else {
+        out[outKey] = clean;
       }
     }
     return out;
@@ -980,8 +1132,31 @@ function sanitizeText(text: string, state: SanitizeState): string {
   return out;
 }
 
+function stateWith(scrubber: SecretScrubber | null): SanitizeState {
+  return { scrubber, changed: false, ancestors: new Set() };
+}
+
 function newState(sink: RawCaptureSink | undefined): SanitizeState {
-  return { scrubber: scrubberFor(sink), changed: false, ancestors: new Set() };
+  return stateWith(scrubberFor(sink));
+}
+
+function sanitizeValueWith(value: unknown, scrubber: SecretScrubber | null): unknown {
+  const state = stateWith(scrubber);
+  return typeof value === 'string' ? sanitizeText(value, state) : sanitizeNode(value, state, 0);
+}
+
+/**
+ * The secret-value scrub, then `redactUrl`. The value scrub goes first so a
+ * secret holding `/`, `?`, `&` or `@` is matched whole before the structural
+ * rules split the URL on those characters.
+ */
+function cleanUrlWith(url: string, scrubber: SecretScrubber | null): string {
+  return redactUrl(scrubString(url, stateWith(scrubber)));
+}
+
+/** The secret-value scrub, then embedded URLs redacted. */
+function cleanErrorTextWith(text: string, scrubber: SecretScrubber | null): string {
+  return sanitizeErrorText(scrubString(text, stateWith(scrubber)));
 }
 
 /**
@@ -990,22 +1165,17 @@ function newState(sink: RawCaptureSink | undefined): SanitizeState {
  * the input — the plugin still holds the original response.
  */
 export function sanitizeCapturedValue(value: unknown, sink?: RawCaptureSink): unknown {
-  const state = newState(sink);
-  return typeof value === 'string' ? sanitizeText(value, state) : sanitizeNode(value, state, 0);
+  return sanitizeValueWith(value, scrubberFor(sink));
 }
 
-/**
- * `url` as stored on an entry: the secret-value scrub, then `redactUrl`. The
- * value scrub goes first so a secret holding `/`, `?`, `&` or `@` is matched
- * whole before the structural rules split the URL on those characters.
- */
+/** `url` as stored on an entry: the secret-value scrub, then `redactUrl` (`cleanUrlWith`). */
 export function captureUrl(url: string, sink?: RawCaptureSink): string {
-  return redactUrl(scrubString(url, newState(sink)));
+  return cleanUrlWith(url, scrubberFor(sink));
 }
 
 /** Error text as stored on an entry: the secret-value scrub, then embedded URLs redacted. */
 export function captureErrorText(text: string, sink?: RawCaptureSink): string {
-  return sanitizeErrorText(scrubString(text, newState(sink)));
+  return cleanErrorTextWith(text, scrubberFor(sink));
 }
 
 /** Recursively redact sensitive keys in a JSON-parsed value (returns a copy). */
@@ -1153,23 +1323,27 @@ function isMarkedSanitized(sink: RawCaptureSink, entry: RawHttpEntry, field: 'bo
 }
 
 /** A sanitized copy of entry fields (`url`, `final_url`, `error`, bodies, any extra field such as headers). */
-function sanitizeFields<T extends Partial<RawHttpEntry>>(sink: RawCaptureSink, fields: T): T {
+function sanitizeFieldsWith<T extends Partial<RawHttpEntry>>(scrubber: SecretScrubber | null, fields: T): T {
   const out: Record<string, unknown> = { ...fields };
   for (const [key, value] of Object.entries(out)) {
     if (value === undefined || META_FIELDS.has(key)) continue;
     if (key === 'url' || key === 'final_url') {
-      if (typeof value === 'string') out[key] = captureUrl(value, sink);
+      if (typeof value === 'string') out[key] = cleanUrlWith(value, scrubber);
     } else if (key === 'error') {
-      out[key] = captureErrorText(typeof value === 'string' ? value : String(value), sink);
+      out[key] = cleanErrorTextWith(typeof value === 'string' ? value : String(value), scrubber);
     } else if (key === 'body' || key === 'request_body') {
-      out[key] = sanitizeCapturedValue(value, sink);
+      out[key] = sanitizeValueWith(value, scrubber);
     } else if (typeof value === 'string') {
-      out[key] = scrubString(value, newState(sink));
+      out[key] = scrubString(value, stateWith(scrubber));
     } else if (typeof value === 'object') {
-      out[key] = sanitizeNode(value, newState(sink), 0);
+      out[key] = sanitizeNode(value, stateWith(scrubber), 0);
     }
   }
   return out as unknown as T;
+}
+
+function sanitizeFields<T extends Partial<RawHttpEntry>>(sink: RawCaptureSink, fields: T): T {
+  return sanitizeFieldsWith(scrubberFor(sink), fields);
 }
 
 /**
@@ -1399,4 +1573,65 @@ export async function drainRawCapture(
   }
   for (const entry of sink.entries) sanitizeRawEntry(sink, entry);
   sink.closed = true;
+}
+
+// ---------------------------------------------------------------------------
+// A last pass outside the sink (the API's `raw_by_source`)
+// ---------------------------------------------------------------------------
+
+/**
+ * An opaque value scrub built from explicit secrets (`createRawCaptureScrubber`),
+ * for a pass over entries after their sink closed.
+ */
+export interface RawCaptureScrubber {
+  readonly kind: 'raw-capture-scrubber';
+}
+
+const scrubberHandles = new WeakMap<RawCaptureScrubber, SecretScrubber | null>();
+
+/**
+ * A value scrub with the same two tiers as a sink (`SecretScrubber`): first
+ * the server-held secrets — the credential-named values of `env`
+ * (`envSecretValues`, default `process.env`) plus `server` — then the values a
+ * caller may have chosen (`caller`, e.g. `rawCaptureAuthSecrets(input.auth)`).
+ * Occurrences are merged into spans within a tier, so a caller value can never
+ * hide or expose part of a server secret.
+ */
+export function createRawCaptureScrubber(
+  secrets: { env?: NodeJS.ProcessEnv; server?: Iterable<string>; caller?: Iterable<string> } = {},
+): RawCaptureScrubber {
+  const handle: RawCaptureScrubber = Object.freeze({ kind: 'raw-capture-scrubber' as const });
+  const server = [...envSecretValues(secrets.env ?? process.env), ...(secrets.server ?? [])];
+  scrubberHandles.set(handle, buildScrubber(server, secrets.caller ?? []));
+  return handle;
+}
+
+function resolveScrubber(scrubber: RawCaptureScrubber | undefined): SecretScrubber | null {
+  return scrubber ? (scrubberHandles.get(scrubber) ?? null) : null;
+}
+
+/**
+ * A copy of `entry` with every field sanitized again — the same rules as
+ * `drainRawCapture` (layers 1–3), under `scrubber`'s secrets instead of the
+ * sink's. A JSON text body is rewritten only when something in it is redacted,
+ * so an entry with nothing to remove keeps its body exactly as received.
+ * Without a scrubber only the structure and key-name rules apply.
+ */
+export function scrubRawEntry<T extends RawHttpEntry>(entry: T, scrubber?: RawCaptureScrubber): T {
+  const clean: RawHttpEntry = sanitizeFieldsWith(resolveScrubber(scrubber), entry);
+  if (clean.bodies_withheld) {
+    delete clean.body;
+    delete clean.request_body;
+  }
+  return clean as T;
+}
+
+/** A URL scrubbed as `scrubRawEntry` scrubs `url` / `final_url`. */
+export function scrubRawUrl(url: string, scrubber?: RawCaptureScrubber): string {
+  return cleanUrlWith(url, resolveScrubber(scrubber));
+}
+
+/** Error text scrubbed as `scrubRawEntry` scrubs `error`. */
+export function scrubRawErrorText(text: string, scrubber?: RawCaptureScrubber): string {
+  return cleanErrorTextWith(text, resolveScrubber(scrubber));
 }
