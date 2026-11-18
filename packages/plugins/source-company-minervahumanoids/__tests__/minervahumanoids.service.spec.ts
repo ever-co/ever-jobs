@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { ScraperInputDto, Site } from '@ever-jobs/models';
 import { MinervaHumanoidsService } from '../src/minervahumanoids.service';
+import { MINERVAHUMANOIDS_ALLOWED_HOSTS } from '../src/minervahumanoids.constants';
 
 const PUBLISHED_JS = fs.readFileSync(
   path.join(__dirname, 'fixtures', 'published.js'),
@@ -165,5 +166,82 @@ describe('MinervaHumanoidsService', () => {
     expect(res.jobs).toHaveLength(0);
     expect(res.diagnostics?.reason).toBeTruthy();
     expect(res.diagnostics?.reason).not.toBe('empty');
+  });
+
+  it('ignores a non-http applyUrl and keeps the on-site anchors', async () => {
+    const mutated = mutatedPayload((jobs) => {
+      jobs[0].applyUrl = 'javascript:alert(document.cookie)';
+    });
+    mockClient(mutated);
+    const res = await service.scrape(input);
+    const job = res.jobs.find((j) => j.atsId === 'job-1');
+    expect(job!.jobUrl).toBe('https://www.minervahumanoids.com/careers#job-description-job-1');
+    expect(job!.applyUrl).toBe('https://www.minervahumanoids.com/careers#apply');
+  });
+
+  describe('URL pinning (Spec 1689)', () => {
+    it('reads the origin of an on-domain companyUrl, upgrading http to https', async () => {
+      const getMock = jest.fn(() => Promise.resolve({ data: PUBLISHED_JS }));
+      createHttpClient.mockReturnValue({ get: getMock, setHeaders: jest.fn() });
+      const res = await service.scrape(
+        new ScraperInputDto({
+          siteType: [Site.MINERVAHUMANOIDS],
+          resultsWanted: 100,
+          companyUrl: 'http://minervahumanoids.com/careers#apply',
+        }),
+      );
+      expect(getMock).toHaveBeenCalledTimes(1);
+      expect(getMock).toHaveBeenCalledWith('https://minervahumanoids.com/content/published.js');
+      const job = res.jobs.find((j) => j.atsId === 'job-1');
+      expect(job!.jobUrl).toBe('https://minervahumanoids.com/careers#job-description-job-1');
+    });
+
+    it.each([
+      ['off-domain', 'https://evil.example/careers/'],
+      ['lookalike', 'https://minervahumanoids.com.evil.example/careers/'],
+      ['userinfo', 'https://minervahumanoids.com@evil.example/careers/'],
+      ['userinfo on the allowed host', 'https://user:pass@www.minervahumanoids.com/careers/'],
+      ['explicit port', 'https://www.minervahumanoids.com:8443/careers/'],
+      ['metadata IP over http', 'http://169.254.169.254/latest/meta-data/'],
+      ['internal IP', 'http://10.0.0.5:8080/careers/'],
+      ['IPv6 ULA', 'http://[fd00::1]/careers/'],
+      ['cluster DNS', 'http://argocd-server.argocd.svc.cluster.local/'],
+      ['non-http scheme', 'file:///etc/passwd'],
+    ])('ignores a %s companyUrl and fetches the default origin', async (_label, companyUrl) => {
+      const getMock = mockClient();
+      const res = await service.scrape(
+        new ScraperInputDto({ siteType: [Site.MINERVAHUMANOIDS], resultsWanted: 100, companyUrl }),
+      );
+      expect(getMock).toHaveBeenCalledTimes(1);
+      expect(getMock).toHaveBeenCalledWith(
+        'https://www.minervahumanoids.com/content/published.js',
+      );
+      expect(res.jobs).toHaveLength(11);
+      for (const job of res.jobs) {
+        expect(job.companyUrl).toBe('https://www.minervahumanoids.com');
+      }
+    });
+
+    it('logs only the host of a refused companyUrl, never its credentials or query', () => {
+      const debug = jest
+        .spyOn((service as unknown as { logger: { debug: (m: string) => void } }).logger, 'debug')
+        .mockImplementation(() => undefined);
+      (service as unknown as { origin(companyUrl?: string): string }).origin(
+        'https://user:s3cret@evil.example/x?token=t0k',
+      );
+      const logged = debug.mock.calls.map((call) => String(call[0])).join('\n');
+      expect(logged).toContain('evil.example');
+      expect(logged).not.toMatch(/s3cret|t0k|user:/);
+      debug.mockRestore();
+    });
+
+    it('pins every redirect hop to the plugin allowlist', async () => {
+      mockClient();
+      await service.scrape(input);
+      expect(createHttpClient).toHaveBeenCalledWith(
+        expect.objectContaining({ allowedRedirectHosts: MINERVAHUMANOIDS_ALLOWED_HOSTS }),
+      );
+      expect(MINERVAHUMANOIDS_ALLOWED_HOSTS).toEqual(['minervahumanoids.com']);
+    });
   });
 });
