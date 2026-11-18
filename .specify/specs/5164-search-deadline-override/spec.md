@@ -115,3 +115,7 @@ Behaviour matrix (`deadline_ms` value × ceiling):
 - Single-source `ok`/`empty` results are still cached as before.
 - Multi-source search with a failing source → cache write still happens
   (guard is single-source only).
+
+## Hardening note (2026-11-18, Spec 1761)
+
+With `EVER_JOBS_SEARCH_DEADLINE_MAX_MS` unset there was no ceiling, so `deadline_ms=0` or `deadline_ms=` let any caller switch the fan-out deadline off. Since Spec 1761 the ceiling defaults to the fan-out deadline (callers can only shorten it); `0` or exceeding it needs `EVER_JOBS_SEARCH_DEADLINE_ALLOW_UNBOUNDED=true`; blank and malformed values get 400. See [Spec 1761](../1761-fork-sync-2026-11-17-hardening/spec.md) FR-7.

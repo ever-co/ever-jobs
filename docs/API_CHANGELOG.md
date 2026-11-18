@@ -1,5 +1,24 @@
 # API Changelog
 
+### [Unreleased] - 2026-11-18 (fork sync, Spec 1761)
+
+#### Added
+
+- **`include_raw=true` on `POST /api/jobs/search`** (fork Spec 5161): returns the selected source's upstream requests and responses as `raw_by_source`. It is an operator debugging aid, so it is **off by default** and needs every one of the following:
+  - `EVER_JOBS_INCLUDE_RAW_ENABLED=true`; otherwise 403.
+  - `ENABLE_API_KEY_AUTH=true`; otherwise 503.
+  - A key that is in `API_KEYS` (401 for a missing or unknown key) **and** in `EVER_JOBS_INCLUDE_RAW_API_KEYS` (403 if not listed, 503 if the list is empty).
+
+  At most `EVER_JOBS_INCLUDE_RAW_MAX_CONCURRENT` (default 2) such searches run per process; more get 429. Credentials are shown as `REDACTED`: credential-named query params, JSON and form fields, keyed URL paths, and the values of credential-named env vars. Token and auth calls keep no bodies (`bodies_withheld`). A request that names its own target (`companyUrl`, or a host-like `companySlug`) gets metadata-only entries (`body_withheld: "caller_supplied_url"`).
+- **`deadline_ms` on `POST /api/jobs/search`** (fork Spec 5164): shortens this request's fan-out deadline. The applied value is sent in `X-Search-Deadline-Ms`.
+  - It can only shorten the deadline: with `EVER_JOBS_SEARCH_DEADLINE_MAX_MS` unset, the ceiling is the fan-out deadline, and `0` or a larger value is capped.
+  - `EVER_JOBS_SEARCH_DEADLINE_ALLOW_UNBOUNDED=true` lets callers pass `0` (no deadline) or exceed the ceiling.
+  - A blank, whitespace, non-integer, negative, `Infinity` or repeated value gets 400.
+
+#### Changed
+
+- Results whose text fields carry long runs of spaces or zero-width characters, and JSON-LD pages with very large `address` arrays, are now processed in linear time. Normal results are unchanged. An object with more than 200 keys is read by its first 200, and at most 20 address entries per object and 2,000 per page are mapped.
+
 ### [Unreleased] - 2026-11-17
 
 #### Fixed

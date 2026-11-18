@@ -204,3 +204,7 @@ interface RawCaptureSink {
 - GraphQL, `/analyze`, and aggregator paths.
 - Capturing headers or cookies.
 - Changing any plugin's browser fingerprint or launch configuration.
+
+## Hardening note (2026-11-18, Spec 1761)
+
+The fork sync review found that this capture returned the server's own credentials (Adzuna `app_key` in `final_url`, the Jooble key in the path, the Personio `client_secret`, OAuth token responses) and was open to any caller. Spec 1761 adds key-name redaction by normalised substring, a value scrub of credential-named env vars and plugin-registered secrets, no bodies for token or auth calls (`rawCapture: false`, `bodies_withheld`), metadata-only entries when the caller names the target, and a gate: `EVER_JOBS_INCLUDE_RAW_ENABLED=true` plus a key in `EVER_JOBS_INCLUDE_RAW_API_KEYS`. See [Spec 1761](../1761-fork-sync-2026-11-17-hardening/spec.md) FR-1 to FR-6.

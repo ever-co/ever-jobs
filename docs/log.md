@@ -5,6 +5,23 @@
 
 ---
 
+## 2026-11-18 — Spec 1761: fork sync 2026-11-17 hardening (MakeDeeply/ever-jobs@5fd45911)
+
+**Change:** Brought in the MakeDeeply fork tip `5fd45911` (fork PRs up to #185, Specs 5153–5175) with a merge commit (`9f106583`), after a five-lane read-only security review with two-vote verification (14 findings confirmed, 1 refuted). The fixes are on top as Spec 1761:
+- **`include_raw` (Spec 5161):**
+  - It returned the server's own API keys and OAuth tokens: Adzuna `app_key` in `final_url`, the Jooble key in the path, the Personio `client_secret`, and token responses. These are now redacted by key name and scrubbed by value.
+  - Token and auth calls keep no bodies.
+  - `include_raw` now needs `EVER_JOBS_INCLUDE_RAW_ENABLED=true` and a key in `EVER_JOBS_INCLUDE_RAW_API_KEYS`.
+  - When the caller names its own target, the raw entries carry metadata only.
+- **`deadline_ms` (Spec 5164):** callers can only shorten the fan-out deadline unless the operator opts in.
+- **Quadratic CPU:** `normalizeJobPost` uses a linear trim, the location-object mapper is bounded and linear, and `ld+json` extraction is linear.
+- **New plugins:**
+  - The 9 new company plugins pin `companyUrl` to their own domain.
+  - Revoy, Werco, comma_ai and thoron_us got caps and linear parsers.
+  - Jibe refuses non-public tenants.
+
+**Files:** `.specify/specs/1761-fork-sync-2026-11-17-hardening/{spec,plan,tasks}.md`, `docs/index.md`, `docs/API_CHANGELOG.md`, `.env.example`, dated notes in `.specify/specs/5161-raw-http-capture/spec.md` and `.specify/specs/5164-search-deadline-override/spec.md`.
+
 ## 2026-11-17 — Lane-scan fixes (T-2584, T-2586, T-2587)
 
 ### Lane-scan fixes (T-2584, T-2586, T-2587, T-2606)
