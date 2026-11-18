@@ -60,8 +60,66 @@ export interface JobPostingLd {
   baseSalary: JobPostingLdSalary | null;
 }
 
-const SCRIPT_BLOCK_RE =
-  /<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
+/**
+ * The ld+json type attribute, tested only against one opening tag's text
+ * (between `<script` and its first `>`). No quantifiers, so linear.
+ */
+const LD_JSON_TYPE_RE = /type=["']application\/ld\+json["']/i;
+
+/** True when `hay` has `needle` (lower-case ASCII) at `at`, ASCII case-insensitively. */
+function startsWithAsciiCi(hay: string, at: number, needle: string): boolean {
+  if (at + needle.length > hay.length) return false;
+  for (let j = 0; j < needle.length; j++) {
+    let c = hay.charCodeAt(at + j);
+    if (c >= 0x41 && c <= 0x5a) c += 0x20; // A-Z -> a-z
+    if (c !== needle.charCodeAt(j)) return false;
+  }
+  return true;
+}
+
+/**
+ * Index of the next `needle` (lower-case ASCII starting with `<`) at or after
+ * `from`, ASCII case-insensitive like a non-unicode `/i` regex; -1 if none.
+ */
+function indexOfAsciiCi(hay: string, needle: string, from: number): number {
+  for (let i = hay.indexOf('<', from); i !== -1; i = hay.indexOf('<', i + 1)) {
+    if (startsWithAsciiCi(hay, i, needle)) return i;
+  }
+  return -1;
+}
+
+/**
+ * The bodies of every `<script ... type="application/ld+json" ...>` block, in
+ * source order. Same matches as the former
+ * `/<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi`,
+ * found with forward-only index scans instead. That regex re-scanned the rest
+ * of the page from every `<script` it could not complete (an unclosed ld+json
+ * tag, or `<script` with no `>`), so a page of repeated openers cost quadratic
+ * time: 125 KiB of `<script ` took ~4.5 s (fork-sync hardening).
+ */
+function ldJsonScriptBodies(html: string): string[] {
+  const bodies: string[] = [];
+  let pos = 0;
+  for (;;) {
+    const open = indexOfAsciiCi(html, '<script', pos);
+    if (open === -1) break;
+    const tagEnd = html.indexOf('>', open + 7);
+    // No '>' left: no later opener can complete either.
+    if (tagEnd === -1) break;
+    if (!LD_JSON_TYPE_RE.test(html.slice(open + 7, tagEnd))) {
+      // Any other `<script` before tagEnd shares this tag's tail, so it fails
+      // too: resume after the tag.
+      pos = tagEnd + 1;
+      continue;
+    }
+    const close = indexOfAsciiCi(html, '</script>', tagEnd + 1);
+    // No closer left: no later block can close either.
+    if (close === -1) break;
+    bodies.push(html.slice(tagEnd + 1, close));
+    pos = close + 9;
+  }
+  return bodies;
+}
 
 /**
  * Find and JSON-parse every `application/ld+json` block in the HTML. Malformed
@@ -72,10 +130,8 @@ const SCRIPT_BLOCK_RE =
 export function extractLdJsonBlocks(html: string): unknown[] {
   if (!html) return [];
   const blocks: unknown[] = [];
-  SCRIPT_BLOCK_RE.lastIndex = 0;
-  let match: RegExpExecArray | null;
-  while ((match = SCRIPT_BLOCK_RE.exec(html)) !== null) {
-    const raw = match[1]?.trim();
+  for (const body of ldJsonScriptBodies(html)) {
+    const raw = body.trim();
     if (!raw) continue;
     try {
       blocks.push(JSON.parse(raw));
@@ -84,6 +140,22 @@ export function extractLdJsonBlocks(html: string): unknown[] {
     }
   }
   return blocks;
+}
+
+/**
+ * `jobLocation[].address` objects mapped per `JobPosting`, and per page (all
+ * postings of one {@link parseJobPostingLd} call together); address objects
+ * past either cap are skipped. Each one is a structured-location mapping, so
+ * without a cap a page of `"address":[{},{},...]` (3 bytes per entry) held
+ * the event loop for seconds (fork-sync hardening). Real postings list a
+ * handful of locations; a listing page, a few per posting.
+ */
+const MAX_JSONLD_ADDRESSES_PER_POSTING = 100;
+const MAX_JSONLD_ADDRESSES_PER_PAGE = 2000;
+
+/** Address mappings left for the current page. */
+interface AddressBudget {
+  left: number;
 }
 
 /**
@@ -97,7 +169,8 @@ export function parseJobPostingLd(html: string): JobPostingLd[] {
   for (const block of extractLdJsonBlocks(html)) {
     collectJobPostings(block, nodes);
   }
-  return nodes.map(mapJobPosting);
+  const budget: AddressBudget = { left: MAX_JSONLD_ADDRESSES_PER_PAGE };
+  return nodes.map((node) => mapJobPosting(node, budget));
 }
 
 /**
@@ -126,7 +199,9 @@ export function jobPostingLdFromNode(
   }
   const nodes: Record<string, unknown>[] = [];
   collectJobPostings(parsed, nodes);
-  return nodes.length > 0 ? mapJobPosting(nodes[0]) : null;
+  return nodes.length > 0
+    ? mapJobPosting(nodes[0], { left: MAX_JSONLD_ADDRESSES_PER_PAGE })
+    : null;
 }
 
 /** Convenience: map a {@link JobPostingLdSalary} to a {@link CompensationDto}. */
@@ -175,7 +250,10 @@ function collectJobPostings(
   }
 }
 
-function mapJobPosting(node: Record<string, unknown>): JobPostingLd {
+function mapJobPosting(
+  node: Record<string, unknown>,
+  budget: AddressBudget,
+): JobPostingLd {
   return {
     title: firstString(node.title) ?? firstString(node.name),
     description: firstString(node.description),
@@ -187,17 +265,22 @@ function mapJobPosting(node: Record<string, unknown>): JobPostingLd {
     url: firstString(node.url),
     applyUrl: applyUrl(node.potentialAction),
     remote: firstString(node.jobLocationType)?.toUpperCase() === 'TELECOMMUTE',
-    locations: mapLocations(node.jobLocation),
+    locations: mapLocations(node.jobLocation, budget),
     baseSalary: mapSalary(node.baseSalary),
   };
 }
 
-function mapLocations(value: unknown): JobPostingLdLocation[] {
+function mapLocations(value: unknown, budget: AddressBudget): JobPostingLdLocation[] {
   const out: JobPostingLdLocation[] = [];
+  let left = Math.min(MAX_JSONLD_ADDRESSES_PER_POSTING, budget.left);
   for (const place of asArray(value)) {
+    if (left <= 0) break;
     if (!isObject(place)) continue;
     for (const address of asArray(place.address)) {
+      if (left <= 0) break;
       if (!isObject(address)) continue;
+      left--;
+      budget.left--;
       const dto = toLocationDto(address, {
         prefer: { country: 'addressCountry.name' },
       });
