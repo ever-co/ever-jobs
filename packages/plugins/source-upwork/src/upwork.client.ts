@@ -1,6 +1,10 @@
 import { Logger } from '@nestjs/common';
 import { UpworkAuthDto, UpworkGrantType } from '@ever-jobs/models';
-import { createHttpClient, registerRawCaptureSecrets } from '@ever-jobs/common';
+import {
+  createHttpClient,
+  registerRawCaptureSecrets,
+  registerServerRawCaptureSecrets,
+} from '@ever-jobs/common';
 
 import {
   UPWORK_TOKEN_URL,
@@ -91,6 +95,9 @@ export class UpworkTokenProvider {
   /** Epoch ms at which {@link cachedToken} should no longer be used. */
   private cachedExpiresAt = 0;
   private refreshToken?: string;
+  /** Tokens Upwork itself returned — unlike `auth`, never chosen by a caller. */
+  private issuedAccessToken?: string;
+  private issuedRefreshToken?: string;
 
   constructor(
     private readonly auth: UpworkAuthDto,
@@ -121,12 +128,16 @@ export class UpworkTokenProvider {
   async getAccessToken(force = false): Promise<string> {
     // Spec 5161 (`include_raw`): scrub the credentials and tokens from every
     // captured entry of this scrape — a provider and its token outlive one scrape.
+    // `auth` may come from input.auth, so it is scrubbed after the server-held
+    // secrets (env credentials are already among those); tokens Upwork issued
+    // are server-held.
     registerRawCaptureSecrets([
       this.auth.clientId,
       this.auth.clientSecret,
-      this.refreshToken,
-      this.cachedToken,
+      this.auth.accessToken,
+      this.auth.refreshToken,
     ]);
+    registerServerRawCaptureSecrets([this.issuedAccessToken, this.issuedRefreshToken]);
     if (!force && !this.needsToken && this.cachedToken) {
       return this.cachedToken;
     }
@@ -137,8 +148,12 @@ export class UpworkTokenProvider {
         : await this.refreshAccessToken();
 
     this.cachedToken = token.access_token;
-    if (token.refresh_token) this.refreshToken = token.refresh_token;
-    registerRawCaptureSecrets([this.cachedToken, this.refreshToken]);
+    this.issuedAccessToken = token.access_token;
+    if (token.refresh_token) {
+      this.refreshToken = token.refresh_token;
+      this.issuedRefreshToken = token.refresh_token;
+    }
+    registerServerRawCaptureSecrets([this.issuedAccessToken, this.issuedRefreshToken]);
     this.cachedExpiresAt = token.expires_in
       ? Date.now() +
         (token.expires_in - UPWORK_TOKEN_EXPIRY_SKEW_SECONDS) * 1000

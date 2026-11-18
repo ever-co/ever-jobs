@@ -20,6 +20,7 @@ import {
   extractEmails,
   parseLocationText,
   registerRawCaptureSecrets,
+  registerServerRawCaptureSecrets,
   toDateOnly,
 } from '@ever-jobs/common';
 import {
@@ -171,7 +172,9 @@ export class PersonioService implements IScraper {
       timeout: input.requestTimeout,
     });
 
-    // Spec 5161 (`include_raw`): scrub these from every captured entry.
+    // Spec 5161 (`include_raw`): scrub these from every captured entry. They
+    // may come from input.auth, so they are scrubbed after the server-held
+    // secrets (env credentials are already among those).
     registerRawCaptureSecrets([clientId, clientSecret]);
 
     // Step 1: Authenticate to obtain Bearer token. `rawCapture: false` keeps the
@@ -192,7 +195,8 @@ export class PersonioService implements IScraper {
     if (!token) {
       throw new Error('Personio API auth response did not include a token');
     }
-    registerRawCaptureSecrets(token);
+    // Issued by Personio, so no caller chose it: scrubbed with the server-held secrets.
+    registerServerRawCaptureSecrets(token);
 
     // Step 2: Fetch active positions with pagination
     const resultsWanted = input.resultsWanted ?? 100;

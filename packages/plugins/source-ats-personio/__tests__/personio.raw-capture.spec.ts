@@ -77,4 +77,19 @@ describe('PersonioService under include_raw', () => {
     expect(sink.entries[1].url).toContain('/v1/recruiting/positions');
     expect(sink.entries[1].body).toEqual({ success: true, data: [], meta: { note: 'authorized as Bearer REDACTED' } });
   });
+
+  it('scrubs the issued token before caller-supplied credentials that overlap it', async () => {
+    const sink = createRawCaptureSink();
+    // A caller "secret" that overlaps the token's first character in the echo:
+    // scrubbed in one pass, it used to consume the `F` and leave the rest.
+    const auth = { personio: { clientId: 'FAKE_CALLER_CLIENT_1', clientSecret: 'Bearer F' } };
+
+    await runWithRawCapture(sink, () =>
+      new PersonioService().scrape(new ScraperInputDto({ companySlug: 'acme', auth } as never)),
+    );
+    await drainRawCapture(sink, 100);
+
+    expect(JSON.stringify(sink.entries)).not.toContain(TOKEN.slice(1));
+    expect(sink.entries[1].body).toEqual({ success: true, data: [], meta: { note: 'authorized as Bearer REDACTED' } });
+  });
 });
