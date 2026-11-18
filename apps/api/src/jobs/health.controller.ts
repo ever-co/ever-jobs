@@ -55,6 +55,7 @@ import {
 } from '@ever-jobs/common';
 import { IPluginMetadata, PluginRegistry } from '@ever-jobs/plugin';
 import { AdminAuth } from '../auth/admin-auth.decorator';
+import { API_KEY_SECURITY_SCHEME } from '../openapi';
 import { redactCredentials } from '../utils/redact-credentials';
 import { CRAWL_PSEUDO_SITES } from './crawl-policy.mapping';
 
@@ -329,7 +330,7 @@ export class SourcesHealthController {
       'Operator action: short-circuits all `scrape()` calls for the ' +
       'named source until an explicit reset. Requires an API key.',
   })
-  @ApiSecurity('ApiKey')
+  @ApiSecurity(API_KEY_SECURITY_SCHEME)
   @ApiResponse({
     status: 200,
     description: 'Breaker forced open; returns the new SourceHealth row.',
@@ -369,7 +370,7 @@ export class SourcesHealthController {
       'Operator action: clears any forced-open state and the rolling-' +
       'window samples for the named source. Requires an API key.',
   })
-  @ApiSecurity('ApiKey')
+  @ApiSecurity(API_KEY_SECURITY_SCHEME)
   @ApiResponse({
     status: 200,
     description: 'Breaker reset; returns the new SourceHealth row.',
