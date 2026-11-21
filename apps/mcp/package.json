@@ -13,9 +13,9 @@
     "dev": "ts-node src/index.ts"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.25.0",
-    "zod": "^3.23.0",
-    "axios": "^1.7.0",
+    "@modelcontextprotocol/sdk": "^1.32.0",
+    "zod": "^4.6.7",
+    "axios": "^1.21.1",
     "express": "^4.21.2",
     "tslib": "^2.8.1"
   },

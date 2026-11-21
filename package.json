@@ -45,13 +45,13 @@
     "@nestjs/common": "^11.1.28",
     "@nestjs/config": "^4.0.4",
     "@nestjs/core": "^11.1.28",
-    "@nestjs/graphql": "^13.4.2",
+    "@nestjs/graphql": "^14.2.1",
     "@nestjs/platform-express": "^11.1.28",
     "@nestjs/swagger": "^11.4.5",
     "@nestjs/throttler": "^6.5.0",
     "@prisma/client": "^6.5.0",
     "@scalar/nestjs-api-reference": "^1.2.9",
-    "axios": "^1.16.0",
+    "axios": "^1.21.1",
     "better-sqlite3": "^12.9.0",
     "cache-manager": "^7.2.9",
     "cacheable": "^2.5.0",
@@ -60,7 +60,7 @@
     "class-validator": "^0.15.1",
     "dotenv": "^17.2.4",
     "drizzle-orm": "^0.45.2",
-    "exa-js": "^2.16.0",
+    "exa-js": "^2.29.0",
     "graphql": "^16.9.0",
     "https-proxy-agent": "^7.0.0",
     "keyv": "^5.6.0",
@@ -76,7 +76,7 @@
     "turndown": "^7.2.0",
     "unpdf": "^1.6.2",
     "uuid": "^13.0.0",
-    "zod": "^3.23.0"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@nestjs/cli": "^11.0.24",
@@ -95,7 +95,7 @@
     "@typescript-eslint/parser": "^8.65.0",
     "eslint": "^10.8.0",
     "jest": "^30.2.0",
-    "nx": "^19.0.0",
+    "nx": "^24.0.6",
     "prisma": "^6.5.0",
     "supertest": "^7.2.2",
     "testcontainers": "^12.0.4",
@@ -150,7 +150,7 @@
     "@apollo/server": {
       "uuid": "11.1.1"
     },
-    "fast-uri": "^3.1.4",
+    "fast-uri": "^3.1.9",
     "@nestjs/swagger": {
       "js-yaml": "^4.3.0"
     },
