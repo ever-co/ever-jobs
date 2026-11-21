@@ -10,7 +10,7 @@
  *
  * Tools:
  *   - search_jobs: Search for jobs across all sources
- *   - get_job_details: Get detailed information about a specific job
+ *   - get_job_details: Full details of a job a recent search returned
  *   - list_sources: List all available job sources
  *   - search_remote_jobs: Convenience tool for remote job search
  *   - get_salary_insights: Salary analysis for a given role
@@ -131,18 +131,21 @@ function createServer(): Server {
       {
         name: 'get_job_details',
         description:
-          'Get detailed information about a specific job posting by its URL. ' +
-          'Returns the full job description, requirements, salary info, and application link.',
+          'Get the full details of a job that search_jobs, search_remote_jobs or get_salary_insights ' +
+          'returned, by its job_id or job_url (give both from the same result when you have them). ' +
+          'Returns the full (untruncated) description, salary info ' +
+          'and application link. Answers from the last 1000 jobs this server found in its searches, ' +
+          'without a new search; any other job is an error asking you to call search_jobs first.',
         inputSchema: {
           type: 'object' as const,
           properties: {
             job_url: {
               type: 'string',
-              description: 'The full URL of the job posting to get details for',
+              description: 'The job URL (the url field of a search_jobs result)',
             },
             job_id: {
               type: 'string',
-              description: 'The Ever Jobs internal job ID (returned from search_jobs)',
+              description: 'The job ID (the id field of a search_jobs result)',
             },
           },
           required: [],
@@ -168,8 +171,8 @@ function createServer(): Server {
       {
         name: 'search_remote_jobs',
         description:
-          'Search specifically for remote jobs across remote-first job boards ' +
-          '(RemoteOK, Remotive, We Work Remotely, Jobicy, Himalayas, Arbeitnow). ' +
+          'Search specifically for remote jobs across every remote-first job board ' +
+          '(the sources that list_sources reports with type "remote"). ' +
           'Automatically filters for remote positions only.',
         inputSchema: {
           type: 'object' as const,
@@ -184,7 +187,7 @@ function createServer(): Server {
             },
             limit: {
               type: 'number',
-              description: 'Maximum results (default: 25)',
+              description: 'Maximum results (default: 25, max: 100)',
             },
           },
           required: ['query'],
@@ -208,7 +211,7 @@ function createServer(): Server {
             },
             limit: {
               type: 'number',
-              description: 'Number of jobs to sample for salary data (default: 50)',
+              description: 'Number of jobs to sample for salary data (default: 50, max: 100)',
             },
           },
           required: ['query'],
@@ -408,8 +411,8 @@ Filter for remote positions:
   search_jobs(query: "frontend developer", remote_only: true)
 
 ## Source Types
-- **Job Boards**: linkedin, indeed, glassdoor, ziprecruiter, dice, monster, builtin, snagajob, dribbble, themuse, startupjobs, fourdayweek, web3career, echojobs, jobstreet, careeronestop, arbeitsagentur, hackernews, landingjobs, authenticjobs, cryptojobslist, higheredjobs, fossjobs, larajobs, pythonjobs, drupaljobs, golangjobs, wordpressjobs, infojobs, jobtechdev, francetravail, navjobs, jobsacuk, jobindex, getonboard, freelancercom, joinrise, canadajobbank, reliefweb, undpjobs, devitjobs, pyjobs, vuejobs, conservationjobs, coroflot, berlinstartupjobs, railsjobs, elixirjobs, crunchboard, cryptocurrencyjobs, hasjob, icrunchdata, swissdevjobs, germantechjobs, nofluffjobs, greenjobsboard, eurojobs, opensourcedesignjobs, academiccareers, djinni, headhunter, habrcareer, mycareersfuture, duunitori, jobsinjapan, jobsch, guardianjobs, androidjobs, iosdevjobs, devopsjobs, functionalworks, powertofly, clojurejobs, ecojobs, techcareers, jobsdb, sercanto
-- **Remote Boards**: remoteok, remotive, weworkremotely, jobicy, himalayas, arbeitnow, workingnomads, nodesk, jobspresso, realworkfromanywhere, virtualvocations, remotefirstjobs
+- **Job Boards**: linkedin, indeed, glassdoor, ziprecruiter, dice, monster, builtin, snagajob, dribbble, themuse, startupjobs, web3career, echojobs, jobstreet, careeronestop, arbeitsagentur, hackernews, landingjobs, authenticjobs, cryptojobslist, higheredjobs, fossjobs, larajobs, pythonjobs, drupaljobs, golangjobs, wordpressjobs, infojobs, jobtechdev, francetravail, navjobs, jobsacuk, jobindex, getonboard, freelancercom, joinrise, canadajobbank, reliefweb, undpjobs, devitjobs, pyjobs, vuejobs, conservationjobs, coroflot, berlinstartupjobs, railsjobs, elixirjobs, crunchboard, cryptocurrencyjobs, hasjob, icrunchdata, swissdevjobs, germantechjobs, nofluffjobs, greenjobsboard, eurojobs, opensourcedesignjobs, academiccareers, djinni, headhunter, habrcareer, mycareersfuture, duunitori, jobsinjapan, jobsch, guardianjobs, androidjobs, iosdevjobs, devopsjobs, functionalworks, powertofly, clojurejobs, ecojobs, techcareers, jobsdb, sercanto
+- **Remote Boards**: remoteok, remotive, weworkremotely, jobicy, himalayas, arbeitnow, workingnomads, fourdayweek, nodesk, jobspresso, realworkfromanywhere, virtualvocations, remotefirstjobs
 - **ATS Platforms**: greenhouse, lever, ashby, workable, workday, manatal, paylocity, bullhorn, phenom, deel, fountain, loxo, breezyhr, comeet, pinpoint, jobylon, homerun, jobscore, talentlyft, crelate, ismartrecruit, recruiterflow, and more
 - **API Aggregators**: adzuna, reed, jooble, careerjet, usajobs, findwork, jobdataapi, talroo
 - **Company Pages**: google_careers, meta, netflix, stripe, openai, amazon, apple, microsoft, ibm, boeing, zoom

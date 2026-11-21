@@ -9,7 +9,10 @@ import axios, { AxiosInstance } from 'axios';
 
 // ── Configuration ──────────────────────────────────────────────────────
 
-const API_URL = process.env.EVER_JOBS_API_URL ?? 'http://localhost:3001';
+/** Read per call (not at import) so the configured URL is always the one reported. */
+function getApiUrl(env: NodeJS.ProcessEnv = process.env): string {
+  return env.EVER_JOBS_API_URL ?? 'http://localhost:3001';
+}
 
 /**
  * Which key spelling `searchJobs` uses in the `POST /api/jobs/search` body
@@ -64,11 +67,55 @@ export function readLocationFormat(
   return raw === 'city' ? 'city' : 'full';
 }
 
+export const MCP_API_KEY_ENV_VAR = 'EVER_JOBS_API_KEY';
+export const MCP_API_KEY_HEADER_ENV_VAR = 'EVER_JOBS_API_KEY_HEADER';
+const DEFAULT_API_KEY_HEADER = 'x-api-key';
+
+/**
+ * Headers for every API request. When `EVER_JOBS_API_KEY` is set the key is
+ * sent under `EVER_JOBS_API_KEY_HEADER` (default `x-api-key`, matching the
+ * API's `API_KEY_HEADER_NAME` default); with no key, no key header is sent.
+ */
+function buildHeaders(env: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  const apiKey = env[MCP_API_KEY_ENV_VAR]?.trim();
+  if (apiKey) {
+    const headerName = env[MCP_API_KEY_HEADER_ENV_VAR]?.trim() || DEFAULT_API_KEY_HEADER;
+    headers[headerName] = apiKey;
+  }
+  return headers;
+}
+
+/**
+ * `EVER_JOBS_API_URL` as it may appear in a tool error: any `user:password@`
+ * part is dropped, so basic-auth credentials put in the URL are never echoed
+ * to the MCP client.
+ */
+export function displayApiUrl(url: string = getApiUrl()): string {
+  return url.replace(/^([a-z][a-z0-9+.-]*:\/\/)[^/?#]*@/i, '$1');
+}
+
+/**
+ * The reason text for a failed API request. A refused connection names the
+ * API URL, so an unreachable API never looks like "no jobs found". An error
+ * with no message (Node's AggregateError when every address of a dual-stack
+ * host such as `localhost` fails) falls back to its code.
+ */
+export function describeRequestError(err: any, url: string = getApiUrl()): string {
+  if (err?.code === 'ECONNREFUSED') {
+    return (
+      `the Ever Jobs API at ${displayApiUrl(url)} is unreachable (connection refused). ` +
+      'Check that it is running and that EVER_JOBS_API_URL is correct.'
+    );
+  }
+  return err?.message || err?.code || String(err);
+}
+
 function getClient(): AxiosInstance {
   return axios.create({
-    baseURL: API_URL,
+    baseURL: getApiUrl(),
     timeout: 60_000,
-    headers: { 'Content-Type': 'application/json' },
+    headers: buildHeaders(),
   });
 }
 
@@ -80,6 +127,11 @@ export interface JobSearchParams {
   /** Spec 1700 — several locations; each source is searched once per location. */
   locations?: string[];
   source?: string;
+  /**
+   * Several sources to search (sent as `siteType`). Used only when `source` is
+   * not set; with neither, the API searches its default catalogue.
+   */
+  sources?: string[];
   company?: string;
   limit?: number;
   remoteOnly?: boolean;
@@ -206,6 +258,10 @@ export const MCP_MAX_LOCATION_LENGTH = 200;
 export const MCP_MAX_EXCLUSION_TERMS = 50;
 /** Longest accepted exclusion term (Spec 1700). */
 export const MCP_MAX_EXCLUSION_TERM_LENGTH = 100;
+/** A search tool's `limit` when none, or no usable one, is given (T-2585). */
+export const MCP_DEFAULT_SEARCH_LIMIT = 20;
+/** Most jobs one search tool call returns, and the largest `resultsWanted` sent (T-2585). */
+export const MCP_MAX_SEARCH_LIMIT = 100;
 
 /**
  * Posting-time detail (Spec 1696). Each key is present only when the API sent
@@ -236,7 +292,14 @@ export interface JobResult extends PostedTimeDetail {
 }
 
 export interface SearchResponse {
+  /** Jobs returned in `jobs`: at most the search's `limit` (T-2585). */
   total: number;
+  /**
+   * Jobs found (after `remote_only`) before the list was cut to `limit`
+   * (T-2585). Present only when jobs were cut, so a response within the limit
+   * keeps its previous shape.
+   */
+  total_found?: number;
   jobs: JobResult[];
   sources_searched: string[];
   query: string;
@@ -371,7 +434,7 @@ const SOURCES: SourceInfo[] = [
   // Phase 9: Job Board Expansion
   { name: 'The Muse', id: 'themuse', type: 'job_board', requires_company_slug: false, description: 'Career advice and curated job listings' },
   { name: 'Working Nomads', id: 'workingnomads', type: 'remote', requires_company_slug: false, description: 'Curated remote jobs worldwide' },
-  { name: '4 Day Week', id: 'fourdayweek', type: 'job_board', requires_company_slug: false, description: '4-day work week job listings' },
+  { name: '4 Day Week', id: 'fourdayweek', type: 'remote', requires_company_slug: false, description: '4-day work week job listings' },
   { name: 'Startup.jobs', id: 'startupjobs', type: 'job_board', requires_company_slug: false, description: 'Startup jobs worldwide' },
   { name: 'NoDesk', id: 'nodesk', type: 'remote', requires_company_slug: false, description: 'Remote and flexible jobs' },
   { name: 'Web3 Career', id: 'web3career', type: 'job_board', requires_company_slug: false, description: 'Web3/crypto/blockchain jobs' },
@@ -470,10 +533,85 @@ const SOURCES: SourceInfo[] = [
   { name: 'EcoJobs', id: 'ecojobs', type: 'job_board', requires_company_slug: false, description: 'Environmental and conservation job board' },
 ];
 
+// ── Recent search results (get_job_details) ───────────────────────────
+//
+// The API has no route that returns one job (it serves `POST /api/jobs/search`
+// and `POST /api/jobs/analyze` only), so `getJobDetails` answers from the raw
+// API jobs that this process's `searchJobs` calls received (T-2586). The memory
+// is per process: in HTTP mode (`MCP_TRANSPORT=http`) each replica keeps its
+// own, so details work for jobs found by the same server process.
+
+/** How many jobs `searchJobs` remembers for `getJobDetails`; the oldest are dropped first. */
+export const MCP_RECENT_JOBS_LIMIT = 1000;
+
+const JOB_NOT_FOUND = 'job not found in recent search results; call search_jobs first';
+
+interface RecentJob {
+  /** The job object exactly as `POST /api/jobs/search` returned it. */
+  job: Record<string, unknown>;
+  /** The lookup keys (`id:<id>`, `url:<jobUrl>`) that point at this job. */
+  keys: string[];
+}
+
+/** Remembered jobs, oldest first (a Set keeps insertion order). */
+const recentJobs = new Set<RecentJob>();
+/** Lookup by `id:<id>` and `url:<jobUrl>`: at most two keys per remembered job. */
+const recentJobsByKey = new Map<string, RecentJob>();
+
+function lookupKey(kind: 'id' | 'url', value: unknown): string | null {
+  const text = nonEmpty(value);
+  return text ? `${kind}:${text}` : null;
+}
+
+/** The lookup keys of a raw API job: `id:<id>` and `url:<jobUrl>`, when present. */
+function jobKeys(raw: Record<string, unknown>): string[] {
+  return [lookupKey('id', raw.id), lookupKey('url', raw.jobUrl ?? raw.job_url)].filter(
+    (key): key is string => key !== null,
+  );
+}
+
+/**
+ * Remember one raw API job under its id and its job URL. A job found again
+ * becomes the newest. A key that pointed at another job now points at this one;
+ * the other job stays reachable by its remaining key, and is dropped when it
+ * has none left. Past {@link MCP_RECENT_JOBS_LIMIT} jobs the oldest is dropped.
+ */
+function rememberJob(job: unknown): void {
+  if (!job || typeof job !== 'object') return;
+  const raw = job as Record<string, unknown>;
+  const keys = jobKeys(raw);
+  if (keys.length === 0) return;
+
+  for (const key of keys) {
+    const previous = recentJobsByKey.get(key);
+    if (!previous) continue;
+    previous.keys = previous.keys.filter((k) => k !== key);
+    if (previous.keys.length === 0) recentJobs.delete(previous);
+  }
+
+  const entry: RecentJob = { job: raw, keys };
+  recentJobs.add(entry);
+  for (const key of keys) recentJobsByKey.set(key, entry);
+
+  while (recentJobs.size > MCP_RECENT_JOBS_LIMIT) {
+    const oldest = recentJobs.values().next().value;
+    if (!oldest) break;
+    recentJobs.delete(oldest);
+    for (const key of oldest.keys) recentJobsByKey.delete(key);
+  }
+}
+
+/** How many jobs `getJobDetails` can currently answer for (never above {@link MCP_RECENT_JOBS_LIMIT}). */
+export function recentJobCount(): number {
+  return recentJobs.size;
+}
+
 // ── Tool Implementations ───────────────────────────────────────────────
 
 /**
- * Search for jobs via the Ever Jobs API.
+ * Search for jobs via the Ever Jobs API. Every job it returns, and the first
+ * other jobs received up to {@link MCP_RECENT_JOBS_LIMIT} in all, are
+ * remembered for {@link getJobDetails}.
  */
 export async function searchJobs(params: JobSearchParams): Promise<SearchResponse> {
   const client = getClient();
@@ -503,70 +641,91 @@ export async function searchJobs(params: JobSearchParams): Promise<SearchRespons
       ? jobs.filter((j) => j.is_remote)
       : jobs;
 
+    // The API applies resultsWanted per source (and per location), so its
+    // answer can be far longer than `limit`: cut it here, after the
+    // remote_only filter, keeping jobs from every source (T-2585).
+    const returnedJobs = takeJobsAcrossSources(filteredJobs, normalizeSearchLimit(params.limit));
+
+    // A search across the whole catalogue can return more jobs than the memory
+    // holds, and the cut takes each source's jobs in turn, so it can return jobs
+    // listed past the first MCP_RECENT_JOBS_LIMIT. Remember, in the API's order,
+    // every returned job and as many of the others as there is room for, first
+    // ones first: at most MCP_RECENT_JOBS_LIMIT jobs, so this response cannot
+    // push its own returned jobs out.
+    const returned = new Set(returnedJobs);
+    let room = MCP_RECENT_JOBS_LIMIT - returnedJobs.length;
+    jobs.forEach((job, index) => {
+      if (returned.has(job)) {
+        rememberJob(data.jobs[index]);
+      } else if (room > 0) {
+        room--;
+        rememberJob(data.jobs[index]);
+      }
+    });
+
     return {
-      total: filteredJobs.length,
-      jobs: filteredJobs,
-      sources_searched: params.source ? [params.source] : ['all'],
+      total: returnedJobs.length,
+      ...(filteredJobs.length > returnedJobs.length ? { total_found: filteredJobs.length } : {}),
+      jobs: returnedJobs,
+      sources_searched: requestedSites(params) ?? ['all'],
       query: params.query,
       ...(hasExclusions(params)
         ? { excluded: Number(data.exclusion_metrics?.excluded_count ?? 0) || 0 }
         : {}),
     };
   } catch (err: any) {
-    // If the API is unavailable, return a helpful error
-    if (err.code === 'ECONNREFUSED') {
-      return {
-        total: 0,
-        jobs: [],
-        sources_searched: [],
-        query: params.query,
-      };
-    }
-    throw new Error(`Search failed: ${err.message}`);
+    // An unreachable API must not look like "no jobs found": fail loudly.
+    throw new Error(`Search failed: ${describeRequestError(err)}`);
   }
 }
 
 /**
- * Get detailed information about a specific job.
+ * Get detailed information about a job that a recent search returned, by its
+ * id (looked up first) or its job URL; given both, the job that has both wins.
+ * Answers from the jobs {@link searchJobs} remembered and makes no API request;
+ * an unknown job is an error asking the caller to search first.
  */
 export async function getJobDetails(params: {
   jobUrl?: string;
   jobId?: string;
 }): Promise<JobDetailsResponse> {
-  if (!params.jobUrl && !params.jobId) {
+  const idKey = lookupKey('id', params.jobId);
+  const urlKey = lookupKey('url', params.jobUrl);
+  if (!idKey && !urlKey) {
     throw new Error('Either job_url or job_id must be provided');
   }
 
-  const client = getClient();
-
-  try {
-    const response = await client.get('/api/jobs/details', {
-      params: {
-        url: params.jobUrl,
-        id: params.jobId,
-      },
-    });
-
-    const job = response.data;
-    return {
-      id: job.id ?? '',
-      title: job.title ?? '',
-      company: job.companyName ?? job.company_name ?? '',
-      location: formatJobLocation(job.location, readLocationFormat()),
-      url: job.jobUrl ?? job.job_url ?? '',
-      description: truncateDescription(job.description),
-      full_description: job.description ?? null,
-      date_posted: job.datePosted ?? job.date_posted ?? null,
-      ...postedTimeDetail(job),
-      is_remote: job.isRemote ?? job.is_remote ?? false,
-      source: job.site ?? '',
-      salary: formatSalary(job.compensation),
-      department: job.department ?? null,
-      application_url: job.applicationUrl ?? job.application_url ?? job.jobUrl ?? null,
-    };
-  } catch (err: any) {
-    throw new Error(`Failed to get job details: ${err.message}`);
+  const byId = idKey ? recentJobsByKey.get(idKey) : undefined;
+  const byUrl = urlKey ? recentJobsByKey.get(urlKey) : undefined;
+  // Given both, answer with the job that has both. Some sources reuse an id
+  // across searches (Working Nomads numbers its jobs per search), so the id
+  // alone can point at a newer, different job while the URL still names the
+  // one the caller means.
+  const hasBoth = (entry: RecentJob | undefined): boolean =>
+    !!entry && !!idKey && !!urlKey && jobKeys(entry.job).includes(idKey) && jobKeys(entry.job).includes(urlKey);
+  const found = (hasBoth(byUrl) && !hasBoth(byId) ? byUrl : byId) ?? byUrl;
+  if (!found) {
+    throw new Error(JOB_NOT_FOUND);
   }
+
+  const job = found.job as any;
+  return {
+    id: job.id ?? '',
+    title: job.title ?? '',
+    company: job.companyName ?? job.company_name ?? '',
+    location: formatJobLocation(job.location, readLocationFormat()),
+    url: job.jobUrl ?? job.job_url ?? '',
+    description: truncateDescription(job.description),
+    full_description: job.description ?? null,
+    date_posted: job.datePosted ?? job.date_posted ?? null,
+    ...postedTimeDetail(job),
+    is_remote: job.isRemote ?? job.is_remote ?? false,
+    source: job.site ?? '',
+    salary: formatSalary(job.compensation),
+    department: job.department ?? null,
+    application_url:
+      job.applyUrl ?? job.apply_url ?? job.applicationUrl ?? job.application_url ?? job.jobUrl ?? null,
+  };
 }
 
 /**
@@ -587,7 +746,10 @@ export function listSources(
 }
 
 /**
- * Convenience: search remote jobs across all remote-first boards.
+ * Convenience: search remote jobs across all remote-first boards. A `source`
+ * that is a remote board narrows the search to it; without one (or with a
+ * source that is not a remote board) every remote board is sent as `siteType`,
+ * so the API never falls back to its whole-catalogue fan-out.
  */
 export async function searchRemoteJobs(params: {
   query: string;
@@ -603,6 +765,7 @@ export async function searchRemoteJobs(params: {
     query: params.query,
     location: 'Remote',
     source: targetSource,
+    ...(targetSource ? {} : { sources: remoteSources }),
     limit: params.limit ?? 25,
     remoteOnly: true,
   });
@@ -730,12 +893,63 @@ export function compareSources(): {
 // ── Helpers ────────────────────────────────────────────────────────────
 
 /**
+ * A search tool's `limit` as a whole number of jobs, 1 to
+ * {@link MCP_MAX_SEARCH_LIMIT} (T-2585). A number, or a numeric string (some
+ * clients stringify arguments), is rounded down and capped at 100; anything
+ * else, and anything below 1, gives {@link MCP_DEFAULT_SEARCH_LIMIT}.
+ *
+ * It is both the `resultsWanted` sent to the API and the most jobs
+ * {@link searchJobs} returns: the API applies `resultsWanted` per source (and
+ * per location when `locations` is set), so its answer can be far longer.
+ */
+export function normalizeSearchLimit(limit: unknown): number {
+  const n =
+    typeof limit === 'number'
+      ? limit
+      : typeof limit === 'string' && limit.trim() !== ''
+        ? Number(limit)
+        : NaN;
+  if (!(n >= 1)) return MCP_DEFAULT_SEARCH_LIMIT;
+  return Math.min(Math.floor(n), MCP_MAX_SEARCH_LIMIT);
+}
+
+/**
+ * At most `limit` of `jobs`, shared across their sources (T-2585). The API
+ * sorts its answer by site name, then newest first, so the first `limit` jobs
+ * of a search over several sources would all come from the first site in
+ * alphabetical order. This takes each source's jobs in turn (its first job,
+ * then every source's second job, and so on) until `limit` are picked, and
+ * returns them in the order they had in `jobs`. A list within the limit is
+ * returned as it is.
+ */
+export function takeJobsAcrossSources<T extends { source: string }>(jobs: T[], limit: number): T[] {
+  if (jobs.length <= limit) return jobs;
+  const bySource = new Map<string, number[]>();
+  jobs.forEach((job, index) => {
+    const indexes = bySource.get(job.source);
+    if (indexes) indexes.push(index);
+    else bySource.set(job.source, [index]);
+  });
+  const queues = [...bySource.values()];
+  const picked: number[] = [];
+  for (let round = 0; picked.length < limit; round++) {
+    for (const queue of queues) {
+      if (round < queue.length) picked.push(queue[round]);
+      if (picked.length === limit) break;
+    }
+  }
+  return picked.sort((a, b) => a - b).map((index) => jobs[index]);
+}
+
+/**
  * Build the `POST /api/jobs/search` body for {@link searchJobs}. See
  * {@link SearchRequestKeyStyle} for why camelCase is the default (Specs 1689,
  * 1690 §4.9).
  *
- * An absent source or company is omitted, not sent as an `undefined` key, so an
- * unfiltered search stays exactly `{ searchTerm, location, resultsWanted }`. The
+ * The source filter is `[source]` when `source` is set, else a non-empty
+ * `sources` list (see {@link requestedSites}). An absent source filter or
+ * company is omitted, not sent as an `undefined` key, so an unfiltered search
+ * stays exactly `{ searchTerm, location, resultsWanted }`. The
  * per-request `crawl` object (Spec 1690) is added unchanged when given — its key
  * is spelled the same in every style, and its own keys are the camelCase ones
  * the API's `CrawlPolicyDto` declares. `locations` and the exclusion lists
@@ -745,8 +959,8 @@ export function buildSearchRequestBody(
   params: JobSearchParams,
   style: SearchRequestKeyStyle = readSearchRequestKeyStyle(),
 ): Record<string, unknown> {
-  const siteType = params.source ? [params.source] : undefined;
-  const resultsWanted = Math.min(params.limit ?? 20, 100);
+  const siteType = requestedSites(params);
+  const resultsWanted = normalizeSearchLimit(params.limit);
   const location = params.location ?? '';
 
   const camel: Record<string, unknown> = {
@@ -786,6 +1000,16 @@ export function buildSearchRequestBody(
   if (style === 'snake') return { ...snake, ...crawl };
   if (style === 'both') return { ...snake, ...camel, ...crawl };
   return { ...camel, ...crawl };
+}
+
+/**
+ * The sources a search sends as `siteType` (and reports in `sources_searched`):
+ * `[source]` when `source` is set, else a copy of `sources` when it is
+ * non-empty, else `undefined` (no source filter; the API's default fan-out).
+ */
+function requestedSites(params: JobSearchParams): string[] | undefined {
+  if (params.source) return [params.source];
+  return params.sources && params.sources.length > 0 ? [...params.sources] : undefined;
 }
 
 /**

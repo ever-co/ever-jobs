@@ -46,8 +46,8 @@ Client Request
 | Component             | Purpose                                        |
 | --------------------- | ---------------------------------------------- |
 | `AppConfigModule`     | Loads `.env` and provides typed config         |
-| `ApiKeyGuard`         | Header-based API key authentication            |
-| `ThrottlerGuard`      | Configurable request rate limiting             |
+| `ApiKeyGuard`         | Header-based API key auth (REST and GraphQL)   |
+| `GqlThrottlerGuard`   | Configurable rate limiting (REST and GraphQL); per valid API key, else per client IP (`TRUST_PROXY`) |
 | `LoggingInterceptor`  | Request logging with IDs and timing            |
 | `HttpExceptionFilter` | Structured JSON error responses                |
 | `CacheService`        | TTL cache backed by Redis or in-memory         |

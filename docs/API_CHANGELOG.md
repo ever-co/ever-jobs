@@ -1,5 +1,52 @@
 # API Changelog
 
+### [Unreleased] - 2026-11-18 (fork sync, Spec 1761)
+
+#### Added
+
+- **`include_raw=true` on `POST /api/jobs/search`** (fork Spec 5161): returns the selected source's upstream requests and responses as `raw_by_source`. It is an operator debugging aid, so it is **off by default** and needs every one of the following:
+  - `EVER_JOBS_INCLUDE_RAW_ENABLED=true`; otherwise 403.
+  - `ENABLE_API_KEY_AUTH=true`; otherwise 503.
+  - A key in the API key header that is in `API_KEYS` **and** in `EVER_JOBS_INCLUDE_RAW_API_KEYS`. A missing or unknown key gets 403 from the global API key guard before the search runs; no `API_KEYS` gets 503; a key not in `EVER_JOBS_INCLUDE_RAW_API_KEYS` gets 403, and an empty list 503.
+
+  At most `EVER_JOBS_INCLUDE_RAW_MAX_CONCURRENT` (default 2) such searches run per process; more get 429. Credentials are shown as `REDACTED`: credential-named query params, JSON and form fields, keyed URL paths, and the values of credential-named env vars (also `*_PUBLISHER_ID`, `*_USER_ID`, `*_ACCOUNT_ID`, `*_AFFID`, `*_PASS`, `*_PWD`, from 6 characters; not settings such as `*_HEADER_NAME` / `*_HEADER` or `KEYWORD(S)` lists) and the request's own `auth` values. Token and auth calls keep no bodies (`bodies_withheld: "opt_out" | "auth_endpoint"`). A request that names its own target (`companyUrl`, or a host-like `companySlug`) gets metadata-only entries (`body_withheld: "caller_supplied_url"`, plus `bodies_withheld` when the capture layer set it). An entry whose scrub cannot complete, or whose request carried an unreadable `auth` block, also comes back metadata-only (`body` and `request_body` dropped, `truncated: true`) instead of failing the search.
+- **`deadline_ms` on `POST /api/jobs/search`** (fork Spec 5164): shortens this request's fan-out deadline. The applied value is sent in `X-Search-Deadline-Ms`.
+  - It can only shorten the deadline: with `EVER_JOBS_SEARCH_DEADLINE_MAX_MS` unset, the ceiling is the fan-out deadline, and `0` or a larger value is capped.
+  - `EVER_JOBS_SEARCH_DEADLINE_ALLOW_UNBOUNDED=true` lets callers pass `0` (no deadline) or exceed the ceiling.
+  - A blank, whitespace, non-integer, negative, `Infinity` or repeated value gets 400.
+
+#### Changed
+
+- Results whose text fields carry long runs of spaces or zero-width characters, and JSON-LD pages with very large `address` arrays, are now processed in linear time. Normal results are unchanged. An object with more than 200 keys is read by its first 200, and at most 20 address entries per object and 2,000 per page are mapped.
+
+### [Unreleased] - 2026-11-17
+
+#### Fixed
+
+- **`POST /api/jobs/analyze` no longer annualises a legacy-grammar description salary twice** (T-2605). This removes the known limit of the 2026-11-16 T-2522 entry below. With `EVER_JOBS_SALARY_GRAMMAR=legacy` and `enforceAnnualSalary: true`, a salary parsed from the job description arrives already yearly but labelled with its source interval (`Pay: $20 - $25/hr` gives `hourly` 41,600 - 52,000), and `summary.salaryStats` multiplied it by 2080 again (86,528,000 - 108,160,000). The analysis now takes such a job (`salarySource: 'description'`) as yearly. Everything else is annualised as before: other grammars, requests without `enforceAnnualSalary`, and directly scraped salaries. The CLI's `search --analyze` and `compare` use the same rule. The response shape is unchanged.
+
+### [Unreleased] - 2026-11-16
+
+#### Added
+
+- **`TRUST_PROXY`** (default unset: `X-Forwarded-For` is ignored, as before): the reverse proxies Express trusts to give the client IP, as their addresses / CIDRs / `loopback`, a hop count, or `true`. Behind a proxy it lets the rate limit see each client instead of the proxy. A hop count or `true` lets a client that reaches the API port directly spoof its IP; see the README.
+
+#### Changed
+
+- **`POST /api/jobs/analyze` salary stats are annualised and in one currency** (T-2522). `summary.salaryStats` used to mix raw hourly, monthly and yearly amounts and every currency, and reported the first job's currency. Now each amount is annualised (hourly × 2080, daily × 260, weekly × 52, monthly × 12; a missing or unknown interval is used as given), `minSalary`, `maxSalary` and `avgSalary` (the mean of the low ends) are taken over the jobs in the most common currency only, and `currency` names that currency. `summary.withSalaryCount` and `siteComparison[].withSalary` now count every job whose compensation has a min or max above zero, so a max-only salary counts, and jobs in other currencies still count. The response shape is unchanged. The same figures appear in the CLI's `search --analyze` (now labelled with the currency instead of `$`) and `compare` output. Known limit: with the `EVER_JOBS_SALARY_GRAMMAR=legacy` rollback switch and `enforceAnnualSalary: true`, a salary parsed from the job description is annualised twice, because the legacy rule keeps its hourly or monthly interval on amounts that are already yearly.
+
+- **GraphQL `searchJobs` validates `descriptionFormat`, and its documented `text` value now means plain** (T-2523). `SearchJobsInput.descriptionFormat` accepts `markdown`, `html`, `plain` and `text` (an alias of `plain`); any other value, an empty string included, is a `BAD_REQUEST` before scraping, as REST answers 400 for it. Before, `text` (the value the schema documented) and any typo such as `PLAIN` or `md` reached the sources as-is and came back as raw HTML descriptions. `text` and `plain` share one cache entry. REST `POST /api/jobs/search` is unchanged: it accepts `markdown`, `html` and `plain` only.
+
+- **Rate limiting counts a request with a valid API key per key, not per IP** (`RATE_LIMIT_ENABLED=true` with API key auth on). Callers behind one reverse proxy no longer share one bucket. A key used by several clients now shares one budget wherever they connect from: give each client its own key, or raise `RATE_LIMIT_REQUESTS`. Requests without a valid key are still limited per client IP, and the limit still applies per route.
+
+- **CSV export (`?format=csv`, and the CLI's `--format csv`) neutralises spreadsheet formulas.** A text cell that starts with `=`, `+`, `-`, `@`, a tab or a carriage return now gets a leading `'`, so a scraped title such as `=HYPERLINK(...)` opens as text. A consumer that reads the CSV programmatically sees that `'` too (for example `'+1 555 0100`). A cell holding `,` `"` `\n` or `\r` is quoted; a bare `\r` used to be written unquoted and could split a row. Numbers are written as-is (`-5` stays `-5`). Object items in lists (`locations`, `offices`) are written as JSON instead of `[object Object]`, and a date is written as an ISO-8601 string. Known limit: a spreadsheet that opens this comma-separated file with `;` as the separator (the default in many European locales) can still split a value at a `;` it contains; import the file with comma as the separator.
+
+### [Unreleased] - 2026-11-12
+
+#### Changed
+
+- **`dedupKey` and the engine's `canonicalJobId` change once for postings whose company name is made only of legal-form or descriptor words** (e.g. `Systems Group`, `Labs`, `Holdings, Ltd.`). Before, the company part of the key was empty and shared by every such employer; now the key carries the name, so two unrelated employers no longer collapse into one. With a persistent store bound, the next run writes a new canonical record for those postings instead of updating the old one. Names that keep a core word (`Acme Systems Group Inc.` → `acme`) keep their keys.
+
 ### [Unreleased] - 2026-10-08 (Spec 1753)
 
 SIGTERM used to cut every open request: no shutdown hooks ran, and the image's `node` (PID 1, no init process) ignored the signal, so each rollout waited out the pod's grace period and was SIGKILLed with list-mode NDJSON crawls still streaming. The API now drains. Deployment guide: [`DEPLOYMENT.md`](./DEPLOYMENT.md#graceful-shutdown-spec-1753).

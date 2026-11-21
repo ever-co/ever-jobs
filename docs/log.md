@@ -5,6 +5,309 @@
 
 ---
 
+## 2026-11-18 — Spec 1761: fork sync 2026-11-17 hardening (MakeDeeply/ever-jobs@5fd45911)
+
+**Change:** Brought in the MakeDeeply fork tip `5fd45911` (fork PRs up to #185, Specs 5153–5175) with a merge commit (`9f106583`), after a five-lane read-only security review with two-vote verification (14 findings confirmed, 1 refuted). The fixes are on top as Spec 1761:
+- **`include_raw` (Spec 5161):**
+  - It returned the server's own API keys and OAuth tokens: Adzuna `app_key` in `final_url`, the Jooble key in the path, the Personio `client_secret`, and token responses. These are now redacted by key name and scrubbed by value.
+  - Token and auth calls keep no bodies.
+  - `include_raw` now needs `EVER_JOBS_INCLUDE_RAW_ENABLED=true` and a key in `EVER_JOBS_INCLUDE_RAW_API_KEYS`.
+  - When the caller names its own target, the raw entries carry metadata only.
+- **`deadline_ms` (Spec 5164):** callers can only shorten the fan-out deadline unless the operator opts in.
+- **Quadratic CPU:** `normalizeJobPost` uses a linear trim, the location-object mapper is bounded and linear, and `ld+json` extraction is linear.
+- **New plugins:**
+  - The 9 new company plugins pin `companyUrl` to their own domain.
+  - Revoy, Werco, comma_ai and thoron_us got caps and linear parsers.
+  - Jibe refuses non-public tenants.
+
+**Files:** `.specify/specs/1761-fork-sync-2026-11-17-hardening/{spec,plan,tasks}.md`, `docs/index.md`, `docs/API_CHANGELOG.md`, `.env.example`, dated notes in `.specify/specs/5161-raw-http-capture/spec.md` and `.specify/specs/5164-search-deadline-override/spec.md`.
+
+## 2026-11-18 — Lane-scan fixes (T-2635)
+
+One dated entry for the day; each fix has its own section.
+
+### Fix: the MCP catalogue lists 4 Day Week as a remote board, so `search_remote_jobs` searches it (T-2635)
+
+**Symptom.** The 4 Day Week plugin declares `category: 'remote'` (`packages/plugins/source-4dayweek/src/fourdayweek.service.ts:21-23`), as 12 other plugins do, but the MCP server's source catalogue filed `fourdayweek` as `type: 'job_board'` (`apps/mcp/src/tools.ts:426`). `searchRemoteJobs` builds its list of boards from the catalogue's `remote` entries and keeps `source` only when it is in that list (`tools.ts:728-737`). So `search_remote_jobs` with `source: 'fourdayweek'` searched the other 12 remote boards and never 4 Day Week, a search without `source` left 4 Day Week out, and `list_sources` and `compare_sources` with type `remote` did not list it. The tool's description (`apps/mcp/src/index.ts:174-175`, `apps/mcp/README.md:94`) still named only six of the boards, the README's source coverage counted 6 remote boards, and the search guide (`index.ts:414-415`) listed `fourdayweek` under job boards.
+
+**Fix.** `fourdayweek` has type `remote` in the catalogue. The `search_remote_jobs` description in `index.ts` and in the README says it searches every board that `list_sources` reports with type `remote`, instead of naming a subset that can go stale. The search guide lists `fourdayweek` under remote boards, and the README's source coverage counts 13 remote boards.
+
+**Files:** `apps/mcp/src/{tools,index}.ts`, `apps/mcp/README.md`, `apps/mcp/__tests__/tools-remote-sources.spec.ts` (new), `docs/log.md`.
+
+**Validation:** 8 new tests in `tools-remote-sources.spec.ts`; 7 fail against develop and pass now: the catalogue lists `fourdayweek` as remote and not as a job board; `compare_sources` counts 4 Day Week among the remote boards; a guard reads every plugin's `src/*.service.ts` and checks that the catalogue's remote ids are exactly the `Site` values of the plugins that declare `category: 'remote'` (develop: 12 of the 13); `search_remote_jobs` with `source: 'fourdayweek'` posts `siteType: ['fourdayweek']` (develop: the other 12 boards); without `source` it posts `fourdayweek` among the boards; and the `search_remote_jobs` description in `index.ts` and in the README names every remote board or none (develop: 6 of 12). The eighth test checks that the search guide's "Remote Boards" line lists exactly the catalogue's remote boards; it passes on develop too, and fails if the catalogue changes without the guide. `jest --testPathPatterns apps/mcp/__tests__` passes (7 suites, 118 tests; 110 on develop). Both CI type-checks are clean and `npm run lint:docs` passes. `npm run test:core` with 2 workers: 5601 pass and 3 fail, none in `apps/mcp`: 2 `store-bootstrap.providers.spec.ts` tests need the `better-sqlite3` native binding, which the local install (`npm ci --ignore-scripts`) did not build, and 1 event-loop timing test in `jobs.aggregator.career-level.spec.ts` (a 398 ms gap against its 250 ms limit on a busy PC) passes when its suite runs alone (37/37).
+
+## 2026-11-17 — Lane-scan fixes (T-2584, T-2586, T-2587)
+
+### Lane-scan fixes (T-2584, T-2586, T-2587, T-2606)
+
+### Lane-scan fixes (T-2584, T-2586, T-2587)
+
+### Lane-scan fixes (T-2584, T-2586, T-2587, T-2606)
+
+### Lane-scan fixes (T-2584, T-2586, T-2587, T-2607)
+
+One dated entry for the day; each fix has its own section.
+
+### Fix: `extractSalary` reads a currency code written only after the second amount (T-2634)
+
+**Symptom.** In the extended grammar no range shape of `extractSalary` (`packages/common/src/utils/helpers.ts`) accepted a currency that comes only after the maximum. The prefix shape (`buildSalaryRegexPrefix`) starts with `(?:${symbolAlt})\s*(?<min>…`, so it needs a currency before the first amount; the suffix shape (`buildSalaryRegexSuffix`) is `(?<min>…)\s*(?<minK>[kK]?\b)…\s*(?:${symbolAlt})`, so it needs one right after the first amount; and the bare shape runs only when `detected.confidence === 'country'`. `60,000 - 80,000 USD`, `60K-80K USD`, `40,000 - 50,000 GBP` and `50.000 - 70.000 EUR` therefore gave the all-null envelope, while `USD 60,000 - 80,000` and `60,000 USD - 80,000 USD` parsed. Every plugin that calls `extractSalary` missed this form. Remotive (`packages/plugins/source-remotive/src/remotive.service.ts`) read `60,000 - 80,000 USD` with its own regex before #149; since then it gave no compensation, because the ISO code makes `parseSalaryCurrency` report `iso`, which blocks its retry with the USA hint.
+
+**Fix.** A fourth range shape, `buildSalaryRegexTrailing`, in the extended grammar only: number, optional `k`, optional pay-period token, dash, number, optional `k`, then the symbol or ISO code, then an optional pay-period token (`<num>K?\s*[<per>\s*]<dash>\s*<num>K?\s*<sym>[\s*<per>]`). It is tried after the prefix and suffix shapes; being a dash range, it comes before an unqualified `to` range, which the grammar uses only when no dash range exists. Like the bare shape it is dash-only, and it gets the bare path's prose guard (`selectTrailingCurrencyRange`): a match whose raw minimum is under `lowerLimit` is skipped unless a `k` suffix or a pay-period token is present, so `5 - 7 USD` and `team of 100 - 150 EUR` stay null while `20 - 25 USD/hr` reads hourly. Like a `to` range and a single bound, a match whose nearest keyword before it is a benefit word is skipped, so `Sign-on bonus 5,000 - 10,000 USD. Salary from $90,000 per year` still reads the $90,000 floor and `Learning budget: 1,000 - 2,000 USD per year` stays null. A symbol followed on the same line by a number opens the next amount instead of closing this one (`2020 - 2023 $50,000 grant` stays null). A skipped match does not hide a later reading: the scan goes on, and with no match the `to`-range, single-bound and other fallbacks run as before. The legacy grammar is unchanged, and so is the reading of EUR amounts with comma thousands (`60,000 - 80,000 EUR` stays null; that is a separate locale question).
+
+**Files:** `packages/common/src/utils/helpers.ts`, `packages/common/__tests__/salary.spec.ts`, `packages/plugins/source-remotive/__tests__/remotive.service.spec.ts`, `docs/log.md`.
+
+**Validation:** 18 new tests; 11 fail against develop and pass now. In `salary.spec.ts` (new `describe` "a currency written only after the maximum (T-2634)", 17 tests) the four strings above give yearly 60000–80000 USD, 60000–80000 USD, 40000–50000 GBP and 50000–70000 EUR, as do `60,000 – 80,000 $` and `Salary: 90,000 - 110,000 USD, plus equity`; `20 - 25 USD/hr` and `25 - 30 USD per hour` read hourly (41600–52000 under `enforceAnnualSalary`); `5 - 7 USD` is null with the default `lowerLimit` and hourly 5–7 USD with `lowerLimit: 4`; a trailing-currency range beats an unqualified `to` range before it (develop read the hardware figure as monthly 10000–20000); a bonus range is skipped and the salary range after it is read (develop gave null). The controls that pass before and after pin that `USD 60,000 - 80,000`, `60,000 USD - 80,000 USD` and an anchored range ahead of a trailing one keep their reading, that a skipped match leaves `from $40,000 per year` readable, that `60,000 - 80,000 EUR` and the legacy grammar stay null, and that two inputs with a 50,000-space run finish in under 500 ms. In `remotive.service.spec.ts` the new test expects yearly 60000–80000 USD for `60,000 - 80,000 USD` and `60K-80K USD`.
+
+### Fix: `extractSalary` reads a range that crosses the monthly threshold as yearly instead of dropping it (T-2633)
+
+**Symptom.** With no stated period, `extractSalary` (`packages/common/src/utils/helpers.ts`) chose a range's interval from its minimum alone. A minimum under `monthlyThreshold` (default 30,000, `helpers.ts:1313` on develop) read the range as monthly, and a maximum at or above it was then set to `null` (`helpers.ts:1500-1503`), so the whole range came back as the all-`null` envelope (`helpers.ts:1510`). `$25k - $35k`, `OTE $25k - $35k`, `$20k -$35k`, `$20,000 - $40,000` and `$28,000 - $32,000` all gave no salary, while `$40k - $60k` and `$25k - $35k/yr` were read. Every plugin that calls the shared parser lost these jobs' compensation; in the task's sample, 3 of 12 Remotive salary values had this shape (`source-remotive` calls `extractSalary` since T-2587). Spec 1695 §3 had left this shape unparsed as a decision of its own; `packages/common/__tests__/helpers.spec.ts` and the public-feed table in `salary.spec.ts` pinned the loss.
+
+**Fix.** In the extended grammar only, a range with no caller `interval` hint and no pay-period token, whose minimum is in the monthly band (at or above `hourlyThreshold`, under `monthlyThreshold`) and whose maximum is at or above `monthlyThreshold`, is read as yearly at both ends; the usual bounds checks (`lowerLimit`, `upperLimit`, minimum below maximum) then apply, so `$25,000 - $750,000` still gives nothing. A stated period still wins (`$25,000 - $35,000 per month` stays monthly), ranges inside one band are unchanged (`$5,000 - $8,000` and `$10K-$20K` monthly, `$40k - $60k` yearly), the hourly band keeps its guard (`$300 - $400` still gives nothing), and the legacy grammar (`grammar: 'legacy'` or `EVER_JOBS_SALARY_GRAMMAR=legacy`) keeps the earlier no-match. The yearly reading applies only in USD, EUR, GBP and CHF: in SEK / NOK / DKK and PLN a monthly salary routinely sits around 30,000 (`25.000 kr - 35.000 kr`) and a yearly one that low is far below full-time pay, so those keep the no-match (the thresholds are USD-sized bands, Spec 012 §3). Spec 1695 §3 gets a dated note.
+
+**Files:** `packages/common/src/utils/helpers.ts`, `packages/common/__tests__/{salary,helpers}.spec.ts`, `packages/plugins/source-remotive/__tests__/remotive.service.spec.ts`, `.specify/specs/1695-salary-parsing-hardening/spec.md`, `docs/log.md`.
+
+**Validation:** 11 tests fail against develop and pass now: the five strings above (yearly, USD, the right amounts), the full envelope of `$25k - $35k`, with and without `enforceAnnualSalary`, and a crossing range in EUR, GBP and CHF, in a new `salary.spec.ts` block; the `OTE $25k - $35k` and `$20k -$35k` rows of the public-feed table (were `null`); the `$28,000 - $32,000` baseline in `helpers.spec.ts` (now yearly 28000-32000 USD, hint assertions kept); and a new Remotive case for `$25k - $35k` (yearly 25000-35000 USD). Six controls pass before and after: a stated period (`per month`, `/yr`, a monthly hint), ranges inside one band, the bounds checks, the hourly crossing, the legacy grammar, and a crossing range in `kr` / `zł` (still nothing). `npm run test:core`, the `packages/plugins/source-` suites, `tsc --project tsconfig.typecheck.json --noEmit` and `npm run lint:docs` pass.
+
+### Fix: Authentic Jobs no longer writes its API key to the log (T-2584)
+
+**Symptom.** `AuthenticJobsService.scrape()` (`packages/plugins/source-authenticjobs/src/authenticjobs.service.ts`) reads `AUTHENTICJOBS_API_KEY` and sends it as the `api_key` query parameter. It built the request URL by hand and logged it at info level for every page (`Fetching Authentic Jobs page 1: https://authenticjobs.com/api/?format=json&method=aj.jobs.search&api_key=<key>&page=1&…`). `apps/api/src/main.ts` uses the default Nest logger, so with the key set every search that included `authenticjobs` wrote the key to the API log and to any log shipper behind it, against `AGENTS.md` rule 10 and `docs/SECURITY_GUIDELINES.md` ("Never log API keys"). The shared `HttpClient` redacts `api_key` only in its own log lines (`SENSITIVE_QUERY_KEYS`); this line was the plugin's own.
+
+**Fix.** The page line is now `Fetching Authentic Jobs page <n>`, without the URL. The request passes its query as `client.get(AUTHENTICJOBS_API_URL, { params })` instead of a hand-built query string. The shared client names only `config.url` in its retry, redirect and cool-down lines (`describeRequest`, `redactUrl`) and never `config.params`, so the key stays out of those lines as well. The request sends the same parameters, `api_key` included; axios encodes them now, which leaves a few characters such as `,` and `:` unescaped where `URLSearchParams` escaped them, and the server decodes the same values. No other log, warn or error line in the file names the URL or the request config (the error line logs `err.message` only).
+
+**Files:** `packages/plugins/source-authenticjobs/src/authenticjobs.service.ts`, `packages/plugins/source-authenticjobs/__tests__/authenticjobs.service.spec.ts` (new), `docs/log.md`.
+
+**Validation:** the 2 new tests (a two-page scrape and a scrape whose request fails with a 500, both with `AUTHENTICJOBS_API_KEY=test-key-123` and a spy on every `Logger.prototype` level) fail against develop, because the `Fetching …` lines hold `api_key=test-key-123`, and pass now. The paging test also checks that every request still sends `api_key`, `method`, `format`, `page`, `count` and `keyword`; the failure test checks that `api_key` was sent. The package's e2e suite still passes (3 tests; it returns early without a key). Both CI type-checks are clean and `npm run lint:docs` passes.
+
+### Lane-scan fixes
+
+One dated entry for the day; each fix has its own section.
+
+### Fix: `/api/jobs/analyze` no longer annualises a legacy-grammar description salary a second time (T-2605)
+
+**Symptom.** With `EVER_JOBS_SALARY_GRAMMAR=legacy` and `enforceAnnualSalary: true`, `postProcessCompensation` (`packages/common/src/utils/helpers.ts`, legacy path) parses a description salary already annualised but keeps its source interval, as the legacy rule always did (pinned in `packages/common/__tests__/salary.spec.ts`: `Pay: $20 - $25/hr` gives `hourly` 41,600 - 52,000 with `salarySource: 'description'`). `AnalyticsService.summarize()` (`packages/analytics/src/analytics.service.ts`) annualised every compensation by its interval and took no options, so that job counted as 86,528,000 - 108,160,000 in `summary.salaryStats` of `POST /api/jobs/analyze`, CLI `search --analyze` and CLI `compare`. T-2522 recorded this as a known limit. The default grammar was not affected.
+
+**Fix.** `@ever-jobs/common` exports `activeSalaryGrammar()`, the process-wide grammar in force (the existing `resolveSalaryGrammar` with no per-call option). `AnalyticsService.analyze()` and `summarize()` take an optional `{ enforceAnnualSalary?: boolean }` (new exported type `AnalyzeOptions`; default `false`). When the grammar is `legacy`, `enforceAnnualSalary` is true and a job's `salarySource` is `description`, `summarize()` takes its amounts as yearly and does not call `convertToAnnual`; every other case is annualised as before. `JobsController.analyzeJobs` passes `input.enforceAnnualSalary`; CLI `search --analyze` passes the scrape input's `enforceAnnualSalary` (the `--enforce-annual-salary` flag, or the `--stdin` JSON's value); CLI `compare` passes its base input's (compare has no flag for it, so `false`). The "Known limit" note in `summarize()` is gone. The `JobSummaryDto` shape is unchanged.
+
+**Files:** `packages/common/src/utils/helpers.ts`, `packages/analytics/src/analytics.service.ts`, `packages/analytics/__tests__/analytics.spec.ts`, `apps/api/src/jobs/jobs.controller.ts`, `apps/api/src/jobs/__tests__/{jobs.controller,search-filters.api}.spec.ts`, `apps/cli/src/commands/{search,compare}.command.ts`, `apps/cli/__tests__/search-analyze.command.spec.ts`, `docs/API_CHANGELOG.md`, `docs/log.md`.
+
+**Validation:** 8 new tests. Against develop, 5 fail: in `analytics.spec.ts` a description-sourced hourly 41,600 - 52,000 under legacy + `enforceAnnualSalary` gives `minSalary` 41,600 (develop: 86,528,000), the same job beside a yearly 90,000 - 120,000 gives 41,600 / 120,000 / avg 65,800, and `analyze(jobs, { enforceAnnualSalary: true })` passes the flag to the summary; in `jobs.controller.spec.ts` `/analyze` passes `enforceAnnualSalary: true` to `analyze()`; in `search-analyze.command.spec.ts` `search --analyze --enforce-annual-salary` under legacy prints `Salary range (USD): 41,600 - 52,000 (avg 41,600)`. The 3 controls pass before and after (annualised as today): a description-sourced hourly 20 - 25 without the flag, a `direct_data` hourly 20 - 25 under legacy with the flag, and the default grammar (unset and `extended`). Two existing controller assertions now expect the second `analyze()` argument. The env var is restored after each test.
+
+### Fix: MCP `get_job_details` answers from recent search results instead of a missing API route (T-2586)
+
+**Symptom.** `getJobDetails` (`apps/mcp/src/tools.ts:582`) called `GET /api/jobs/details`, but the API registers only `POST /api/jobs/search` and `POST /api/jobs/analyze` under `api/jobs` (`apps/api/src/jobs/jobs.controller.ts:111,146,489`) and has no single-job route anywhere in `apps/api/src`. Every `get_job_details` call therefore failed with a 404 (a 401 when API-key auth is on), so the documented flow (`search_jobs`, then `get_job_details` with the returned `id`, advertised in `apps/mcp/src/index.ts:132-148`) never returned the full description or the application link. The MCP tests mocked axios, so they passed against the missing route. Spec 1689 (§ known gaps) had listed it without fixing it.
+
+**Fix.** `searchJobs` now remembers every raw API job it receives in a bounded module-level memory: the last `MCP_RECENT_JOBS_LIMIT` (1000) jobs, oldest dropped first, looked up by `id` and by `jobUrl` (a job found again becomes the newest; when two jobs share a URL the URL answers with the newer one and both stay reachable by id). `search_remote_jobs` and `get_salary_insights` go through `searchJobs`, so their jobs are remembered too. `getJobDetails` answers from that memory (id first, then URL) with the same fields as before, `full_description` being the untruncated description, and makes no API request. An unknown job throws `job not found in recent search results; call search_jobs first`. The memory is per process: it is lost on restart and, in HTTP mode (`MCP_TRANSPORT=http`), not shared between replicas, so details work for jobs found by the same server process. The tool's description in `index.ts` and `apps/mcp/README.md` say so; the README no longer lists `get_job_details` among the tools that report an unreachable API.
+
+**Files:** `apps/mcp/src/{tools,index}.ts`, `apps/mcp/__tests__/{tools-api-contract,tools-posted-time}.spec.ts`, `apps/mcp/README.md`, `.specify/specs/1689-fork-sync-hardening/spec.md` (a dated note on the known gap), `docs/log.md`.
+
+**Validation:** 7 tests fail against develop and pass now: 5 new ones in `tools-api-contract.spec.ts` (a searched job with a 2000-character description comes back whole by `job_id` and by `job_url` with no `GET` and no second API client; details still answer once the API refuses connections; an unknown id or URL rejects with "call search_jobs first"; a shared URL answers with the newer job while both ids still answer; 1250 jobs over 13 searches never leave more than 1000 remembered, the oldest 250 are gone, and a job searched again outlives the rest) and 2 of the 3 tests that had mocked `GET /api/jobs/details` for the location and posted-time contracts, now driven through `searchJobs` (the remote-only location test passes either way). Two tests that only exercised the old API request were removed (the API key on the details client, a refused connection from `get_job_details`), and the error-code fallback test now goes through `searchJobs`. `jest --testPathPatterns apps/mcp/__tests__` passes (6 suites, 99 tests; 96 on develop); `tsc -p apps/mcp/tsconfig.json --noEmit` is clean.
+
+**Review fixes.** A search across the whole catalogue can return more than 1000 jobs; `searchJobs` now remembers only the first 1000 of a response, so the tail can no longer push out the jobs a client reads first. Given both `job_id` and `job_url`, `getJobDetails` answers with the job that has both, because Working Nomads reuses `workingnomads-<index>` ids across searches. `application_url` now reads the API's `applyUrl` field first (it had read only `applicationUrl`/`application_url`, which `JobPostDto` does not declare, so it fell back to `jobUrl`). Two new tests cover the first two; the full-description test now uses `applyUrl`.
+
+### Fix: Remotive salaries with a `k` are read, and hourly pay keeps its interval and currency (T-2587)
+
+**Symptom.** `RemotiveService.parseSalary()` (`packages/plugins/source-remotive/src/remotive.service.ts`) matched the salary text with its own regex, `/\$?([\d,]+)\s*[-–]\s*\$?([\d,]+)/`, and always returned `interval: yearly` and `currency: 'USD'`. A `k` after the first number broke the match, so a job with `$170k - $200k` got no compensation at all; `$14 - $20/hour` became a yearly salary of 14–20 USD; and a salary in another currency was labelled USD. Salary filters, `POST /api/jobs/analyze` and the MCP `get_salary_insights` tool were wrong for Remotive jobs.
+
+**Fix.** `parseSalary()` now calls the shared `extractSalary` (`@ever-jobs/common`), which already reads these shapes (pinned by the Spec 1695 cases in `packages/common/__tests__/salary.spec.ts`), the way `source-monster` does. It keeps the 200-character input cap, builds a `CompensationDto` only when a minimum or maximum amount was found, and keeps the parsed interval and currency, falling back to `USD` only when no currency was found. Salary text with no currency signal at all (`60,000 - 80,000`, `70K-80K`) is read a second time with the `Country.USA` hint, because `extractSalary` reads a range with no currency next to it only under a country hint; without it such ranges, which develop read as USD, would lose their compensation. The bare-range guard of `extractSalary` still drops prose such as `5 - 7 years experience`, which develop read as yearly 5–7 USD. The unused `SALARY_REGEX` and its comment are removed.
+
+**Files:** `packages/plugins/source-remotive/src/remotive.service.ts`, `packages/plugins/source-remotive/__tests__/remotive.service.spec.ts` (new; the package had no unit test), `docs/log.md`.
+
+**Validation:** the new `remotive.service.spec.ts` (8 tests) mocks `createHttpClient` with jobs whose salary is `$170k - $200k`, `$14 - $20/hour`, `$60,000 - $80,000` and `''`, and expects yearly 170000–200000 USD, hourly 14–20 USD, yearly 60000–80000 USD and `null`, one job at a time and as one mixed feed. It also checks that `£60,000 - £80,000` and `€50k - €70k` keep GBP and EUR, that `60,000 - 80,000` and `70K-80K` are read as yearly USD, and that `5 - 7 years experience` gives `null`. Against develop 6 fail and 2 pass (the comma range and the empty salary); all 8 pass now.
+
+### Fix: CLI `--format summary` counts max-only salaries in "With salary data" (T-2606)
+
+**Symptom.** `toSummary()` in `apps/cli/src/commands/search.command.ts` counted a job as having salary data with `if (job.compensation?.minAmount) salaryCount++;`, and printed the count as `With salary data: N`. A compensation with only a `maxAmount` (the default salary grammar reads upper-only figures such as `"Compensation: up to $90,000"`), or with a `0` placeholder `minAmount` and a real `maxAmount`, was not counted, while a negative `minAmount` was. So `ever-jobs search … -f summary` reported fewer jobs with salary data than `withSalaryCount` of `--analyze` on the same jobs, which has used `hasSalaryAmount` since T-2522.
+
+**Fix.** `toSummary()` counts a job when `hasSalaryAmount(job.compensation)` holds (`@ever-jobs/common`: a finite bound above zero, min or max), the same rule `AnalyticsService` uses for `withSalaryCount` and `compareSites`' `withSalary`. A `0` / `0` placeholder, a negative amount and a job with no compensation are not counted. The rest of the summary is unchanged.
+
+**Files:** `apps/cli/src/commands/search.command.ts`, `apps/cli/__tests__/search-summary.command.spec.ts` (new), `docs/log.md`.
+
+**Validation:** 7 new tests run `SearchCommand` with a mocked `jobsService` and `format: 'summary'` and read the `With salary data` line from stdout. 4 fail against develop (a max-only salary and a `0` minimum with a real maximum give 0 instead of 1; a negative `minAmount` gives 1 instead of 0; a mix of six jobs gives 2 where `--analyze` reports 3) and pass now; the 3 controls (a `0` / `0` placeholder and a job without compensation are not counted, a yearly min-max salary is) pass before and after.
+
+### Test: the redirect-pacing red controls no longer depend on CI speed (T-2607)
+
+**Symptom.** Two red-control tests in `packages/common/__tests__/http-client-redirect-pacing.spec.ts` ended with a wall-clock upper bound across real loopback HTTP requests: `expect(hop.arrivedAt - softyGrants[0].at).toBeLessThan(1000)` ("red control: EVER_JOBS_CRAWL_PACE_REDIRECTS=false follows the hop inside the aggregator slot, at once") and `expect(paths[1].arrivedAt - grants[0].at).toBeLessThan(1000)` ("... both requests in one slot, back to back"). On a slow or busy CI pod the hop can reach the server more than 1 s after the first grant without ever waiting for a slot; the first test failed that way (about 3.1 s) on PR #144, which only changes `apps/mcp`. The file's own comment already said the gap between arrivals is not a valid bound.
+
+**Fix.** Test-only. `pacedClient()` now also records every `HostLimiter.acquire` call with its bucket and `grantedAtOnce` (whether the limiter granted the slot inside the call, as it does when the bucket is free and ready; a request held behind `maxConcurrent`, the interval, the idle gap or a cool-down is not). The two red controls drop the upper bound and assert on the limiter instead: the hop took no slot of its own (the grant count, already asserted) and never queued behind the Softy bucket (the only acquires are the requests the test makes, each granted at once). The positive tests keep their `>= 1000` lower bounds, which are safe on slow machines. No product code changes.
+
+**Files:** `packages/common/__tests__/http-client-redirect-pacing.spec.ts`, `docs/log.md`.
+
+**Validation:** with a temporary 1.5 s delay in the test server handler (a slow pod), the old assertions fail (3231 ms and 3386 ms, expected < 1000) and the new ones pass, as do the two positive tests. With pacing switched on inside the two controls (a mutation check), the new `acquires` assertions alone fail: the hop shows up as a second `domain:softy.pro` acquire that was not granted at once. Without the delay the whole file passed 20 runs out of 20 with `--runInBand`.
+
+## 2026-11-16 — Lane-scan fixes (T-2459–T-2462)
+
+One dated entry for the day; each fix has its own section.
+
+### Fix: the MCP search tools return at most `limit` jobs (T-2585)
+
+**Symptom.** The `search_jobs` tool documents `limit` as "Maximum number of results to return (default: 20, max: 100)" (`apps/mcp/src/index.ts`), but `apps/mcp/src/tools.ts` used it only as the API's `resultsWanted` (`Math.min(params.limit ?? 20, 100)` in `buildSearchRequestBody`). The API applies `resultsWanted` per source, and per location when `locations` is set (`ScraperInputDto.resultsWanted`), and with no `source` it searches every non-ATS source (`apps/api/src/jobs/jobs.service.ts`). `searchJobs` mapped every returned job, applied `remote_only` and returned them all, so `limit: 20` could put hundreds or thousands of jobs, each with a 500-character description, into one tool result; one source with 3 locations gave up to 60. `search_remote_jobs` and `get_salary_insights` call `searchJobs` and had the same problem (`get_salary_insights` computed its statistics over every returned job, not the number it says it samples). A `limit` that is not a number (e.g. `"abc"`) sent `resultsWanted: NaN`.
+
+**Fix.** New `normalizeSearchLimit(limit)` in `tools.ts`: a number, or a numeric string, is rounded down and capped at 100 (`MCP_MAX_SEARCH_LIMIT`); anything else, and anything below 1, gives 20 (`MCP_DEFAULT_SEARCH_LIMIT`). `buildSearchRequestBody` sends it as `resultsWanted` (`results_wanted` in the snake style), and `searchJobs` cuts the jobs to it after the `remote_only` filter (`takeJobsAcrossSources`): the API sorts by site name, then newest first, so a plain cut kept only the alphabetically first site's jobs (all 25 `search_remote_jobs` results from one board); the cut takes each source's newest jobs in turn and keeps them in the API's order. `total` stays the number of jobs returned; the new optional `SearchResponse.total_found` gives the count before the cut and is present only when jobs were cut, so a response within the limit keeps its previous shape. `search_remote_jobs` (default 25) and `get_salary_insights` (default 50) get the same cap; their own defaults still apply only to a missing `limit`, so a non-numeric one gives them 20. `apps/mcp/README.md` says what `limit` and `total_found` mean and gives the other two tools' maximum. Not changed: the API still scrapes `resultsWanted` jobs per source and location, so a search over many sources does the same work as before; only the tool result is bounded.
+
+**Files:** `apps/mcp/src/tools.ts`, `apps/mcp/__tests__/tools-api-contract.spec.ts`, `apps/mcp/README.md`, `docs/log.md`.
+
+**Validation:** 8 new tests in `tools-api-contract.spec.ts`; 7 fail against develop and pass now: 150 jobs from the API with `limit: 20` give the first 20, `total` 20 and `total_found` 150 (develop: 150 jobs); with `remote_only`, 100 on-site jobs followed by 50 remote ones give the first 20 remote jobs and `total_found` 50 (develop: 50); `limit: "abc"` sends `resultsWanted: 20` and returns 20 jobs (develop: `NaN` and 150); `search_remote_jobs` with no `limit` returns 25 of 150; `get_salary_insights` with `limit: 30` samples 30 of 150; and two `normalizeSearchLimit` cases (the default for missing, non-numeric and below-1 values; rounding down and the cap at 100). Review follow-up: 3 more tests (90 jobs from 3 sources with `limit: 20` give 7/7/6 per source in the API's order; a source with 2 jobs keeps both and the other fills the rest; `search_remote_jobs` keeps every board that answered); the first and third fail with a plain `slice`. The control (5 jobs with `limit: 20` come back as they were, with no `total_found`) passes before and after. `jest --testPathPatterns apps/mcp/__tests__` passes (6 suites, 107 tests).
+
+**Merge fix (with T-2586).** Develop's `get_job_details` (T-2586) has `searchJobs` remember only the first `MCP_RECENT_JOBS_LIMIT` (1000) jobs of the API's answer, before the cut. The cut takes each source's jobs in turn, so on a wide search it returns jobs listed past index 1000: with 20 sources × 100 jobs and `limit: 100`, 50 of the 100 returned jobs got `job not found in recent search results; call search_jobs first`. `searchJobs` now remembers after the cut, in the API's order: every returned job (at most 100) and the first of the other jobs, up to 1000 in all, so a response can no longer push out its own returned jobs. The 1000-job cap and the oldest-first order are unchanged, and a response of at most 1000 jobs is remembered whole, as before. A new test in `tools-api-contract.spec.ts` (20 sources × 100 jobs, `limit: 100`, every returned job looked up by `job_id` and by `job_url`) fails before the change (50 missing) and passes now; `apps/mcp/README.md` says the returned jobs are remembered.
+
+### Fix: MCP `search_remote_jobs` searches the remote boards, not the whole catalogue (T-2546)
+
+**Symptom.** `search_remote_jobs({ query })` (`apps/mcp/src/tools.ts`) built the list of remote boards but used it only to check `source`. With no `source`, or one that is not a remote board (e.g. `linkedin`, which was dropped without a word), it called `searchJobs` with no source, so `buildSearchRequestBody` sent no `siteType` and the API (`apps/api/src/jobs/jobs.service.ts`, default selection) fanned out over every non-ATS source. The call often hit the MCP client's 60 s timeout (the API's fan-out deadline defaults to 120 s), the jobs that did come back were not from the remote-first boards the tool describes, and `sources_searched` said `['all']`.
+
+**Fix.** `JobSearchParams` gets an optional `sources?: string[]`. `buildSearchRequestBody` sends it as `siteType` (`site_type` in the snake style) when `source` is not set; with neither, the body is unchanged (no source key). `searchRemoteJobs` passes every `type: 'remote'` id of the MCP source catalogue (12 boards, all valid `Site` values) as `sources` when no remote `source` is given; a remote `source` still narrows the search to that one board. `sources_searched` now reports the list that was sent (`['all']` only when none was). The `search_jobs` tool does not expose `sources`.
+
+**Files:** `apps/mcp/src/tools.ts`, `apps/mcp/__tests__/tools-api-contract.spec.ts`, `apps/mcp/README.md`, `docs/log.md`.
+
+**Validation:** 4 of the 8 new tests fail against develop's `tools.ts` (no `siteType` for `{ query: 'backend' }`, for `source: 'linkedin'`, for the snake style, and for a body built with `sources`); the controls (`source: 'remotive'` posts `['remotive']`, no source and no sources sends no `siteType`, `source` wins over `sources`, the catalogue lists remote boards) pass before and after. `jest --testPathPatterns apps/mcp/__tests__` passes (6 suites, 104 tests), and `tsc --project tsconfig.typecheck.json --noEmit` and `npm run lint:docs` pass.
+
+### Fix: `/api/jobs/analyze` and CLI `--analyze` salary stats are annualised and in one currency (T-2522)
+
+**Symptom.** `AnalyticsService.summarize()` (`packages/analytics/src/analytics.service.ts`) took `minSalary`, `maxSalary` and `avgSalary` over the raw amounts and never read `compensation.interval`, so one job at 25–35 USD an hour plus one at 90,000–120,000 USD a year reported `minSalary: 25` and `avgSalary: 45013`. `enforceAnnualSalary` defaults to `false`, so hourly and monthly amounts reach the analysis as scraped. EUR or INR amounts were averaged into the same figures, and `currency` was whichever job came first. A job with only a `maxAmount` was not counted in `withSalaryCount` (nor in `compareSites`' `withSalary`), and a `0` placeholder `minAmount` with a real `maxAmount` was not counted either. The CLI printed the range with a fixed `$`. Used by `POST /api/jobs/analyze`, CLI `search --analyze` and the `summary` / `siteComparison` of CLI `compare`.
+
+**Fix.** `summarize()` selects jobs with `hasSalaryAmount(compensation)` (`@ever-jobs/common`: a finite bound above zero, min or max). For each one it annualises a copy with `convertToAnnual` (hourly × 2080, daily × 260, weekly × 52, monthly × 12; the job is not changed), takes the low end as `minAmount ?? maxAmount` and the high end as `maxAmount ?? minAmount` (a `0` or non-finite bound counts as missing). `minSalary`, `maxSalary` and `avgSalary` (still the mean of the low ends) are computed over the jobs in the most common currency only (upper-cased; missing = `USD`; on a tie the one that comes first), and `currency` reports it. Jobs in other currencies still count in `withSalaryCount`. `compareSites()` counts `withSalary` with `hasSalaryAmount` too. The `JobSummaryDto` shape is unchanged. CLI `search --analyze` prints `Salary range (EUR): 50,000 - 80,000 (avg 60,000)` instead of `$…`. Known limit: a compensation whose interval is missing or unknown is used as given (`convertToAnnual` leaves it alone). Known limit: with `EVER_JOBS_SALARY_GRAMMAR=legacy` and `enforceAnnualSalary: true`, a salary parsed from the description keeps its source interval (for example `hourly`) on amounts that are already yearly, as the legacy rule always did (pinned in `packages/common/__tests__/salary.spec.ts`), so the analysis annualises it again (`$25 - $35 per hour` reports 108,160,000 - 151,424,000). The default grammar is not affected. Not changed here: CLI `--format summary` (`toSummary` in `search.command.ts`) still counts salaries with `compensation?.minAmount`.
+
+**Files:** `packages/analytics/src/analytics.service.ts`, `packages/analytics/__tests__/analytics.spec.ts`, `apps/cli/src/commands/search.command.ts`, `apps/cli/__tests__/search-analyze.command.spec.ts` (new), `docs/API_CHANGELOG.md`, `docs/log.md`.
+
+**Validation:** all 6 new tests (hourly + yearly gives `minSalary` 52000; two USD jobs + one EUR job listed first gives `USD` and the EUR amounts do not move the figures; max-only counts in `summarize` and in `compareSites`; a `0` `minAmount` is not the low end; the CLI line names `EUR` and no `$`) fail against develop and pass now; the existing yearly USD test stays green.
+
+### Fix: a half-open circuit breaker refuses concurrent calls while its probe is in flight (T-2547)
+
+**Symptom.** `CircuitBreakerService.exec()` (`packages/plugin/src/circuit-breaker/circuit-breaker.service.ts`) refused a half-open call only when the probe quota was spent **and** no probe was in flight (`halfOpenAttempts >= halfOpenProbes && halfOpenInFlight === 0`). After the cooldown the first call became the probe; a call that arrived while the probe was still running failed the `halfOpenInFlight === 0` test, was not refused, and ran too, and so did every later concurrent call. `JobsService` wraps every per-source dispatch in this breaker, so concurrent searches all hit a recovering site at once, against the contract in `packages/models/src/interfaces/circuit-breaker.interface.ts` ("a bounded number of probe calls (`halfOpenProbes`) flow through"; the default is 1).
+
+**Fix.** In half-open with the probe quota spent, `exec()` now always throws `ERR_SOURCE_CIRCUIT_OPEN`. It re-arms `open` with a fresh cooldown only when no probe is in flight; otherwise it leaves the state alone, so the in-flight probe's outcome settles it (success → `closed`, failure → `open` with a new cooldown, circuit-neutral → the slot is handed back and the breaker stays half-open). `onSuccess`, `onFailure` and `onNeutral` are unchanged.
+
+**Files:** `packages/plugin/src/circuit-breaker/circuit-breaker.service.ts`, `packages/plugin/src/circuit-breaker/__tests__/circuit-breaker.service.spec.ts`, `docs/log.md`.
+
+**Validation:** 6 new tests in `circuit-breaker.service.spec.ts` (a concurrent call is refused while the only probe is pending; the probe's success closes the breaker and later calls run; the probe's failure re-opens it with a fresh cooldown; with `halfOpenProbes: 2` two concurrent probes run and the third is refused; a circuit-neutral probe error still hands its slot back; with no probe in flight a spent quota still re-arms `open`). The first 5 fail against develop (the concurrent call resolves instead of being refused) and pass now; the last passes before and after. All 4 circuit-breaker suites pass (76 tests).
+
+### Fix: GraphQL `descriptionFormat` is validated and its documented `text` value means plain (T-2523)
+
+**Symptom.** The GraphQL schema documented `SearchJobsInput.descriptionFormat` as `markdown, html, or text` (`apps/api/src/jobs/gql-types.ts`) and validated it only with `@IsString()`, and `JobsResolver.searchJobs` (`apps/api/src/jobs/jobs.resolver.ts`) forwarded it unchanged. The values the sources know are `markdown`, `html` and `plain` (`DescriptionFormat`), and the source plugins convert only for `plain` or `markdown`, passing anything else through as HTML. So a client that followed the schema and sent `"text"` got raw HTML descriptions, and typos such as `"PLAIN"` or `"md"` were accepted silently, where REST (`@IsEnum(DescriptionFormat)` on `ScraperInputDto`) answers 400.
+
+**Fix.** `descriptionFormat` is now `@IsIn([...Object.values(DescriptionFormat), 'text'])`, so any other value (an empty string included) is a `BAD_REQUEST` before scraping, and its description reads "markdown, html or plain ('text' is an alias of plain)". The resolver maps `'text'` to `DescriptionFormat.PLAIN` on the input before the cache key is built, so both spellings share one cache entry and `JobsService` receives `plain`. This replaces, for `descriptionFormat` only, the lenient rule Spec 1730 §12.6 / §12.7 kept (any format string); the lenient `country` rule is unchanged.
+
+**Files:** `apps/api/src/jobs/{gql-types,jobs.resolver}.ts`, `apps/api/src/jobs/__tests__/{jobs.resolver,gql-types.schema}.spec.ts`, `apps/api/__tests__/integration/search-input-pipe.integration.spec.ts`, `.specify/specs/1730-career-level-classifier/spec.md` (a dated note under §12.7), `docs/API_CHANGELOG.md`, `docs/log.md`.
+
+**Validation:** 8 tests fail against develop and pass now: 2 in `jobs.resolver.spec.ts` (`'text'` reaches the service as `plain`; `'text'` and `'plain'` share one cache key), 4 in `gql-types.schema.spec.ts` (the `ValidationPipe` rejects `bogus`, `PLAIN`, `md` and `""` with a `BadRequestException`) and 2 in the booted-app `search-input-pipe.integration.spec.ts` (`"text"` arrives as `plain`; `"md"` is a `BAD_REQUEST` and nothing is scraped). The existing schema case that passes `'text'` still passes, as do the new cases that accept `markdown`, `html`, `plain` and `text` and pass `markdown`, `html` and `plain` through unchanged. `npm run test:core` passes (149 suites, 5541 tests; 1 suite and 4 tests skipped; the two ATS-batch integration suites were re-run in band after their workers died on this shared PC's memory guard), both CI type-checks are clean and `npm run lint:docs` passes.
+
+### Fix: a request that fails validation no longer logs its credentials (T-2520)
+
+**Symptom.** On a 400 with validation errors, the global `HttpExceptionFilter` (`apps/api/src/filters/http-exception.filter.ts`) logged `Request body: ${JSON.stringify(request.body)}` at warn level. A search that sends per-request source credentials (`ScraperInputDto.auth`, e.g. a Greenhouse `apiKey` or Upwork `clientSecret` / `accessToken` / `refreshToken`) or proxy URLs with `user:password@` (`proxies`) and has one bad field (e.g. `resultsWanted: "x"`) wrote those secrets in plain text to the server log and any log shipper, against `docs/SECURITY_GUIDELINES.md`. A circular body also made the filter itself throw (`Converting circular structure to JSON`), so no error response was sent.
+
+**Fix.** New `apps/api/src/filters/log-safe-body.ts`: `toLogSafeBody` makes a redacted copy (every value under an `auth` key, at any depth, becomes `[REDACTED]` with the keys kept; so does every value under a secret-looking key such as `apiKey`, `token`, `secret`, `password`, `clientSecret`, `authorization`, `cookie`; every string under a `proxies` or `proxy` key loses everything before its last `@`, so `http://alice@example.com:secret@h:1` becomes `http://***@h:1` (a username or password with `@`, a quote or a space, which the URL parser accepts, would get past `redactCredentials`, which stops at the first `@`); every other string goes through `redactCredentials`, so `http://u:p@h:1` becomes `http://***@h:1`), and `serializeBodyForLog` serialises it and cuts it to 2048 characters, after redaction. Odd input never throws: cycles become `[Circular]`, depth over 8 and more than 1000 values become `[Truncated]`, binary data becomes `[Binary N bytes]`, an unreadable body becomes `[Unserializable body]`. The filter logs that string instead of `request.body`; the validation messages are logged as before. `redactCredentials` moved from `apps/api/src/jobs/health.controller.ts` to `apps/api/src/utils/redact-credentials.ts` unchanged; the controller re-exports it. Known limit: a secret in another form under an ordinary key (e.g. `?api_key=` inside a URL string) is not detected; the redaction goes by key name and by `user:password@`.
+
+**Files:** `apps/api/src/filters/{log-safe-body,http-exception.filter}.ts`, `apps/api/src/filters/__tests__/{http-exception.filter.redaction,log-safe-body}.spec.ts`, `apps/api/src/utils/redact-credentials.ts`, `apps/api/src/jobs/health.controller.ts`, `docs/SECURITY_GUIDELINES.md`, `docs/log.md`.
+
+**Validation:** all 5 tests of `http-exception.filter.redaction.spec.ts` fail against develop's filter (the API key and proxy passwords are in the logged body; the circular body throws) and pass now. The new `log-safe-body.spec.ts` (46 tests) passes, and `http-exception.filter.metrics.spec.ts` and the `redactCredentials` tests stay green. `npm run test:core` passes (149 suites, 5518 tests; 1 suite and 4 tests skipped), and both CI type-checks are clean.
+
+### Fix: CSV exports neutralise spreadsheet formulas and keep object list items readable (PR #136)
+
+**Symptom.** Titles, company names and descriptions are scraped from third-party boards. In the API `?format=csv` and the CLI `--format csv` exports, a cell starting with `=`, `+`, `-`, `@`, a tab or a carriage return ran as a formula when the file was opened in a spreadsheet, a bare `\r` was not quoted and could split a row, and in the API export object items in lists (`locations`, `offices`) came out as `[object Object]`.
+
+**Fix.** New `toCsvCell` (`packages/common/src/utils/csv.ts`) is used by both exports. Formula-leading text gets a leading `'`; numbers stay raw (`-5`). Cells holding `,` `"` `\n` or `\r` are quoted. Object list items and nested objects are written as JSON, dates as ISO-8601 strings. Known limit: a spreadsheet that opens the comma-separated file with `;` as its separator (the default in many European locales) can still split a value at a `;` inside it, and quoting does not stop that, because such a reader honours a quote only at the start of its own field. `docs/API_CHANGELOG.md` and `docs/CLI.md` say so.
+
+**Files:** `packages/common/src/utils/{csv,index}.ts`, `packages/common/__tests__/csv.spec.ts`, `apps/api/src/jobs/jobs.controller.ts`, `apps/api/src/jobs/__tests__/jobs.controller.spec.ts`, `apps/cli/src/commands/search.command.ts`, `apps/cli/__tests__/search-csv.command.spec.ts`, `docs/API_CHANGELOG.md`, `docs/CLI.md`, `docs/log.md`.
+
+**Validation:** the new specs and the API controller, CLI and `packages/common` suites pass; the `tsconfig.typecheck.json` type-check shows no error in the touched files. Against develop's sources, all 7 new tests of the first commit fail.
+
+### Fix: GraphQL queries work with API key auth and rate limiting on (PR #137)
+
+**Symptom.** With `ENABLE_API_KEY_AUTH=true` (and `API_KEYS` set) or `RATE_LIMIT_ENABLED=true`, every `/graphql` query failed with `Cannot read properties of undefined (reading 'headers')` (or `'ip'`), even with a valid key. GraphQL only broke in the hardened deployments.
+
+**Cause.** The global `ApiKeyGuard` and the stock `ThrottlerGuard` read the request through `switchToHttp().getRequest()`. Inside a resolver that is the resolver root (`undefined`); the request lives in the GraphQL context.
+
+**Fix.** New `getRequestFromContext()` (`apps/api/src/auth/context-request.ts`) takes `req` from the GraphQL context for GraphQL and from `switchToHttp()` otherwise. `ApiKeyGuard` uses it (a missing request counts as a missing key). New `GqlThrottlerGuard` (`apps/api/src/auth/gql-throttler.guard.ts`) extends `ThrottlerGuard` and overrides `getRequestResponse()` for GraphQL (response from `req.res`); `AppModule` registers it in place of `ThrottlerGuard`. REST is unchanged. Each top-level GraphQL field (aliases included) counts as one request against the limit. A throttled GraphQL call returns the error `ThrottlerException: Too Many Requests` with the `Retry-After` header.
+
+**Files:** `apps/api/src/auth/{context-request,gql-throttler.guard,api-key.guard}.ts`, `apps/api/src/app.module.ts`, `apps/api/src/auth/__tests__/{api-key.guard,gql-throttler.guard}.spec.ts`, `docs/ARCHITECTURE_OVERVIEW.md`, `docs/log.md`.
+
+**Validation:** the two auth specs pass (22 tests); 9 of the 11 new tests fail against develop's guards (the 2 that pass are the auth-off and REST controls). Both CI type-checks and `nest build` pass. A full-app HTTP probe with both features on (missing, wrong and valid keys, throttling, per-IP budgets, aliases, GET `/graphql`, REST `/ping`) passes on this change; on develop every GraphQL case fails with the `TypeError`.
+
+### Fix: rate limiting counts per valid API key, and `TRUST_PROXY` lets it see clients behind a reverse proxy (T-2521)
+
+**Symptom.** With `RATE_LIMIT_ENABLED=true` behind a reverse proxy (as `docs/SECURITY_GUIDELINES.md` recommends), every caller shared one rate limit bucket: one busy client got everyone else `429 Too Many Requests`. The OpenAPI description (`apps/api/src/main.ts`) promised limits "based on your API key or IP address", but no per-key limiting existed.
+
+**Cause.** `GqlThrottlerGuard` (`apps/api/src/auth/gql-throttler.guard.ts`) overrode only `getRequestResponse()`, so the tracker was the `@nestjs/throttler` default, `req.ip`. `main.ts` never set Express's `trust proxy`, and nothing read `X-Forwarded-For`, so behind a proxy `req.ip` was the proxy's address for every caller.
+
+**Fix.** `GqlThrottlerGuard` now overrides `getTracker()` (`ConfigService` is injected next to the throttler options, storage and `Reflector`). With `auth.enabled` on and a key in the `auth.headerName` header that is listed in `auth.apiKeys`, the tracker is `key:` plus the key's SHA-256 (hex), never the raw key. Every other request (no key, an unknown key, or auth off) is tracked by `req.ip`, so made-up keys never get a bucket of their own. One valid key shares one bucket across IPs. New opt-in `TRUST_PROXY` (`apps/api/src/config/trust-proxy-config.ts`, exposed as `trustProxy` in `configuration.ts`): unset or blank keeps today's behaviour; `true` / `false`; a whole number is a hop count; anything else is a comma-separated list of addresses, CIDRs or the names `loopback`, `linklocal`, `uniquelocal`. When set, `main.ts` calls `app.getHttpAdapter().getInstance().set('trust proxy', value)` and logs it, with a warning for `true` (any client can then spoof `X-Forwarded-For`). A hop count trusts whatever peer connects, so the docs recommend the proxy's addresses and a hop count only when the API port is reachable only through the proxy. `docs/API_CHANGELOG.md` notes the new variable and that a key shared by several clients now shares one budget. Express checks the list when it is applied, so an invalid address stops the API at startup. The OpenAPI text now says how the limit is keyed. README, `.env.example`, `docs/SECURITY_GUIDELINES.md` and `docs/ARCHITECTURE_OVERVIEW.md` document the variable and the warning. Not changed: the throttler still keys each bucket per route handler as well (its default `generateKey`).
+
+**Files:** `apps/api/src/auth/gql-throttler.guard.ts`, `apps/api/src/auth/__tests__/gql-throttler.guard.spec.ts`, `apps/api/src/config/{trust-proxy-config,configuration}.ts`, `apps/api/src/config/__tests__/trust-proxy-config.spec.ts` (new), `apps/api/src/main.ts`, `README.md`, `.env.example`, `docs/SECURITY_GUIDELINES.md`, `docs/ARCHITECTURE_OVERVIEW.md`, `docs/API_CHANGELOG.md`, `docs/log.md`.
+
+**Validation:** `gql-throttler.guard.spec.ts` 14/14 (9 new) and `trust-proxy-config.spec.ts` 12/12 pass. Against develop's sources, 6 of the 9 new guard tests fail (k1 then k2 from one IP gets `ThrottlerException`; the tracker is the IP, not `key:<sha256>`); the 3 that pass are the IP-bucket controls (same invalid key, rotating invalid keys, auth off). `trust-proxy-config.spec.ts` cannot load on develop (no resolver). Its Express cases boot a Nest app and read `req.ip` with `X-Forwarded-For` for unset, `loopback`, a list without the peer, hop count `1` and `true`. `npm run test:core`, both CI type-checks (`apps/api/tsconfig.build.json`, `tsconfig.typecheck.json`) and `npm run lint:docs` pass.
+
+### Fix: CLI `search --no-description` leaves descriptions out of the output (T-2548)
+
+**Symptom.** `ever-jobs search -q engineer -s remotive --no-description` still printed every full description, in `json` and `csv` output, on stdout and with `-o`, and with `--stdin` too. README and `docs/CLI.md` document the flag as the way to cut output size for LLMs.
+
+**Cause.** In `apps/cli/src/commands/search.command.ts` the option parser `parseNoDescription()` returned `true`, which is also what commander gives a `--no-*` flag's `description` when the flag is absent, so the flag could not be told apart from its absence. `SearchOptions` had no `description` field and nothing read the value; `formatOutput` wrote the whole job and `toCsv` always had a `description` column.
+
+**Fix.** `parseNoDescription()` returns `false` and `SearchOptions` has `description?: boolean`. When it is `false`, `executeAndOutput` formats copies of the jobs without `description` (the jobs themselves are not changed, so `--exclude-keyword` still matches descriptions and `--analyze` still sees them) and `toCsv` leaves the `description` column out; `datePostedAt`, `datePostedPrecision` and `datePostedBasis` then move one column to the left (`docs/CLI.md` says so). Without the flag the output is byte-identical. `--bd`, `table` and `summary` output never had descriptions and are unchanged.
+
+**Files:** `apps/cli/src/commands/search.command.ts`, `apps/cli/__tests__/search-filters.command.spec.ts`, `docs/CLI.md`, `docs/log.md`.
+
+**Validation:** 8 new tests in `search-filters.command.spec.ts` (18/18 pass). Against develop's command, 4 fail: `--no-description` parses to `true`, and `LONG-DESC` is in the `json`, `csv` and `--stdin` output. The 4 that pass on develop are the controls: no flag keeps `description` not `false`, `json` output byte-identical, `csv` keeps its original header, and `--exclude-keyword` still drops a job by its description. The CLI unit suites pass (6 suites, 79 tests). `npx tsc --project tsconfig.typecheck.json --noEmit` and `npx nest build cli` pass; `npm run lint` runs no tasks. Not fixed here, and the same on develop: the built CLI (`node dist/apps/cli/main.js search ...`) does not boot (Nest cannot resolve `PluginRegistry` for `JobsService` in `CliModule`, noted under PR #135), and on Node 24 `ts-node` cannot load `apps/cli/src/main.ts` (`ERR_MODULE_NOT_FOUND` for `cli.module`), so `apps/cli/__tests__/search.e2e-spec.ts` (non-blocking in CI) fails 6/6 locally.
+
+## 2026-11-15 — CLI: numeric flags are parsed strictly and bounded (PR #135)
+
+**Symptom.** `search --results abc` (also `--offset`, `--hours-old`, `--distance`, `--timeout`, `--rate-delay-min/-max`, `--linkedin-company-ids`, and the same flags of `compare`) ran the search with `resultsWanted: NaN` and no message. The flags used `parseInt` / `parseFloat`, and `NaN ?? 15` stays `NaN`, so the default never applied and the `EVER_JOBS_MAX_RESULTS_WANTED` clamp in `JobsService` ignores `NaN` too. `5x`, `1e3` and `20.7` were silently read as `5`, `1` and `20`, and the CLI had no upper bound of its own (`-n 100000000` reached `JobsService`, which clamps it to `EVER_JOBS_MAX_RESULTS_WANTED`, default 1000).
+
+**Fix.** New `apps/cli/src/commands/numeric-options.ts`. The parsers accept plain decimal text only (`parseCliInteger`: digits; `parseCliDecimal`: digits with an optional fraction) and return `NaN` otherwise, like `parseNonNegativeInt` for the crawl flags. `search` and `compare` then call `applyNumericCliOptions`, which drops every flag that is not a finite number inside its range and prints `Warning: --results must be a whole number from 1 to 100000; ignoring it` to stderr, so the built-in default applies (the same "warn and ignore" stance as the crawl flags). Ranges: `--results` 1–100000, `--offset` 0–100000, `--hours-old` 0–87600, `--distance` 0–25000, `--timeout` 0–3600 (0 = no request timeout, as before; the help text says so), `--rate-delay-min/-max` 0–3600 (decimal), `--linkedin-company-ids` whole numbers ≥ 1 (invalid ids are dropped, valid ones kept). Valid values and unset flags behave as before. Behaviour that changes: `5x`, `1e3`, `20.7` and `-5` are now warned about and ignored instead of being read as a different number; `--results 0` is now ignored (default 15) instead of being sent as 0. Not touched: the `--stdin` JSON path, the HTTP API, and `rateDelayMax < rateDelayMin`. Found in review, not fixed here: the CLI does not boot on develop (Nest cannot resolve `PluginRegistry` for `JobsService` in `CliModule`).
+
+**Files:** `apps/cli/src/commands/numeric-options.ts` (new), `apps/cli/src/commands/{search,compare}.command.ts`, `apps/cli/__tests__/numeric-options.spec.ts` (new), `docs/log.md`.
+
+**Validation:** first written without a shell; the review run found that `numeric-options.ts` did not compile (TS2322, failing `tsc -p tsconfig.typecheck.json` and `nest build cli`) and fixed it. Now: both `tsc` projects and `nest build cli` clean; `numeric-options.spec.ts` 34/34 and the `apps/cli/__tests__` unit suites 5/5 (70 tests) green. Against develop's `search` / `compare` commands, 4 of the new tests fail (`NaN`, `5`, `NaN` and `-3` reach the input).
+
+## 2026-11-14 — Fix: the ambiguous `kr` currency symbol only matches as a stand-alone token
+
+**Symptom.** A salary text with no currency symbol or ISO code but a word that starts with the letters "kr" (`8.000 - 10.000, Kraków`, `Krefeld`, `Kroger`) was read as Swedish kronor. The wrong detection also hid the country currency (`confidence: 'symbol'` outranks `'country'`), so `extractSalary` found no range at all where a `country` hint should have given `PLN` / `EUR` / `GBP` and a bare-range match.
+
+**Cause.** `parseSalaryCurrency` (`packages/common/src/utils/helpers.ts`, rule 3) tested the ambiguous symbol with `lowered.includes('kr')`, a plain substring test, while ISO codes already needed a boundary on both sides.
+
+**Fix.** `kr` now counts only when no letter (Unicode `\p{L}`, so caseless scripts such as Han, Arabic and Thai count too) or combining mark (`\p{M}`) sits directly before or after it; the neighbouring character is read as a whole code point, so a letter outside the Basic Multilingual Plane (`𠮷`, `𝐀`) counts, while an emoji does not. A digit, space or punctuation still counts as a boundary, so `500 kr`, `500kr`, `kr 500`, `Kr. 500` and `45 000 kr/mån` keep their result (SEK, or the `country` hint's NOK / DKK). Unique symbols (`€`, `£`, `zł`, `Fr.`, `$`) are unchanged. Known limit: `Fr.` still matches the German weekday abbreviation (`Mo-Fr.`); not touched here.
+
+**Files:** `packages/common/src/utils/helpers.ts`, `packages/common/__tests__/helpers.spec.ts`, `docs/log.md`.
+
+**Validation:** `npx jest --testPathPatterns packages/common/` passes (43 suites, 3578 tests; `helpers.spec.ts` 124/124) and the `tsconfig.typecheck.json` type-check is clean. Against develop's `helpers.ts`, the new word tests fail (11 of them on the first version of this fix); the "still a krona sign" tests pass on both.
+
+## 2026-11-13 — CI doc: blocking and non-blocking jobs; `Retry-After` parsing honours fractional seconds and is bounded; Internshala live e2e no longer asserts the board's ranking
+
+**CI: live scraper e2e shards no longer block.** The live scraper e2e matrix already had `fail-fast: false` and a job-level `continue-on-error: true`, but the in-cluster runner (`ci-builds`, which runs the workflow with `act`) ignores a job-level `continue-on-error`, so a failing live shard turned the `ci-builds/ci.yml` status red. The test step "Run source scraper e2e tests" now also carries `continue-on-error: true`, the same pattern as `Test (E2E - Live APIs)`. New `docs/CI.md` lists which `ci.yml` jobs fail a run (docs lint, build and type-check, health and smoke, Core, feature plugins, Docker, and in-cluster the mocked scraper unit shards) and which only report (live API e2e, live-site scraper e2e shards), and why live third-party boards cannot gate a pull request. Files: `.github/workflows/ci.yml`, `docs/CI.md`, `docs/index.md`, `docs/log.md`.
+
+**Retry-After.** `parseRetryAfter` (`packages/common/src/http/http-client.ts`) accepted only whole digits as seconds and sent everything else to `Date.parse`, whose legacy fallback is lenient. A server that answers `Retry-After: 90.5` was therefore not understood (the wait fell back to our own back-off instead of the 90 s asked for), and number-like text such as `1.5` could be read as a calendar date in the past. It also returned `Infinity` for a very long digit string and years for a far-future date, which reached the give-up log line and the limiter as-is. Now: decimal seconds are read and rounded up to the next millisecond; only text that carries a clock time (`12:00:30`) is treated as an HTTP-date; the result is at most `MAX_PARSED_RETRY_AFTER_MS` (30 days, a fixed constant; it changes no give-up/cap decision unless `maxRetryAfterMs` is configured above 30 days, and the limiter already caps any cool-down at `EVER_JOBS_CRAWL_MAX_COOLDOWN_MS`). Whole seconds, HTTP-dates, empty and unparseable values keep their old result. `docs/CRAWL_POLICY.md` §11 states the accepted forms.
+
+**Files:** `packages/common/src/http/http-client.ts`, `packages/common/__tests__/http-client-crawl-policy.spec.ts`, `docs/CRAWL_POLICY.md`, `docs/log.md`.
+
+**Validation:** `http-client-crawl-policy.spec.ts` (313 tests) and the `packages/common` suite pass; 4 of the 5 new tests fail against the previous `http-client.ts`.
+
+**Internshala.** The live test "should encode a multi-word keyword for an internship-only search" required the top 3 results for "data science" to mention "data", which is the board's relevance ordering, not our code, and it failed CI. The live test now keeps only shape checks (at most 3 results, `/internship/detail/` URLs, or diagnostics when the board is unreachable). The encoding itself is asserted exactly in a new parser unit test: `searchTerm: 'data science', jobType: internship` plans to `https://internshala.com/internships/keywords-data%20science/` (and `page-2/`). The first live test (python keyword) is unchanged. No source change.
+
+**Files:** `packages/plugins/source-internshala/__tests__/{internshala.e2e-spec,internshala.parser.spec}.ts`, `docs/log.md`.
+
+**Validation:** not run in the authoring session (no shell access); CI must run the new unit test. The CI page was read against `.github/workflows/ci.yml`; docs lint was not run locally, and the log header was checked by hand against the duplicate and ordering rules of `scripts/docs-lint.ts` (one `2026-11-13` entry).
+
+## 2026-11-12 — Fix: a company named only of suffix words keeps its own dedup identity
+
+**Change:** `normalizeCompany` (`packages/common/src/normalize.ts`) strips legal-form and descriptor suffixes (`Inc`, `GmbH`, `Group`, `Labs`, `Systems`, …). A name made only of such words (`Systems Group`, `Labs`, `Holdings, Ltd.`) normalised to `''`, so every such company shared one canonical-key company part and two unrelated employers posting the same title in the same place were merged by the hash stage of the dedup engine. When nothing is left after stripping, the name now falls back one tier at a time — legal forms only, then no suffix stripping at all — so it keeps an identity of its own. Names that keep a core word are unchanged (`Acme Systems Group Inc.` → `acme`); punctuation-only input still gives `''`. The fallback settles on a fixed point (stripping punctuation can expose a suffix word, e.g. `S.A. Inc` → `s a inc` → `s a`), so normalising a result again never changes it. No pre-existing non-empty result changes. Canonical keys (and `dedupKey`) of postings from suffix-only company names change once, from an empty company part to the name.
+
+**Files:** `packages/common/src/normalize.ts`, `packages/common/__tests__/normalize.spec.ts`, `docs/API_CHANGELOG.md` (one-time key change noted), `docs/log.md`.
+
+**Validation:** reasoned by hand against the new cases; the test suite could not be run in this session (no shell access).
+
+## 2026-11-11 — Spec 1754 — canonical job-URL skip pass (default off)
+
+**Change:** New `canonicalJobUrl` and `dropDuplicateJobUrls` (`@ever-jobs/common`, `utils/job-url-dedup.ts`): tracking parameters (`utm_*`, click ids) are removed, the host is lower-cased, the remaining parameters are sorted; the first posting per canonical URL and the same company, title, location and employment class wins. `JobsAggregator` runs it only when the dedup engine does not (`dedup=false` or no engine bound), when `AggregateOptions.dedupByUrl` or `EVER_JOBS_DEDUP_BY_URL=true` (off by default), logs the `duplicate_canonical_url` reason and reports `AggregateResult.urlDuplicatesSkipped`. Nothing removed.
+
+**Files:** `packages/common/src/utils/{job-url-dedup,index}.ts`, `apps/api/src/jobs/jobs.aggregator.ts`, tests `packages/common/__tests__/job-url-dedup.spec.ts`, `apps/api/src/jobs/__tests__/jobs.aggregator.url-dedup.spec.ts`, `.specify/specs/1754-canonical-job-url-dedup/{spec,plan,tasks}.md`, `docs/index.md`.
+
+**Validation:** tests written but not run in the authoring session (no shell access); CI must run them.
+
+## 2026-11-11 — Spec 1760 — `ever_jobs_sources_total` reports the registered sources
+
+**Change:** `MetricsService.onModuleInit` set `ever_jobs_sources_total` to the literal `160`, so `/metrics` never matched the registry. The gauge now has a `collect` callback fed by `MetricsService.bindSourceCountSource`; `MetricsCircuitBreakerBridge` binds `PluginRegistry.size` at bootstrap (with or without a circuit breaker). Unbound it reads `0`; a throwing source or a negative / non-finite count leaves `/metrics` up and the last good value in place. HELP text now reads "Number of registered job sources (source plugins)". Nothing removed.
+
+**Files:** `apps/api/src/metrics/metrics.service.ts`, `apps/api/src/jobs/metrics-circuit-breaker.bridge.ts`, tests `apps/api/src/metrics/__tests__/metrics.service.spec.ts`, `apps/api/src/jobs/__tests__/metrics-circuit-breaker.bridge.spec.ts` (new); `.specify/specs/1760-sources-total-metric/{spec,plan,tasks}.md`, `docs/{index,log}.md`.
+
+**Validation:** written without a shell, so the new specs were not run here; CI on the pull request is the first run.
+
 ## 2026-10-23 — Node 26.12.1 runtime (security release)
 
 **Change:** Node.js security release 26.12.1 (2026-10-21), fleet-wide sweep. Both stages of `Dockerfile` (the `ghcr.io/ever-jobs/ever-jobs` API image) and of `.deploy/mcp/Dockerfile` move from `node:20-alpine` to `node:26.12.1-alpine`; every CI `node-version` (seven `20.x` and the build matrix `[20.x]`) becomes `26.12.1`. The `Dockerfile` comments that named `node:20-alpine` and the v20.20.2 headers URL now name 26.12.1. No dependency, `engines` or `@types/node` change: the `@types/node` caret ranges (`^20.14.0`, `^20.0.0`) keep the type definitions on Node 20 while the runtime moves to 26 (moving the types belongs to the dependency-majors refresh, PR #114). `better-sqlite3` 12.11.1 ships a `node-v147-linuxmusl-x64` prebuild for Node 26, and the `npm_config_nodedir` fallback stays. The salvaged dependency-majors branch (PR #114) is unaffected and still needs its own refresh. Nothing removed.
@@ -13,6 +316,124 @@
 
 **Validation:** CI on the pull request (every job on 26.12.1), then the develop image build and the `ever-jobs-dev` pod reporting `node -v` = v26.12.1 with `/health` answering.
 
+## 2026-10-10 — Spec 5175 — Factorial board apex rebrand (`factorialhr.com` → `factorial.com`) + first unit suite
+
+**Change:** Factorial rebranded its tenant career-board domain: `{slug}.factorialhr.com` now 301-redirects to `{slug}.factorial.com`, and `data-job-postings-url` values on the index page are absolute on the new apex. Verified live 2026-10-10 (`jobs-tendencys`). `FACTORIAL_APEX` is now `factorial.com`; the single `FACTORIAL_HOST_TEMPLATE` became ordered `FACTORIAL_HOST_TEMPLATES` — the canonical apex is tried first and the legacy (301-redirecting) sub-domain kept as a fallback for lagging tenants; the sitemap is fetched from whichever host served the index. The e2e spec's stale `jobUrl.includes('factorialhr.com')` literal (the observed CI break) is replaced by a `/job_posting/` path-shape assertion — custom-domain tenants make any host literal brittle. No field-mapping changes: `dedupKey` is `company|title|location` and `atsId` is the numeric path token, so legacy jobs keep their keys. Constants/types/e2e docblocks updated to the new apex.
+
+**Files:** `packages/plugins/source-ats-factorial/src/{factorial.constants.ts,factorial.service.ts,factorial.types.ts}`, `packages/plugins/source-ats-factorial/__tests__/{factorial.e2e-spec.ts,factorial.service.spec.ts,fixtures/factorial-index.html,fixtures/factorial-detail.html,fixtures/factorial-sitemap.xml}`, `.specify/specs/5175-factorial-apex-rebrand/*`, `docs/index.md`, `docs/log.md`.
+
+**Validation:** new unit suite 7/7 green (fixture mapping incl. `applyUrl`/sitemap dates/sidebar location+team, canonical-host-first, legacy fallback, both-hosts-down → `[]`, `companyUrl` slug resolution, no-input → `[]` without fetch, `resultsWanted`); `npx tsc --project tsconfig.typecheck.json --noEmit` clean; `npm run lint:docs` clean.
+
+---
+
+## 2026-10-10 — Spec 5174 — comeet careers-page `COMPANY_POSITIONS_DATA`
+
+**Change:** `source-ats-comeet` had never returned a job — its careers-api
+call (`company/{companySlug}/positions?token=`) sent an empty token and the
+board slug where `company_uid` belongs; live response
+`{"status":400,"Token is missing"}` → `classifyScrapeError` → `[]` on every
+scrape. Rewritten: fetch the careers page (`input.companyUrl` when set, else
+`https://www.comeet.com/jobs/{slug}`; redirects carry slug→uid anyway) and
+parse the embedded `COMPANY_POSITIONS_DATA`/`COMPANY_DATA` assignments
+(string-aware bracket-balanced `JSON.parse` — strict JSON in page). Per
+position: `name`→title, `uid`→atsId/id, `url_active_page`→jobUrl+applyUrl,
+`company_name` (→`COMPANY_DATA.name`→slug), `department`,
+`time_updated`→datePosted, `custom_fields.details[].value`→stripHtmlTags
+description (same `[{name,value}]` shape the API used). Location via
+`toLocationDto(position.location, {textKeys:['name'], parseTextFallback:true})`
+— `city`/`state`/`country`/`postal_code` direct-map, `timezone`/`location_uid`/
+`is_remote`/`street_name` ride `extras`; `locations:[dto]` when non-null.
+`isRemote` = `location.is_remote === true` or `workplace_type` ~ /\bremote\b/i
+(replaces the label string-match); `employmentType` = `employment_type`.
+Marker-free page → `JobResponseDto([])` + warn (soft-404 board, not a
+classified error); `resultsWanted`, `classifyScrapeError`, resolve-not-throw
+catch, `companySlug` requirement preserved. No careers-api fallback —
+embedded payload is complete.
+
+**Files:** `packages/plugins/source-ats-comeet/src/comeet.service.ts`
+(rewrite), `packages/plugins/source-ats-comeet/__tests__/` (new — plugin's
+first suite), `.specify/specs/5174-comeet-careers-page-positions/*`,
+`docs/index.md`, `docs/log.md`.
+
+**Validation:** 11 greens on the new suite (captured-page fixture with 2
+real positions — full field mapping, structured-location extras, isRemote
+both paths, companyUrl, resultsWanted, marker-free → [], fetch failure →
+diagnostics); `npx tsc --noEmit -p tsconfig.typecheck.json` clean.
+
+## 2026-10-09 — Spec 5173 — JSON-API plugins adopt `toLocationDtos`
+
+**Change:** four JSON-API plugins whose structured location objects were
+hand-mapped adopt the spec-5171 mapper with per-feed options. **gem**:
+`toLocationDtos(posting.locations, { textKeys: ['name'], parseTextFallback: true })`
+— `locations[]` now fills from every site (deliberate `dedupKey` change;
+`location` = first result; remote checks unchanged). **recruitly**:
+`toLocationDto(item.location, { aliases: { state: ['regionName'] } })` —
+recovers `postCode`, `addressLine`, `latitude`/`longitude` (→ `extras`); the
+mapped DTO rides the normalised job so recovered fields reach
+`JobPostDto.location`. **arbeitsagentur**:
+`toLocationDto(entry.arbeitsort, { aliases: { state: ['region'] } })` —
+recovers `plz` → `postalCode` and `koordinaten` → `extras`; `homeOffice` →
+`isRemote` unchanged. **cornerstone**:
+`toLocationDtos(requisition.locations ?? requisition.location, { textKeys: ['displayName'], parseTextFallback: true })`
+— `displayName` claimed into `text` and parsed (country canonicalized, e.g.
+`US` → `United States` — deliberate key change); the bespoke
+`locationFromObject` comma-split is deleted; the `displayLocation` fallback
+fires only when the mapper yields nothing; `detectRemote` unchanged.
+Deferred: adp (bespoke per-loc dedup loop), clearcompany (flag-bearing
+location rows), hrone (zero gain — every location field already claimed).
+**Files:** `packages/plugins/source-ats-gem`,
+`packages/plugins/source-ats-recruitly`,
+`packages/plugins/source-arbeitsagentur`,
+`packages/plugins/source-ats-cornerstone` (+ `__tests__`/`fixtures`),
+`.specify/specs/5173-api-location-object-adoption/*`, `docs/index.md`,
+`docs/log.md`.
+
+**Validation:** all existing suites pass; two assertions re-pinned to the
+deliberate new output (gem remote posting now emits a text/country dto;
+cornerstone `US` → `United States`); new captured fixtures for recruitly +
+arbeitsagentur; cornerstone union-input/fallback tests;
+`tsc --noEmit -p tsconfig.typecheck.json` clean; `npm run lint:docs` clean.
+
+## 2026-10-09 — Spec 5172 — cohort-1 JSON-LD plugins adopt `toLocationDtos`
+
+**Change:** mechanical adoption of the spec-5171 mapper in the 29 plugins whose
+bespoke `application/ld+json` extractors hand-mapped `jobLocation.address.*`
+(`addressLocality`/`addressRegion`/`addressCountry`/`postalCode`/
+`streetAddress`). Each swap passes the plugin's `jobLocation` (Place or Place[])
+to `toLocationDtos`/`toLocationDto` — never the whole posting, never a parser
+rewrite. `location` = first mapped result; `locations[]` shape unchanged
+(per-site emitters bizneo/exacthire/hreasily/inrecruiting/pcrecruiter/prescreen
+keep `dtos`; single-element `[location]` emitters keep one element); every
+`??`/label/`og:`/listing-text fallback chain preserved when the mapper returns
+nothing; `dedupKey` untouched (canonical-key reads `city|state|country`
+triples). Dead `firstAddress`/`countryName` helpers removed only where fully
+unused — kept wherever `detectRemote` or a fallback still reads raw address
+parts (hireful, keka, mindscope, namely, pageup, paychex, scouttalent,
+snaphunt). isolved and stepstone excluded: no structured `jobLocation` branch
+exists (isolved's location comes from the jobs API; stepstone's from DOM text
+via `parseLocationList`) — feeding `jobLocation` in would be a new data source,
+not a mechanical swap. Adopted: akkencloud, arcoro, bizneo, brassring,
+careerplug, cezanne, concludis, exacthire, expr3ss, hireful, hreasily, hron,
+inrecruiting, jobtrain, keka, mindscope, namely, otys, pageup, paychex,
+pcrecruiter, peoplestrong, prescreen, rexx, scouttalent, snaphunt, taleez,
+vivahr, workforce.
+
+**Files:** `packages/plugins/source-*/src/*.service.ts` (29 plugins),
+`.specify/specs/5172-jsonld-joblocation-mapper/*`, `docs/index.md`,
+`docs/log.md`.
+
+**Validation:** every touched plugin's existing jest suite passes unmodified
+(29 plugins, ~160 tests); `tsc --noEmit -p tsconfig.typecheck.json` clean;
+`npm run lint:docs` clean.
+
+## 2026-10-08 — Spec 5171 — generic location-object mapper + `LocationDto.extras`
+
+**Change:** structured location *objects* get a shared mapping path — `toLocationDtos(input, opts?)`/`toLocationDto` in `@ever-jobs/common` (`utils/location-object.ts`). Reads own runtime keys (feed type declarations irrelevant), so field coverage no longer depends on how completely somebody typed a payload. `LocationDto` gains `extras?: Record<string,unknown>` — a verbatim, informational-only bag for source fields with no DTO slot (ids, coordinates, location types); `OfficeDto` inherits. Behavior: `opts.in` dotted selector paths (ordered fallbacks; the whole posting is never mapped); only `address`/`postalAddress` auto-descend (root slots win, address fills missing, conflicts → extras; address arrays expand); case-insensitive alias sets per slot; coercion (strings; numbers only for `postalCode`; object leaves `.alpha2Code`/`.name`/`.descriptor`/`.code` for `country`, `.name`/`.descriptor` for `city`/`state`); agreement via `canonicalCountryName`/`normalizeUsState`, conflicts resolve `prefer` → scalar canonical field → slot unset (alternates survive in extras); ambiguous label keys (`officeName`/`siteName`/`displayName`/`descriptor`/`label`/`title`) carry no default → extras, `locationName`/`libelle` → `text`; carry-all `extras` with `keep`/`drop`/`extrasLimits` (4KiB/depth 3/2000 nodes); exact-duplicate dedup over fields + extras. Adopters: `source-ats-dayforce` (`postingLocations`/`PostingLocations` → all sites into `locations[]`, recovering `cityName`/`isoCountryCode`/`formattedAddress`/`coordinates`/`locationId`/`locationType` the old hand-rolled map dropped; flat-field fallback preserved) and shared `mapLocations` in `jsonld.ts` for every JSON-LD plugin (`state`→`region`, label join, `addressCountry.name` conflict preference).
+
+**Files:** `packages/common/src/utils/location-object.ts`, `packages/common/src/utils/index.ts`, `packages/common/src/utils/jsonld.ts`, `packages/common/__tests__/location-object.spec.ts`, `packages/models/src/dtos/location.dto.ts`, `packages/plugins/source-ats-dayforce/src/dayforce.service.ts`, `packages/plugins/source-ats-dayforce/__tests__/dayforce.service.spec.ts`, `.specify/specs/5171-location-object-mapper/*`, `docs/index.md`, `docs/log.md`.
+
+**Validation:** `jest location-object` — 40 green (input shapes, `opts.in` selection/fallback/no-whole-posting, address descent + array expansion, all spec agreement/conflict examples, coercion, ambiguous→extras + `nameKeys`/`textKeys` + double-assignment throw, extras carry-all/`keep`/`drop`/flatten/round-trip, dedup, street/postal-only, `parseTextFallback`); `jest source-ats-dayforce` — 13 green (geo-feed key recovery + multi-site `locations[]`); all `*.locations.spec.ts` — 21 suites / 211 green (JSON-LD regression); `tsc --noEmit` on models/common/dayforce clean.
+
 ## 2026-10-08 — Spec 1753 — SIGTERM drains in-flight searches (`GET /ready`); CI run concurrency and the dedup event-loop budget; API changelog and upgrade notes for Specs 1720-1752; measured list-mode sizing in Spec 1720 FR-13
 
 **Change:** Homelab handover items EJ-6, EJ-5, I-3, EJ-4 and H-2 step 8. **Spec 1753 (new):** `main.ts` calls `installGracefulShutdown(app)`: an Express middleware counts in-flight requests (probes exempt) and, once draining, refuses new ones with 503 + `Retry-After: 1` + `Connection: close`; a one-shot SIGTERM listener (registered before Nest's) flips readiness; `app.enableShutdownHooks(['SIGTERM'], { useProcessExit: true })`. `ShutdownDrainService` sits in the ROOT `AppModule`, whose `onModuleDestroy` Nest runs first, and waits there for the in-flight requests (bounded by `EVER_JOBS_SHUTDOWN_DRAIN_TIMEOUT_MS`, default fan-out deadline + 30 s; connections still open at the timeout are closed) before any other module tears down. New `GET /ready` (503 while draining; `/health` stays 200). `useProcessExit` because the image runs node as PID 1, which ignores a re-raised SIGTERM. **CI:** top-level `concurrency` cancels superseded pull-request runs only (other events group by run id, so pushes to develop/main are never cancelled or queued); `DEDUP_LOOP_MAX_STALL_MS=1000` on Test (Feature Plugins), rationale beside the other perf overrides. **Docs:** `API_CHANGELOG.md` gains `[Unreleased]` sections for Spec 1753 and for Specs 1720-1752 (list mode, NDJSON and its end line, `dedupKey`, `careerLevel` / `careerLevels`, `siteCategories`, store selection, 84 company sources, Workday bounds, the keys-change-once table, restore switches, the image default); `UPGRADE_GUIDE.md` gains both sections with their env-var tables; `DEPLOYMENT.md` a graceful-shutdown section (probe paths, preStop, grace period); Spec 1720 FR-13 (d) records the measured ~36 KiB of heap per job (homelab, 2026-10-05/08) and that the job ceiling, not the deadline, binds a full run.
@@ -20,6 +441,94 @@
 **Files:** `apps/api/src/{main,app.module}.ts`, `apps/api/src/config/{configuration,shutdown-config}.ts`, `apps/api/src/shutdown/{shutdown-drain.service,readiness.controller,graceful-shutdown}.ts`, tests `apps/api/src/config/__tests__/shutdown-config.spec.ts`, `apps/api/src/shutdown/__tests__/{shutdown-drain.service,graceful-shutdown.integration}.spec.ts`, `apps/api/__tests__/health.e2e-spec.ts`; `.github/workflows/ci.yml`; `.env.example`; docs `docs/{API_CHANGELOG,UPGRADE_GUIDE,DEPLOYMENT,index,log}.md`, `.specify/specs/1753-graceful-shutdown-drain/{spec,plan,tasks}.md`, `.specify/specs/1720-list-mode-site-categories/spec.md`.
 
 **Validation:** see the PR: the new suites green (config, service, integration through Nest's own SIGTERM handler, health e2e on the full `AppModule`); removing the wait from `onModuleDestroy` fails 2 of the 3 integration cases; both `tsc` projects clean; `npm run lint:docs` clean.
+
+## 2026-10-07 — Spec 5170 — `source-company-minervahumanoids` plugin
+
+**Change:** new company plugin for Minerva Humanoids (`Site.MINERVAHUMANOIDS = 'minervahumanoids'`, `companyDomains: ['minervahumanoids.com']`). The careers page renders role cards from a hand-rolled static CMS: `GET {origin}/content/published.js` assigns `window.__minervaContent = {…}` (strict JSON parsed out of the JS assignment) and `content.jobs[]` carries the whole board — `{id, title, location, published, applyUrl, program?, blocks[]}`, with `blocks` holding the full description (`paragraph`/`heading` text + `list` items). One plain-HTTP GET, no browser. Mapping: `jobUrl`/`jobUrlDirect` = `item.applyUrl` or `{origin}/careers#job-description-{id}`; `applyUrl` = `item.applyUrl` or the in-page apply form (`{origin}/careers#apply`, `{origin}/careers#talent-apply` for `program:'talent'` roles); free-text `location` parsed via `parseLocationText`; `blocks[]` flattened to headings + `- ` bullets; `published:false` dropped. No `datePosted`/`department`/`employmentType`/`compensation` — absent from the data.
+
+**Files:** `packages/plugins/source-company-minervahumanoids/{src/,__tests__/}` (service, module, index, constants, types, spec, fixtures/published.js — captured live data file), `packages/models/src/enums/site.enum.ts`, `packages/plugins/index.ts`, `tsconfig.base.json`, `jest.config.js`, `.specify/specs/5170-source-company-minervahumanoids/*`, `docs/index.md`, `docs/log.md`.
+
+**Validation:** `jest packages/plugins/source-company-minervahumanoids` — 11 green (all 11 fixture roles map; id/URL fields; `#apply` vs `#talent-apply` anchors by `program`; non-empty `applyUrl` used verbatim; free-text locations; block flattening; `published:false` gating; searchTerm filter; empty/unparseable → `empty` diagnostics; transport failure → classified error). Verified live: `minervahumanoids.com/content/published.js` → 11 jobs.
+
+## 2026-10-03 — Spec 5169 — `source-company-buildnebula` plugin
+
+**Change:** new company plugin for Nebula (`Site.BUILDNEBULA = 'buildnebula'`, `companyDomains: ['buildnebula.com']`). The careers page is a Vite SPA shell whose served HTML carries no job data; the SPA's `useCareersListings` store reads a first-party JSON endpoint, `GET {origin}/api/careers/listings` → `{items: [...]}` — the complete board in one request, no browser. Each listing carries `slug`, `published_at`, `compensation_line`, `equity_sentence`, and a `job` object (`title`, `department`, `team`, `employment_type`, `locations[]` with city/state/country/workplace_type, `compensation{min,max,currency,period}`, `description_sections{prose,responsibilities,requirements,nice_to_have}`, `closing_paragraphs`, `benefits`). Mapping: `jobUrl`/`applyUrl` = `{origin}/careers/{slug}`; `team` tokens → the site's own display labels (`cybernetics`→`Cybernetics`, `materials`→`Materials`, `production`→`Production`, `business_operations`→`Business & Operations`); structured `compensation` → `CompensationDto` (`period:'year'`→`yearly`); description flattened under the site's own section headings ("What to Expect", "What You'll Do", "What You'll Bring", "Nice to Have") + closing paragraphs + benefits + comp/equity lines; `employment_type` underscores normalized (`full_time`→`full-time`) for `jobType`; rows gated on `status:'published'` + `takedown:false` + `visibility:'public'` when declared.
+
+**Files:** `packages/plugins/source-company-buildnebula/{src/,__tests__/}` (service, module, index, constants, types, spec, fixtures/listings.json — captured live payload), `packages/models/src/enums/site.enum.ts`, `packages/plugins/index.ts`, `tsconfig.base.json`, `jest.config.js`, `.specify/specs/5169-source-company-buildnebula/*`, `docs/index.md`, `docs/log.md`.
+
+**Validation:** `jest packages/plugins/source-company-buildnebula` — 10 green (all 16 fixture roles map; slug/URL fields; department + team labels; location/compensation/datePosted; description sections + comp line; published/public/takedown gating; searchTerm/location filters; empty + transport-failure diagnostics); `tsc --noEmit` clean; `npm run lint:docs` clean. Verified live: `buildnebula.com/api/careers/listings` → 16 items.
+
+---
+
+## 2026-10-01 — Spec 5167 — `source-tesla` lazy browser fallback
+
+**Change:** the default Tesla scraper is no longer hard-fail when the plain-HTTP board GET (`GET /cua-api/apps/careers/state`) fails — 403/503, a non-JSON body, whatever the reason (the docs describe only the observable; no assumption about *why* a host's GET fails). On `fetchBoard === null`, `scrape()` retries the identical flow inside a lazily imported Chromium session: launch with `--disable-blink-features=AutomationControlled` → `goto /careers/search/` (`domcontentloaded` — `networkidle` never settles on the SPA) → 5 s settle → in-page `fetch()` of the same board + detail JSON endpoints (browser-native cookies/TLS, `credentials: 'include'`), polled up to 3× while the site's protection JS finishes. **Headless first, headed once** — observed live: headless is denied at the edge ("Access Denied", zero cookies) while a headed window passes and the board JSON returns 200; a still-blocked headless session relaunches headed exactly once, and a headed launch without a display throws instantly and degrades to the same empty DTO. Verified live end-to-end from a host where the plain GET fails: HTTP 403 → headless denied → headed → full catalogue, ~21 s. The browser only fetches JSON — no card scraping — so the fallback stays cheap at catalogue scale. Listings emit `site: Site.TESLA` regardless of path, so identity/dedup are unchanged. `playwright` is imported through a Function-wrapped `import()` inside the fallback only — no module-scope import, so workspaces without the dep boot clean (`ERR_TESLA_BROWSER_UNAVAILABLE` → empty DTO). New sentinels: `ERR_TESLA_BROWSER_NAV`, `ERR_TESLA_BROWSER_FETCH_FAILED`.
+
+**Also in this change:** `descriptionDepth` default moves `'detail-25'` → `'board'` in `source-tesla` and `source-tesla-playwright`. `detail-all` is one request per listing (~8k+ sequential fetches at Tesla's catalogue size — tens of minutes and likely to trip per-IP request-rate limits partway); `detail-25` yields an arbitrary partial set. `'board'` = every listing with `description: null`; callers opt into `detail-all` explicitly. `source-tesla-playwright` remains unwired (not in `ALL_SOURCE_MODULES`, not importable by callers) — kept as reference/sample code, and its service docstring now says so. Plugins do not import each other, so `source-tesla`'s fallback reimplements the companion's proven flow in-package.
+
+**Files:** `packages/plugins/source-tesla/src/{tesla.service,tesla.constants}.ts`, `packages/plugins/source-tesla/__tests__/tesla.service.spec.ts` (+6 fallback cases), `packages/plugins/source-tesla-playwright/src/{tesla-playwright.service,tesla-playwright.constants}.ts`, `packages/plugins/source-tesla-playwright/__tests__/tesla-playwright.service.spec.ts`, `.specify/specs/5167-tesla-browser-fallback/*`, `docs/index.md`, `docs/log.md`.
+
+---
+
+## 2026-09-30 — Spec 5168 — `source-company-comma_ai` plugin
+
+**Change:** new company plugin for comma.ai (`Site.COMMA_AI = 'comma_ai'`, `companyDomains: ['comma.ai']`). The `/jobs` page is a Svelte site whose accordion detail renders on click, but the full dataset — `title`, `team`, `location`, `description` (template literal), `qualifications[]`, `howToApply` — ships as a plain JS array in the page's SvelteKit node chunk (`/_app/immutable/nodes/{id}.{hash}.js`). The plugin fetches the careers page over plain HTTP, extracts node-chunk URLs (hashes rotate per deploy), finds the chunk carrying the `=[{title:"` + `qualifications:` array, and parses it with a balanced-slice scanner that also treats backticks as quote delimiters — never `eval`. Job URLs and applyUrl are the site's own share anchors (`comma.ai/jobs#{kebab-slug}`, matching the page's `article` ids); `team` → `department` when present (absent on e.g. "Internships / Co-op"); the `On-site in `/`Paid and on-site in ` prefix is stripped before `parseLocationText` (`San Diego, CA` → city/state). Description = bundle description + `Qualifications:` list + `howToApply` (which carries the `mailto:work@comma.ai` apply path).
+
+**Files:** `packages/plugins/source-company-comma_ai/{src/,__tests__/}` (service, module, index, constants, types, spec, fixtures/jobs.html + node-chunk.js), `packages/models/src/enums/site.enum.ts`, `packages/plugins/index.ts`, `tsconfig.base.json`, `jest.config.js`, `.specify/specs/5168-source-company-comma_ai/*`, `docs/index.md`, `docs/log.md`.
+
+**Validation:** `jest packages/plugins/source-company-comma_ai` — 7 green (10 jobs from the real chunk fixture; slug derivation incl. `/` titles; team optional; `San Diego, CA` → city/state; description composition; no-chunk → `empty` diagnostics); `tsc --noEmit` clean; `npm run lint:docs` clean. Verified live: `comma.ai/jobs` serves 10 `job-item` articles matching the chunk's array.
+
+---
+
+## 2026-09-30 — Spec 5166 — `source-ats-clearcompany` per-site (widget) feed
+
+**Change:** the plugin now accepts a ClearCompany **careers siteId** and reads the feed the tenant's embedded widget renders — `GET https://careers-api.clearcompany.com/v1/{siteId}` → `{results, totalCount}`. SiteId resolves from `siteNumber` (the shared per-site field), a GUID-shaped `companySlug`, or `?siteId=` on `companyUrl` (the embed-snippet shape). Motivation: the legacy `API-ShortName` careers-page feed under-reports — postings published only to the widget portal are absent from it (observed live: 127 vs 158 jobs for the same tenant, a strict subset). The widget feed is also richer: structured `locations[]` (city/subdivisionFullName/country/postalCode/isRemote/isNationwide), absolute `applyLink`, `brandName`, `postedDate`, `departmentName`/`jobFunctionName`. `jobUrl` derives from `applyLink` minus the trailing `/apply`. When the site feed errors or returns empty and a slug is also known, the scraper falls back to the legacy feed; slug-only callers are unaffected.
+
+**Files:** `packages/plugins/source-ats-clearcompany/src/{clearcompany.service,clearcompany.constants,clearcompany.types}.ts`, `packages/plugins/source-ats-clearcompany/__tests__/{clearcompany.service.spec.ts,fixtures/site-jobs.json}`, `.specify/specs/5166-clearcompany-siteid-feed/*`, `docs/index.md`, `docs/log.md`.
+
+**Validation:** `jest packages/plugins/source-ats-clearcompany` — 8 new green (GUID slug → site feed, `siteNumber`, `?siteId=` URL, field mapping incl. multi-location + `jobFunctionName`/`postedDate` fallbacks, empty-site→slug fallback, slug-only path unchanged, unknown-site 404→empty); `tsc --noEmit` clean. Verified live: `careers-api.clearcompany.com/v1/00ed92c3-…` → `totalCount: 158` vs 127 via `API-ShortName: firefly` (158 is a strict superset).
+
+---
+
+## 2026-09-29 — Spec 5165 — `source-ats-jibe` plugin (Jibe / iCIMS Talent Cloud careers sites)
+
+**Change:** new ATS plugin `packages/plugins/source-ats-jibe` (`Site.JIBE`, category `ats`, `isAts`). Jibe careers sites are client-rendered SPAs whose listings live behind a same-origin JSON feed — `GET {origin}/api/jobs?page={n}` → `{jobs[].data, totalCount}`, a fixed 10 jobs per page (`pageSize` ignored). Verified live: `careers.rivian.com/api/jobs` reports `totalCount: 794`. Tenants whose classic `*.icims.com` board has been replaced by a Jibe front-end answer the iframe board URL with a frame-buster redirect, so `source-ats-icims` harvests 0 for them — this plugin covers that gap. Tenant addressing: `companyUrl` (any Jibe page; its mount path becomes the detail-URL base — `…/careers-home/jobs` → `…/careers-home/jobs/{slug}`) or `companySlug` (site host or full/partial URL; bare hosts use `{origin}/jobs/{slug}`, which Jibe sites redirect to the mounted detail). Maps `req_id`→`atsId`, `apply_url`→`applyUrl`/`jobUrlDirect` (usually the real ATS's apply link, e.g. icims), city/state/country, `employment_type`, `posted_date`/`create_date`→`datePosted`, `category`→`department`, `description`, `hiring_organization`→`companyName` with a host-derived fallback, remote from `location_type`/`remote` text. `req_id` dedup across pages; non-JSON bodies, 4xx, and unknown tenants degrade to empty/partial rather than throwing.
+
+**Files:** `packages/plugins/source-ats-jibe/{package.json,tsconfig.json,src/{index,jibe.module,jibe.service,jibe.constants,jibe.types}.ts,__tests__/jibe.service.spec.ts}`, `packages/models/src/enums/site.enum.ts`, `packages/plugins/index.ts`, `tsconfig.base.json`, `jest.config.js`, `.specify/specs/5165-ats-jibe-plugin/*`, `docs/index.md`, `docs/log.md`.
+
+**Validation:** `jest packages/plugins/source-ats-jibe` — 12 green (resolution, pagination stops, `resultsWanted`, mount/bare-slug detail URLs, field mapping, dedupe, frame-buster/404 degrades); `tsc --noEmit -p packages/plugins/source-ats-jibe/tsconfig.json` clean; live `scrape({companyUrl: 'https://careers.rivian.com/careers-home/jobs'})` → 25 jobs with correct detail + icims apply URLs.
+
+---
+
+## 2026-09-28 — Spec 5164 — Per-request search deadline (`?deadline_ms`) + ceiling + cache-write guard
+
+**Change:** `POST /api/jobs/search` accepts `?deadline_ms=<ms>` — a per-request replacement for `EVER_JOBS_SEARCH_DEADLINE_MS` (`0` disables the deadline for that call). Single-source requests only; a request resolving to 0 or >1 sources gets 400, same gate as `include_raw`. New `EVER_JOBS_SEARCH_DEADLINE_MAX_MS` operator ceiling: unset = uncapped; when set, `0` (infinite) or a value above the max is rejected 400 naming the max — reject, not clamp, so a caller is never silently shortened. The override travels as `searchJobsWithDiagnostics(input, { captureRaw, deadlineMs })`, never a `ScraperInputDto` field, keeping it out of `cacheParams` and plugin input. Cache keeps normal semantics (a `deadline_ms` request can still be served from cache), but the unconditional write now guards failed results: a single-source response whose `per_source` reason isn't `ok`/`empty` skips `cacheService.set`, so a deadline-abandoned or otherwise failed scrape can no longer cache `[]` for the full TTL (`partial` is excluded too). Guard is single-source only — fan-out searches always have some failure reason, so a wide rule would disable caching. The deadline-exceeded warn now names `?deadline_ms`.
+
+**Files:** `apps/api/src/config/configuration.ts`, `apps/api/src/jobs/jobs.controller.ts`, `apps/api/src/jobs/jobs.service.ts`, `apps/api/src/jobs/__tests__/{jobs.controller,jobs.service}.spec.ts`, `.specify/specs/5164-search-deadline-override/*`, `docs/index.md`, `docs/log.md`.
+
+**Validation:** `npx jest` on the two touched spec files — 106 green (17 new: absent→default, override passes through, `0` survives, `0`/`>max`→400 with ceiling, invalid→400, not-in-cacheParams, cache-hit still served, failed/`partial`/`ok`/multi-source cache-write matrix, service-side override completes a slow scrape + multi-source 400); `npx tsc --project tsconfig.typecheck.json --noEmit` clean; `npm run lint:docs` clean.
+
+---
+
+## 2026-09-28 — Spec 5163 — ADP detail-fetch throttle recovery
+
+**Change:** `source-ats-adp` no longer loses the tail of a large board's descriptions to ADP's rate limiter (~200 detail requests per rolling window, verified live: a 236-request burst got 429 on every call past the threshold, and the block cleared within ~2 minutes). Detail calls now run on a dedicated `createHttpClient({ retries: 0 })` so a 429 fails fast instead of firing up to 3 more retries into the same blocked window; `ADP_DETAIL_CONCURRENCY` dropped 5 → 4. After the bulk pass, rejected indices (fulfilled-null is not counted as failed) are retried serially: `ADP_DETAIL_RETRY_COOLDOWN_MS` (30 s) pause, then one request at a time with `ADP_DETAIL_RETRY_GAP_MS` (300 ms), up to `ADP_DETAIL_RETRY_ROUNDS` (2). `logger.warn` reports `N of M detail fetches failed` after the bulk pass and the still-failing count after recovery. Fail-safe semantics unchanged — jobs whose details never recover still emit with `description: null`.
+
+**Files:** `packages/plugins/source-ats-adp/src/{adp.service.ts,adp.constants.ts}`, `packages/plugins/source-ats-adp/__tests__/adp.service.spec.ts`, `.specify/specs/5163-adp-detail-throttle-recovery/*`, `docs/index.md`, `docs/log.md`.
+
+**Validation:** `npx jest packages/plugins/source-ats-adp` — 15 green (4 new: recovery success fills the description, exhaustion still emits the job with warns and exactly `ROUNDS`+1 attempts, no-failure run never sleeps, detail client built with `retries: 0`); `npx tsc --project tsconfig.typecheck.json --noEmit` clean; `npm run lint:docs` clean.
+
+---
+
+## 2026-09-27 — Spec 5161 — `include_raw`: per-attempt raw HTTP capture for single-source searches
+
+**Change:** `POST /api/jobs/search?include_raw=true` now returns `raw_by_source`, a `Record<string, RawHttpEntry[]>` of every HTTP attempt the selected source made — url (sensitive query keys + path credentials redacted), `final_url` on redirect, `status`, `error`, `elapsed_ms`, `content_type`, JSON `request_body`, and `body`/`body_bytes`/`truncated` under a 5 MB per-body and 20 MB per-source budget (`RAW_CAPTURE_MAX_BODY_BYTES` / `RAW_CAPTURE_MAX_SOURCE_BYTES`). The flag is valid only when the request resolves to exactly one source (checked before the zero-source early return → 400 otherwise), skips the cache read (a hit ran no scrapers) while leaving the write untouched, and the flag travels as an options parameter (`searchJobsWithDiagnostics(input, { captureRaw })`) rather than an input field so it cannot leak into `cacheParams` or plugin `scraperInput`. Sinks are created in the worker loop (`sinks[index]`), `scrapeOne` wraps only `scraper.scrape` in `runWithRawCapture` inside the breaker lambda, and the service awaits `Promise.allSettled(sink.pending)` with a ~2s cap before snapshotting `entries.slice()` and closing the sink — a timed-out scrape's late writes are dropped, never buffered. Browser coverage comes from `attachRawCapture(page)`: listeners on the page (never the shared context), `requestfinished`/`requestfailed` + `response` for body reads, `document`/`xhr`/`fetch` resource types only, `attempt` always 0, redirect chains collapse to one entry. `BrowserPool.getPage()` attaches it on both paths; `source-tesla-playwright` and `source-ats-kula_ai` call it after their own `browser.newPage()` (they keep custom launch args — the pool would change their fingerprint). Delegated scrapes (`registry.getScraper(Site.X).scrape()` inside a company plugin) inherit the sink via AsyncLocalStorage, so entries land under the company key.
+
+**Files:** `packages/models/src/interfaces/{raw-capture.interface.ts,index.ts}`, `packages/common/src/context/request-context.ts` (`runWithRawCapture`, `getRawCapture`), `packages/common/src/http/{raw-capture.ts,index.ts,http-client.ts}`, `packages/common/src/browser/browser-pool.ts`, `packages/plugins/source-tesla-playwright/src/tesla-playwright.service.ts`, `packages/plugins/source-ats-kula_ai/src/kula_ai.service.ts`, `apps/api/src/jobs/{jobs.service.ts,jobs.controller.ts}`, `packages/common/__tests__/raw-capture.spec.ts`, `apps/api/src/jobs/__tests__/{jobs.service.spec.ts,jobs.controller.spec.ts}`, `.specify/specs/5161-raw-http-capture/*`, `docs/index.md`, `docs/log.md`.
+
+**Validation:** `npx jest` on the touched specs — 161 green (22 new capture cases: per-attempt entries, redaction, byte caps, drain/close semantics, browser events incl. redirect-collapse and body-read races; service cases: 400 gating, failed-scrape entries, delegate-key landing, diagnostic-only selectors excluded; controller cases: flag plumbing, cache-read skip, no `raw_by_source` on flagless cache hit); `npx tsc --project tsconfig.typecheck.json --noEmit` clean; `npm run lint:docs` clean.
+
+---
 
 ## 2026-09-27 — Spec 1715 — review round 2: a caller's budget stays on the sitemap, nested sitemaps stop on a struggling server, legacy detail URLs at the redirect target, `jobUrlListedAt`, timing proof of the 1 s interval
 
@@ -42,6 +551,16 @@
 **Second pass — files:** `packages/common/src/http/{http-client.ts,crawl/env.ts,crawl/resolve.ts}`, `packages/plugin/src/interfaces/plugin-metadata.interface.ts`, `packages/models/src/dtos/job-post.dto.ts` (comments), `packages/plugins/source-ats-softy/src/{softy.constants,softy.service,softy.types}.ts`, `apps/api/src/jobs/{health.controller,jobs.controller}.ts`, `apps/api/src/config/configuration.ts`, `tool_manifest.json` (a description); tests `packages/common/__tests__/{crawl-caller-lock,crawl-env,crawl-resolve,http-client-crawl-policy,http-client-redirects,http-client-redirect-pacing,http-client-cooldown-before-release (new)}.spec.ts`, `packages/plugins/source-ats-softy/__tests__/{softy.config,softy.service}.spec.ts`, `apps/api/src/jobs/__tests__/{sources-crawl-policy.controller,jobs.controller.liveness-listed,jobs.controller.liveness-softy-board (new)}.spec.ts`, `apps/api/src/config/__tests__/crawl-mirror.spec.ts` (new); docs `docs/{CRAWL_POLICY,API_CHANGELOG,index,log}.md`, `README.md`, `.env.example`, `.specify/specs/1714-crawl-caller-lock-and-host-policies/{spec,tasks}.md`, `.specify/specs/1715-softy-audit-hardening/{spec,tasks}.md`.
 
 **Second pass — validation:** the four typechecks clean (`tsconfig.typecheck.json`, `apps/api/tsconfig.build.json`, `apps/cli/tsconfig.build.json`, `apps/mcp/tsconfig.json`); `npx jest --testPathPatterns packages/common` 42 suites / 3,517 tests, `packages/plugins/source-ats-softy/` 6 suites / 342 tests (the 2 live tests skipped without `EVER_JOBS_LIVE_SOFTY`), `apps/api` 67 suites / 1,070 tests (1 suite and 4 tests skipped, as before), the MCP manifest and model field specs green; `npm run lint:docs` clean; every changed file LF. Each red control was run by reverting only that fix's hunk in the working tree, running the named spec, and restoring the file byte for byte (`cmp` against a copy): the unlocked-redirect hook → 4 tests fail; the memo skip → the 2 memo loops `hung`; the `proxyRotation` comparator → 9 fail; the listing `listedAt` → 7 fail (plugin and controller); the empty-tenant cache → 3 fail; `first-error` → 4 fail; the effective floor → 2 fail; `meta.switches` and the mirror → 9 fail; the cool-down-first order → 6 fail; the `<= now` fetch bound → 4 fail. Collecting them for the joint verification is still Spec 1714 T20 / Spec 1715 T15.
+
+## 2026-09-26 — Spec 5160 — `source-ats-workday`: discover tenant-renamed category facets
+
+**Change:** Spec 5159 matched the category facet by the literal `facetParameter` `jobFamilyGroup`, but tenants rename it — live probes: `zekelman` uses `jobFamily` ("Job Family"), `wisk` uses `Department_Extended` ("Department"). Discovery is now a two-gate match: drop facets whose parameter is a known non-category field (explicit set: `workerSubType`, `timeType`, `locations`, `locationCountry`, `locationRegionStateProvince`, `jobReqId`, `remote`, `brands`, `company`; plus a `/location|site|brand|compan|remote|subtype|timetype/i` name guard), then keep any facet whose parameter **or** descriptor matches `/categor|famil|depart/i`. Facets nested inside facet groups are candidates too (`WorkdayFacetValue` gained `facetParameter`/`values`). Among qualifiers the largest `sum(values[].count)` wins rather than first-listed; the chosen parameter keys `appliedFacets`. Cap, partial-map-on-failure, and the two-stream shape from 5159 are unchanged. Verified live: `zekelman:12:Careers` 183 jobs → 180 departments (all 14 "Job Family" values); `wisk:108:Wisk_Careers` 7 jobs → 7 departments.
+
+**Files:** `packages/plugins/source-ats-workday/src/{workday.service.ts,workday.constants.ts,workday.types.ts}`, `packages/plugins/source-ats-workday/__tests__/workday.service.spec.ts`, `.specify/specs/5160-workday-category-facet-variants/*`, `docs/index.md`, `docs/log.md`.
+
+**Validation:** `npx jest source-ats-workday` — 62 tests green (renamed-parameter bucketing, omit-list suppression, coverage pick, nested-group discovery, plus the whole 5159 suite); `npx tsc --project tsconfig.typecheck.json --noEmit` clean; `npm run lint:docs` clean.
+
+---
 
 ## 2026-09-26 — Spec 1715 (with the Spec 1714 shared layer) — Softy stops on push-back, sitemap-first for real; caller lock, host-owned policies, idle gap, server-error cool-down; docs pass
 
@@ -116,19 +635,16 @@ The ladder nouns were red first (14 failing).
 - **Spec 1721 FR-1** says `201`, the status the POST search has always returned (the spec said `200`).
 - **docs/log.md** headings carry a unique `Spec NNNN` per date so `lint:docs` passes on the merged tree.
 
-
 ## 2026-09-26 — Spec 1720 — Bayt listed in list mode; develop's cache-key tests follow `search-v2`
 
 - Spec 1710 (develop) rebuilt Bayt's search URL: an empty term now lists `/en/<market>/jobs/` instead of the malformed `/jobs/-jobs/` that made Spec 1720 flag it. The flag is removed; `naukri`, `stepstone` and `careeronestop` keep it. The audit test asserts Bayt carries no flag.
 - Develop's Spec 1690/1700 tests asserted the REST cache key with `endpoint: 'search'`; since Spec 1721 FR-19 the entry is the `search-v2` envelope, so they now use `SEARCH_CACHE_ENDPOINT`.
-
 
 ## 2026-09-26 — Spec 1722 — merge: develop (Specs 1690-1713: crawl policy, multi-location search, exclusions, board fixes) into Specs 1720-1724
 
 - `searchJobsWithDiagnostics` runs both feature sets: list mode, `siteCategories`, the job ceiling, caller cancellation, NDJSON progress and the completeness record (Specs 1720/1721) now also cover multi-location searches (Spec 1700) and the crawl-policy scrape context with its deadline abort (Spec 1690). The deadline race rejects with `FanoutDeadlineError` and still calls the abort hook.
 - Completeness counts SOURCES in both modes: a multi-location source cut short by the deadline, or not started by a bound, counts once in `sourcesSkipped` and appears once in `problemSources` (`skipped`); a source that ran reports its first problem location. `mergeLocationOutcomes` returns each source's rows for this.
 - The shared REST/NDJSON `runSearch` keys the cache with `searchCacheParams` (exclusions blanked, `locations` keyed in order) and applies the exclusion filter, so NDJSON streams only the kept jobs. `requiresSearchTerm` and `minRequestIntervalMs` both stay on `IPluginMetadata`; Naukri declares both.
-
 
 ## 2026-09-26 — Spec 1721 (with 1720) — third review: list mode means NDJSON, a problemSources cap that fits the catalogue, two limits of the expiry rule
 
@@ -214,6 +730,16 @@ every source. Red control: the cap set back to 200 fails 3 of them.
 **Files:** `packages/common/src/http/{http-client,http-memo,index}.ts`, `packages/models/src/dtos/scrape-diagnostics.dto.ts`, `packages/plugin/src/interfaces/plugin-metadata.interface.ts`, `apps/api/src/jobs/{jobs.service,jobs.controller,jobs.resolver,gql-types}.ts`, `apps/cli/src/commands/compare.command.ts`, `apps/mcp/src/{index,tools}.ts`, `apps/mcp/README.md`, plugins `source-{ats-inhire,jobsbylevel,simplifyjobs}` (constants, service, new `__tests__/*.crawl.spec.ts`), tests `packages/common/__tests__/http-memo.spec.ts`, `apps/api/src/jobs/__tests__/jobs.service.multi-location.spec.ts`, `packages/models/__tests__/scrape-diagnostics-crawl.spec.ts`, `scripts/__tests__/ci-workflow.spec.ts`, `package.json`, `docs/{API_CHANGELOG,PERFORMANCE_TUNING,questions,index,log}.md`, specs 1692, 1693, 1694, 1700, 1703, 1713.
 
 **Validation:** `tsc --project tsconfig.typecheck.json` and `-p apps/api/tsconfig.build.json` clean; `test:core` 91/91 suites, 3,914/3,914 tests; touched plugin suites (20 plugins incl. Softy, USAJobs, HeadHunter, SimplyHired) 51/51 suites, 2,386/2,386 tests; `test:scripts` 15/15, 244/244; `lint:docs` clean.
+
+---
+
+## 2026-09-25 — Spec 5159 — `source-ats-workday`: department from the jobFamilyGroup search facet
+
+**Change:** `WorkdayService` now emits `department` from the board's "Job Category" drop-down — the `jobFamilyGroup` search facet. The category is never on the per-job payloads (list rows carry none, and `jobPostingInfo.jobFamily` is tenant-optional), but every list response carries the facet catalog with value ids and per-value counts, and the endpoint honors `appliedFacets: { jobFamilyGroup: [valueId] }`. The unfiltered seed page supplies both the first listings and the facet catalog at no extra cost; then two coarse streams run via `Promise.allSettled` — the existing unfiltered list pass (resuming after the seed page) in parallel with a new `fetchJobCategoryMap` that pages each category value into a listingKey→label map. Both streams stay internally sequential behind the 1–2s courtesy sleep (≤2 list requests in flight). `department` precedence: detail `jobFamily[0].name` → facet bucket → `subtitles[0]`. Guards: `WORKDAY_CATEGORY_FACET_CAP = 50` values; failed bucket logs and yields a partial map; whole bucketed-stream failure falls back silently — the scrape never fails over categories. Verified live (`recar:108:SLATEcareers`): 124 jobs, 35 departments emitted.
+
+**Files:** `packages/plugins/source-ats-workday/src/{workday.service.ts,workday.constants.ts,workday.types.ts}`, `packages/plugins/source-ats-workday/__tests__/workday.service.spec.ts`, `.specify/specs/5159-workday-job-category-facets/*`, `docs/index.md`, `docs/log.md`.
+
+**Validation:** `npx jest source-ats-workday` — 57 tests green (bucket→department mapping, appliedFacets payload assertion, jobFamily/subtitle precedence, uncategorized fallback, zero-extra-request facetless path, failed-bucket tolerance, cap skip); `npx tsc --project tsconfig.typecheck.json --noEmit` clean; `npm run lint:docs` clean.
 
 ---
 
@@ -752,7 +1278,6 @@ postings (deterministic rewrite: `api…/v1/companies/<Co>/postings/<id>` →
 [tasks](../.specify/specs/1750-smartrecruiters-public-job-url/tasks.md), `docs/index.md`,
 **Q-111** (the list endpoint carries no description).
 
-
 ## 2026-09-25 — Review fixup — Specs 1692-1713: salary benefit guard, multi-location memo, stop on refusal, opt-in identity changes
 
 **Change:** Salary (1695 D-10/D-11): the extended grammar scans every range instead of the leftmost, skips a `to` range or single bound whose nearest preceding keyword in its clause is a benefit word (bonus, stipend, relocation, commission, referral, 401(k), tuition, ...), and uses an unqualified `to` range only when nothing stronger is in the text; the API description fallback reads an upper-only figure only with a salary word in its clause (`upperBoundNeedsSalaryCue`). Multi-location search (1700 T13/T14): each source's location loop runs in a scoped response memo in the shared HTTP client (`runWithHttpMemo`, GET and POST, `EVER_JOBS_SEARCH_LOCATION_MEMO=off|get`), so whole-board sources cost one fetch for N locations; plugins declare `minRequestIntervalMs` (LinkedIn, Wellfound, Naukri 3 s; Glassdoor, ZipRecruiter 5 s) and the location pause is the larger of that and the operator interval. Refusals: InHire, Level (MCP details, listing pages, feed enrichment) and Internshala detail walks stop at the first 429 / 401 / 403 / 407 / challenge (shared `refusalFromScrapeError` / `isRefusalDiagnostics` in `@ever-jobs/models`), InHire and Internshala also after three failures in a row, Internshala `detail-all` is capped at 100, and Level no longer falls back to the feed after a refused MCP listing. Opt-in until the owner rules on Q-099: WTTJ board mode in `scrape()` (`WTTJ_BOARD_MODE=on`) and the app-shaped ZipRecruiter session event (`ZIPRECRUITER_SESSION_EVENT=form`); the ZipRecruiter geo-block detail no longer suggests a way around the restriction. RemoteOK sends our identifying User-Agent (`EVER_JOBS_REMOTEOK_LEGACY=ua` restores the old one; one live request with it got HTTP 200). Google's page override is clamped to 30. Internshala keeps the `Apply by:` line when a card shows a deadline. The Bayt live test runs in CI again; the multi-location live check moved to `apps/api/__tests__/search-multi-location.e2e-spec.ts` so CI runs it. Docs: Q-099 rewritten (per-plugin request counts, WTTJ and ZipRecruiter rows, Spec 1690 dependency), API changelog (id table, exact legacy switches, country names), PERFORMANCE_TUNING multi-location section, MCP README inputs, `tool_manifest.json` job types, spec bookkeeping (1695 and 1701 done; 1700 T12/T13/T14; 1703 T16 split). Not changed, with reason: HK/MO display overrides (Spec 1699 F2 defers them; adding them would re-split the name and alpha-3 spellings that spec unified).
@@ -1116,7 +1641,6 @@ deadline, 0 failures, ≤ 16 / ≤ 3 in flight. Live UA A/B, 30 plugins / 166 re
 with the honest UA, 1 breaks only with it (SimplyHired), 7 broken either way, 4 inconclusive
 (Q-097). `lint:docs` clean.
 
-
 ---
 
 ## 2026-09-25 — Spec 1689 — Fork sync hardening: ReDoS, SSRF, shared state, and behaviour the fork removed
@@ -1213,6 +1737,74 @@ loaded host and passed in isolation; the changed tree is ~5–10% slower there, 
 suite with a 1,000 ms budget.
 
 **Review follow-ups (PR #91, automated review):** (1) `source-ats-adp` now returns the requested window (`offset` .. `offset + resultsWanted`) and spends detail requests only on it - it previously sliced from row 0, so `offset` was ignored (pre-existing, made visible by the new list budget); `source-ats-wellfound`, `source-ats-nodi_global` and `source-ats-octbr_ai` (new from the fork) honour `offset` too. (2) `BrowserPool` counts launches still in flight against `EVER_JOBS_BROWSER_MAX_PERSISTENT_CONTEXTS` and re-checks after each launch, so a burst of concurrent identities can no longer leave idle contexts over the cap (red control: the new test fails without the fix). (3) CI: every `npm ci` step exports `npm_config_nodedir` = the setup-node install prefix, so `better-sqlite3` (no prebuilt for the runner Node) compiles against local headers instead of fetching them from nodejs.org - that fetch timed out from the ARC runners and failed two whole jobs on this PR (the same fix the Dockerfile has carried since 2026-08-01). Validation: the four plugin suites 66/66, browser-pool 22/22, `tsc --project tsconfig.typecheck.json` clean.
+
+---
+
+## 2026-09-24 — Spec 5162 — `normalizeJobPost`: aggregated-result whitespace cleanup
+
+**Change:** New `normalizeJobPost(job)` in `packages/common/src/utils` returns a cleaned copy of a `JobPostDto`: edge-trims an extended whitespace set (`\s`, zero-width \u200B-\u200D, \uFEFF), maps blank → `null` so `??` fallbacks engage (the existing `nonEmptyString`-style convention), collapses interior whitespace runs in `title`/`companyName`/location text parts (`name`, `text`, `city`, `state`, `streetAddress`), trims ends only on ids/URLs/`description` and the other string fields, cleans + dedupes `emails[]`/`skills[]`, cleans `compensation.currency`/`interval`, and leaves `site` untouched. `searchJobsWithDiagnostics` applies it once over the aggregated results after `postProcessSalary` (so `salarySource` is cleaned) and before sorting. Pure, deterministic, idempotent; plugins are unchanged.
+
+**Files:** `packages/common/src/utils/{job-post-normalize.ts,index.ts}`, `apps/api/src/jobs/jobs.service.ts`, `packages/common/__tests__/job-post-normalize.spec.ts`, `.specify/specs/5162-job-post-normalize/*`, `docs/index.md`, `docs/log.md`.
+
+**Validation:** `npx jest packages/common/__tests__/job-post-normalize.spec.ts` — 13 green (edge/zero-width trim, blank→null, collapse vs preserve, arrays, locations, compensation, `site` untouched, non-mutation, idempotency); `npx tsc --noEmit` on `packages/common` and `apps/api` clean; `npm run lint:docs` clean.
+
+---
+
+## 2026-09-24 — Spec 5158 — `source-company-wercomfg`: Werco Manufacturing careers plugin
+
+- New plugin `packages/plugins/source-company-wercomfg` (`Site.WERCOMFG`, `companyDomains: ['wercomfg.com']`).
+- The `/careers` index links 11 `/careers/{slug}` detail pages; each detail page embeds a full `JobPosting` JSON-LD block, so the plugin crawls the index's links and maps structured data only — no bespoke HTML scraping, no headless.
+- Mapping: `id`/`atsId` = `wercomfg-{identifier.value}` (URL-slug fallback); `datePosted`; `employmentType` → `jobType` + raw; `jobLocation.address` → `LocationDto`; `jobUrl`/`jobUrlDirect` = detail page; `applyUrl` = shared `info@wercomfg.com` mailto (only contact route on the site); `industry`/`occupationalCategory`/`workHours` appended to the description.
+- 8 unit tests on captured fixtures; verified live (11 jobs).
+- Registration: `site.enum.ts` (Phase 1712), `plugins/index.ts`, `tsconfig.base.json`, `jest.config.js`.
+
+## 2026-09-24 — Spec 5157 — `source-company-thoron_us`: Thoron careers plugin
+
+**Change:** New company plugin `source-company-thoron_us` (`Site.THORON_US = 'thoron_us'` per the Spec 5069 domain derivation of `thoron.us`; `companyDomains: ['thoron.us']` declared to pre-claim the host). `thoron.us` is a Vite-built SPA — two static GETs: `/careers` shell → `/assets/index-{hash}.js` (hash resolved at fetch time, never hardcoded) → the embedded `[{id,title,department,location,type,whatYoullDo,whatYouBring,niceToHaves}]` jobs array. The array anchor matches the full `{id:N,title:"…",department:"…",location:"…",type:"` entry run so sibling `{icon:…,title:…}` literals can't collide; sliced by balanced brackets, never evaluated. `department` → `department`; `location` → `parseLocationText`; `type` → `extractJobType` + raw `employmentType`; `description` composes "What you'll do / What you bring / Nice to have" bullet sections. Apply is a shared in-page form POST (`/api/job-applications`) with no per-role page or anchor — `jobUrl`/`jobUrlDirect`/`applyUrl` = `/careers`. Ids `thoron_us-{native id}`. No `datePosted`/`compensation`/`workFromHomeType` — not published. Zero entries → `empty`; fetch failure → `classifyScrapeError`; `resultsWanted`/`searchTerm`/`location`/`offset` honored.
+
+**Files:** `packages/plugins/source-company-thoron_us/*` (new), `packages/models/src/enums/site.enum.ts`, `packages/plugins/index.ts`, `tsconfig.base.json`, `jest.config.js`, `.specify/specs/5157-source-company-thoron_us/*`, `docs/index.md`, `docs/log.md`.
+
+**Validation:** `npx jest source-company-thoron_us` — 8 tests green on live-fetched fixtures (3 entries, native ids, department/location/type mapping, composed descriptions, distractor-array rejection, no-bundle-link + fetch-error diagnostics, input filters); `npx tsc --project tsconfig.typecheck.json --noEmit` clean; `npm run lint:docs` clean. Verified live: `thoron.us` → 3 roles.
+
+---
+
+## 2026-09-24 — Spec 5156 — `source-company-int-dyn`: Integrated Dynamics careers plugin
+
+**Change:** New company plugin `source-company-int-dyn` (`Site.INT_DYN = 'int-dyn'` — the dash stays literal per Spec 5069, which only converts dots; `companyDomains: ['int-dyn.com']` declared to pre-claim the host). `int-dyn.com` is a one-page Webflow site — one static GET. `div#Careers` scopes the board (careers cards reuse the site's pricing-cell component); each `div.efi-pr-07-pricing-cell` maps `h4.efi-h4-3` → `title`, `p.efi-big-paragraph-4` → tagline, `ul.list li.list-item` → bullets; `description` = tagline + `- `-bullets. The only apply target on the page is the generic `Contact → mailto:hmarkarian@int-dyn.com` — `applyUrl` uses it for both roles; `jobUrl`/`jobUrlDirect` = `…/#Careers`. `companyUrl` input is de-fragmented for the fetch (the board is an anchor on the one-pager). Ids `int-dyn-{slug}`. No location/department/datePosted/compensation/jobType — not published; location left unset rather than invented from HQ. Zero cards → `empty`; fetch failure → `classifyScrapeError`; `resultsWanted`/`searchTerm`/`offset` honored.
+
+**Files:** `packages/plugins/source-company-int-dyn/*` (new), `packages/models/src/enums/site.enum.ts`, `packages/plugins/index.ts`, `tsconfig.base.json`, `jest.config.js`, `.specify/specs/5156-source-company-int-dyn/*`, `docs/index.md`, `docs/log.md`.
+
+**Validation:** `npx jest source-company-int-dyn` — 8 tests green on a live-fetched fixture (2 cards, tagline+bullet descriptions, slug ids, #Careers fragment stripped for fetch, unpublished fields unset, empty/error diagnostics, input filters); `npx tsc --project tsconfig.typecheck.json --noEmit` clean; `npm run lint:docs` clean. Verified live: `int-dyn.com` → 2 roles.
+
+---
+
+## 2026-09-24 — Spec 5155 — `source-company-xlight`: xLight careers plugin
+
+**Change:** New company plugin `source-company-xlight` (`Site.XLIGHT = 'xlight'` — the Spec 5069 domain derivation of `xlight.com`; `companyDomains: ['xlight.com']` declared to pre-claim the host). `xlight.com/careers` is a Webflow CMS list — one static GET of the fully server-rendered page. Each `div.careers-item.w-dyn-item` card maps `h3.job-item-title` → `title` and the `div.job-item-info-label` run → a `|`-separated meta line (`Engineering | Full Time | Hybrid | Palo Alto`): first label → `department`, the middle label matching `remote|hybrid|on-?site` → `workFromHomeType`, the other middle → `employmentType` + `extractJobType` (hyphen-normalized), last → `parseLocationText`. `a.job-item-btn` carries `linkedin.com/jobs/view/{id}` — the role's canonical URL — → `applyUrl`/`jobUrlDirect`; `jobUrl` = the careers page (no per-role pages). Ids `xlight-{linkedinId}` with a title-slug fallback. No descriptions/datePosted/compensation — the site publishes none and the LinkedIn postings are not followed. Zero cards → `empty`; fetch failure → `classifyScrapeError`; `resultsWanted`/`searchTerm`/`location`/`offset` honored.
+
+**Files:** `packages/plugins/source-company-xlight/*` (new), `packages/models/src/enums/site.enum.ts`, `packages/plugins/index.ts`, `tsconfig.base.json`, `jest.config.js`, `.specify/specs/5155-source-company-xlight/*`, `docs/index.md`, `docs/log.md`.
+
+**Validation:** `npx jest source-company-xlight` — 9 tests green on a live-fetched fixture (22 cards mapped, LinkedIn-id keys, label-line split → department/type/work-mode/location, hybrid + on-site + part-time coverage, alternate companyUrl, empty/error diagnostics, input filters); `npx tsc --project tsconfig.typecheck.json --noEmit` clean; `npm run lint:docs` clean. Verified live: `xlight.com/careers` → 22 roles.
+
+---
+
+## 2026-09-24 — Spec 5154 — `source-company-revoy`: Revoy careers plugin
+
+**Change:** New company plugin `source-company-revoy` (`Site.REVOY = 'revoy'` — the Spec 5069 domain derivation of `revoy.com`; `companyDomains: ['revoy.com']` declared to pre-claim the host). `revoy.com/join-the-team` is a Webflow splash page whose role rows are Google-Docs links — `a.link-12[href*="/document/d/"]` with link text as the title and a trailing ` — City, ST`. Each doc is world-readable via `export?format=txt`, so the plugin issues one index GET + one txt GET per doc (3 today). Labeled doc headers win over the link row: `Location:`/`LOCATION` → `parseLocationText` (live: doc's "Troutdale, OR (on-site)" overrides the link's "Portland, OR"; `(on-site)`/`(remote)`/`(hybrid)` qualifiers → `workFromHomeType`), `Department:`/`FUNCTION` → `department`, `Type:` → `employmentType` + `extractJobType` (hyphen-normalized). `description` = the doc's full plain-text body. `jobUrl`/`jobUrlDirect`/`applyUrl` = the doc link — it is the role's canonical URL and only apply target. Ids `revoy-{docId}` — doc ids are stable; title edits can't break them. A failed doc fetch degrades to link-only fields (title + link location) without aborting the scrape; no datePosted/compensation — the site/docs publish none. Zero links → `empty`; index failure → `classifyScrapeError`; `resultsWanted`/`searchTerm`/`location`/`offset` honored.
+
+**Files:** `packages/plugins/source-company-revoy/*` (new), `packages/models/src/enums/site.enum.ts`, `packages/plugins/index.ts`, `tsconfig.base.json`, `jest.config.js`, `.specify/specs/5154-source-company-revoy/*`, `docs/index.md`, `docs/log.md`.
+
+**Validation:** `npx jest source-company-revoy` — 9 tests green on live-fetched fixtures (2 roles keyed by doc id, index→per-doc fetch order, doc `Location:` overriding the link row, labeled-header fields, full-body description, doc-failure degradation, empty/error diagnostics, input filters); `npx tsc --project tsconfig.typecheck.json --noEmit` clean; `npm run lint:docs` clean. Verified live: `revoy.com/join-the-team` → 2 roles with locations, department/employmentType, and full descriptions.
+
+---
+
+## 2026-09-24 — Spec 5153 — `source-company-xgsenergy`: XGS Energy careers plugin
+
+**Change:** New company plugin `source-company-xgsenergy` (`Site.XGSENERGY = 'xgsenergy'` — the Spec 5069 domain derivation of `xgsenergy.com`; `companyDomains: ['xgsenergy.com']` declared to pre-claim the host). `xgsenergy.com/careers/` is a WordPress/Elementor page, fully server-rendered — one static GET. Each `div.elementor-accordion-item` is one role: the tab anchor `a.elementor-accordion-title` carries the title text plus `<span class="acco-loc">Location</span> <span class="acco-na">{place}</span>`; the `.acco-na` fragment splits on `/` — `Hybrid` is a work mode (`workFromHomeType: 'Hybrid'`), every other fragment goes through `parseLocationText` into `locations[]` (first = `location`). The sibling `.elementor-tab-content` is the full posting (Position Overview + Responsibilities/Requirements `ul` lists) → `description` via `htmlToPlainText`. `jobUrl`/`jobUrlDirect` = `{page}#elementor-tab-title-NNNN` — the tab id anchors directly to the role (anchors only; ids derive `xgsenergy-{slug-from-title}` since the site publishes no native ids). `applyUrl` = the item's Cloudflare-protected mailto — `data-cfemail` payload (first byte = XOR key) or `email-protection#hex` href, decoded to the shared `info@xgsenergy.com`; bare `mailto:` also resolves. No `datePosted`/`compensation`/`department`. Zero items → `empty`; fetch failure → `classifyScrapeError`; `resultsWanted`/`searchTerm`/`location`/`offset` honored (`location` matches against `locations[]`).
+
+**Files:** `packages/plugins/source-company-xgsenergy/*` (new), `packages/models/src/enums/site.enum.ts`, `packages/plugins/index.ts`, `tsconfig.base.json`, `jest.config.js`, `.specify/specs/5153-source-company-xgsenergy/*`, `docs/index.md`, `docs/log.md`.
+
+**Validation:** `npx jest source-company-xgsenergy` — 10 tests green on a live-fetched fixture (7 items mapped, single-GET fetch, multi-site `locations[]` split, `Hybrid` fragment → work mode, `#elementor-tab-title-NNNN` anchors, cfemail mailto decode, full-body description, empty/error diagnostics, input filters); `npx tsc --project tsconfig.typecheck.json --noEmit` clean; `npm run lint:docs` clean. Verified live: `xgsenergy.com/careers/` → 7 roles with locations, descriptions, and mailto apply.
 
 ---
 
@@ -1663,7 +2255,6 @@ cross-provider regression; `tsc --noEmit` clean for the package and for `tsconfi
 
 ---
 
-
 ## 2026-09-07 — Spec 5108 — `companyDomains` Inline-Array Lint & Checklist
 
 **Change:** Add `scripts/__tests__/company-domains-inline.spec.ts`, which scans every `source-company-*/src/*.service.ts` and fails when `companyDomains` is declared but is not an inline array of quoted string literals. Also rejects `www.` prefixes, which `normalizeCompanyHost` already strips. Fix `source-company-shinkei_systems` to use inline `companyDomains: ['shinkei.systems', 'shinkeisystems.com']` and remove the unused `SHINKEI_SYSTEMS_DOMAINS` constant from `shinkei_systems.constants.ts`. Update `.specify/templates/tasks.template.md` with a checklist reminder that `companyDomains` must be inline and must not include `www.`.
@@ -1913,7 +2504,6 @@ suites, `.specify/specs/1687-headful-plugin-navigation-allowlist/*`.
 
 ---
 
-
 ## 2026-08-30 — Spec 5089 — Source Company Plugin: Stratolaunch
 
 **Change:** Add a `source-company-stratolaunch` plugin backed by the Greenhouse Job Board API (`https://api.greenhouse.io/v1/boards/stratolaunch/jobs?content=true`). Registers `Site.STRATOLAUNCH = 'stratolaunch'`, declares `companyDomains: ['stratolaunch.com']`, and maps title, location, department, description, apply URL, and `first_published` date to `JobPostDto`. Supports `resultsWanted`, `searchTerm`, and `location` filters and handles fetch failures by returning an empty `JobResponseDto` with a diagnostic.
@@ -1978,7 +2568,6 @@ One defect caught mid-flight: the applier's first version indented the assignmen
 
 ---
 
-
 ## 2026-08-19 — Spec 1685 — the last mechanical diagnostics pass, and where the line was drawn
 
 **Change:** the final mechanical pass. Everything after this is hand work, so the job was to draw that line honestly rather than push a codemod past the point where it earns its keep.
@@ -1998,7 +2587,6 @@ Two anchor lessons, both from a failed first attempt: the common shape carries a
 **Final state of the sequence, stated plainly:** **1,801 of 1,839 services report a real reason, 5 are correct by design, and 33 are documented for hand review** — 30 in cluster B and 3 ambiguous. Not "done", but done to the point where a codemod stops being the right tool.
 
 ---
-
 
 ## 2026-08-19 — Spec 1684 — the tail cluster whose catch returns a bare empty result
 
@@ -2023,7 +2611,6 @@ Catches binding `error`/`e` are skipped rather than renaming someone's variable.
 **Partial results are untouched.** Plugins in this cluster discard whatever they accumulated when they fail, because the accumulator is declared inside the `try` and is out of scope in the catch. Recovering it needs a per-file hoist and its own review; this spec only makes the failure legible.
 
 ---
-
 
 ## 2026-08-19 — Spec 1683 — 822 services stop swallowing their errors
 
@@ -2053,7 +2640,6 @@ Now `return new JobResponseDto(jobs, classifyScrapeError(err))`, with `return ne
 
 ---
 
-
 ## 2026-08-19 — Spec 1682 — 699 delegating plugins report a registry miss as `not_registered`
 
 **Change:** PR 3 of 5, and the first at real scale — **1,398 files**.
@@ -2078,7 +2664,6 @@ Their generated specs were no better: the registry-miss test asserted only `expe
 
 ---
 
-
 ## 2026-08-19 — Spec 1681 — the generators stop minting the swallowed-error shape
 
 **Change:** PR 2 of 5, deliberately ahead of the codemods. Fixing 1,521 generated files while the generators still emit the defect would leave the tree correct only until the next scaffolded batch.
@@ -2098,7 +2683,6 @@ Six scaffolders build the company-source catalogue and share **no template modul
 
 ---
 
-
 ## 2026-08-18 — Spec 1680 — diagnostics semantics; the two backends that gated 300 wrappers
 
 **Change:** first of a five-PR sequence to make source plugins report a real reason instead of collapsing every outcome to `empty`. A census of all **1,839** plugin services found only **45** ever construct a `ScrapeDiagnostics` — 822 use the canonical swallow (`catch` → log → `return { jobs };`), 699 delegate to a backend ATS plugin, and 268 are a tail of other shapes. This PR touches none of them: it fixes the four things every later PR would otherwise hard-code the wrong answers to.
@@ -2117,7 +2701,6 @@ Six scaffolders build the company-source catalogue and share **no template modul
 **Next:** PR 2 the six scaffolders, PR 3 the 699 delegating specs, PR 4 the 822 canonical services, PR 5 the 268-file tail.
 
 ---
-
 
 ## 2026-08-17 — Spec 1679 — opt-in per-source diagnostics; a source-test suite that can finish
 
@@ -5853,7 +6436,6 @@ malformed body, empty board) degrades to an empty result — `scrape()` never th
 
 ---
 
-
 ## 2026-06-19 — Scheduled run #436 (**fourteen new Source Company Plugins** — Specs 742–755)
 
 **Scope:** Expand the corpus with **14 new Greenhouse-backed company-direct source plugins**,
@@ -6718,8 +7300,6 @@ replacement-function-based `wire-company-source.ts` helper (avoids the jest-conf
   used-car retailer (Toronto). `truebill` slug hosts the canonical **Rocket Money** board (displayName
   pinned to "Rocket Money", `enumKey ROCKET_MONEY`).
 - *Phase numbering:* enum Phases 629–645 map 1:1 to Specs 620–636.
-
-
 
 **Scope:** Direct continuation of the run-#424 company-direct Greenhouse direction. At run start the
 corpus held **470 `source-company-*` plugins / 753 source plugin packages total / 600 spec dirs / 753
@@ -37576,7 +38156,6 @@ ATS-scrapers project tracked outside this repo.
   - `003-deduplication-engine` — cross-source job dedup.
   - `004-persistence-storage-plugins` — pluggable storage adaptors.
   - `005-source-health-circuit-breaker` — per-plugin reliability.
-
 
 **Notes:**
 

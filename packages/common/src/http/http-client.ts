@@ -1,11 +1,24 @@
 import { Injectable, Logger } from '@nestjs/common';
 import axios, { AxiosError, AxiosInstance, AxiosRequestConfig, AxiosResponse, InternalAxiosRequestConfig } from 'axios';
+import type { RawCaptureSink, RawHttpEntry } from '@ever-jobs/models';
 import { CookieJar } from 'tough-cookie';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import { SocksProxyAgent } from 'socks-proxy-agent';
 import { ScraperInputDto } from '@ever-jobs/models';
 
-import { getRequestId } from '../context';
+import { getRawCapture, getRequestId } from '../context';
+import {
+  captureRequestBody,
+  normalizeBody,
+  pushRawEntry,
+  rawCaptureWithholdReason,
+  redactUrl,
+  retainBody,
+  updateRawEntry,
+} from './raw-capture';
+
+const RETRYABLE_STATUSES = [429, 500, 502, 503, 504];
+
 import { describeUrlForLog, pinUrlToHosts } from '../utils/url-guard';
 import { memoisedRequest } from './http-memo';
 import {
@@ -64,31 +77,14 @@ import {
   ScrapeContext,
 } from './crawl/types';
 
-/**
- * Query-string keys whose values must never reach a log line. Several sources
- * authenticate by query parameter (`source-ats-ceipal` `api_key`,
- * `source-ats-jazzhr` `apikey`, `source-ats-teamtailor` / `source-ats-talentera`
- * / `source-ats-comeet` `token`), so naming the raw URL on retry would copy
- * those credentials into the pod logs.
- */
-const SENSITIVE_QUERY_KEYS =
-  /^(?:api[-_]?key|access[-_]?token|token|secret|password|passwd|pwd|auth|authorization|signature|sig|session|credentials?)$/i;
-
-/**
- * Hosts that carry a credential in the URL *path* rather than the query string,
- * mapped to the zero-based index of the offending path segment. Ceipal routes
- * every tenant call through `https://api.ceipal.com/{apiKey}/job-postings/`, so
- * the first segment is the tenant's career-portal key — `CeipalService` already
- * masks it in its own logs (`maskKey`), and the shared retry line must not undo
- * that. `source-ats-ceipal` is currently the only plugin that builds a URL this
- * way; add a row here if another one appears.
- */
-const SENSITIVE_PATH_SEGMENTS: Record<string, number> = {
-  'api.ceipal.com': 0,
-};
-
-/** Scheme + authority of an absolute URL, e.g. `https://api.ceipal.com:443`. */
-const URL_AUTHORITY = /^[a-z][a-z0-9+.-]*:\/\/([^/?#]*)/i;
+/** Axios header values may be arrays/numbers/null — coerce to a plain string. */
+function headerString(response: AxiosResponse, name: string): string | undefined {
+  const value = response.headers?.[name];
+  if (typeof value === 'string') return value;
+  if (Array.isArray(value)) return value.join(', ');
+  if (value === null || value === undefined) return undefined;
+  return String(value);
+}
 
 /** An absolute URL (axios treats anything else as relative to `baseURL`). */
 const ABSOLUTE_URL = /^[a-z][a-z\d+\-.]*:\/\//i;
@@ -301,6 +297,15 @@ export interface HttpClientOptions {
  */
 export interface CrawlRequestConfig<D = any> extends AxiosRequestConfig<D> {
   crawl?: CrawlPolicyOverride;
+  /**
+   * Spec 5161 raw capture (`include_raw`): `false` records only this request's
+   * metadata (method, URL, status, timing) and never its request or response
+   * body, success or error. Set it on token / auth calls: their bodies carry
+   * client secrets and access tokens. URLs that look like a token or auth
+   * endpoint are withheld by default (`rawCaptureWithholdReason`); `true` does
+   * not override that. Never sent to the server.
+   */
+  rawCapture?: boolean;
 }
 
 /** The identity (User-Agent, `From`, client hints) one attempt goes out with. */
@@ -329,6 +334,8 @@ interface RequestPlan {
   ctx: ScrapeContext | undefined;
   /** The per-request `crawl` override (`CrawlRequestConfig`), carried to a re-issued redirect hop. */
   requestCrawl: CrawlPolicyOverride | undefined;
+  /** The per-request raw-capture opt-out (`CrawlRequestConfig.rawCapture`), carried to a re-issued redirect hop. */
+  rawCapture: boolean | undefined;
   /**
    * Redirect hops already followed on the way to this request (Spec 1715 audit A0):
    * 0 for a caller's request; a hop re-issued under its own policy carries the
@@ -889,8 +896,26 @@ function serverErrorCooldownOf(policy: Partial<Pick<CrawlPolicy, 'serverErrorCoo
 }
 
 /**
+ * Upper bound on a parsed `Retry-After` (30 days). A server value is untrusted:
+ * a 400-digit number would otherwise become `Infinity` ms and a far-future date
+ * years of it. Any value above `maxRetryAfterMs` is handled the same way, so the
+ * bound changes no decision; it only keeps the logged / reported wait finite.
+ */
+export const MAX_PARSED_RETRY_AFTER_MS = 30 * 24 * 60 * 60 * 1000;
+
+/** Delta-seconds: digits, optionally with a fraction some servers send (`1.5`). */
+const DELTA_SECONDS = /^\d+(?:\.\d+)?$/;
+/** An HTTP-date always carries a clock time (`12:00:30`). */
+const CLOCK_TIME = /\d{1,2}:\d{2}/;
+
+/**
  * `Retry-After` as milliseconds: delta-seconds or an HTTP-date (relative to
- * `now`). Null when absent or unparseable; an already-past date is 0.
+ * `now`). Null when absent or unparseable; an already-past date is 0. The result
+ * is at most `MAX_PARSED_RETRY_AFTER_MS`.
+ *
+ * Only a clock-time-bearing text is handed to `Date.parse`: its legacy fallback
+ * reads strings like `1.5` or `12` as calendar dates in the past (→ 0, "retry
+ * now"), which is the opposite of a polite answer to a throttle.
  */
 export function parseRetryAfter(value: unknown, now: number = Date.now()): number | null {
   const raw = Array.isArray(value) ? value[0] : value;
@@ -899,11 +924,16 @@ export function parseRetryAfter(value: unknown, now: number = Date.now()): numbe
   const text = String(raw).trim();
   if (!text) return null;
 
-  if (/^\d+$/.test(text)) return Number(text) * 1000;
+  if (DELTA_SECONDS.test(text)) {
+    // toPrecision(12) drops float noise (1.1 * 1000 = 1100.0000000000002) before rounding up.
+    const ms = Math.ceil(Number((Number(text) * 1000).toPrecision(12)));
+    return Number.isFinite(ms) ? Math.min(ms, MAX_PARSED_RETRY_AFTER_MS) : MAX_PARSED_RETRY_AFTER_MS;
+  }
 
+  if (!CLOCK_TIME.test(text)) return null;
   const date = Date.parse(text);
   if (Number.isNaN(date)) return null;
-  return Math.max(0, date - now);
+  return Math.min(Math.max(0, date - now), MAX_PARSED_RETRY_AFTER_MS);
 }
 
 /**
@@ -1211,14 +1241,14 @@ export class HttpClient {
       : new HttpsProxyAgent(proxyUrl);
   }
 
-  async get<T = any>(url: string, config?: AxiosRequestConfig): Promise<AxiosResponse<T>> {
+  async get<T = any>(url: string, config?: CrawlRequestConfig): Promise<AxiosResponse<T>> {
     return this.request<T>({ ...config, method: 'GET', url });
   }
 
   async post<T = any>(
     url: string,
     data?: any,
-    config?: AxiosRequestConfig,
+    config?: CrawlRequestConfig,
   ): Promise<AxiosResponse<T>> {
     return this.request<T>({ ...config, method: 'POST', url, data });
   }
@@ -1244,7 +1274,7 @@ export class HttpClient {
    * the response interceptors, so its Set-Cookie headers are replayed into this
    * client's jar here (a no-op without a jar).
    */
-  async request<T = any>(config: AxiosRequestConfig): Promise<AxiosResponse<T>> {
+  async request<T = any>(config: CrawlRequestConfig): Promise<AxiosResponse<T>> {
     return this.send<T>(config, 0);
   }
 
@@ -1254,7 +1284,7 @@ export class HttpClient {
    * policy (Spec 1715 audit A0, `followDeferredRedirect`).
    */
   private async send<T = any>(config: AxiosRequestConfig, redirectHops: number): Promise<AxiosResponse<T>> {
-    const { crawl: requestCrawl, ...axiosConfig } = config as CrawlRequestConfig;
+    const { crawl: requestCrawl, rawCapture, ...axiosConfig } = config as CrawlRequestConfig;
     const ctx = getScrapeContext();
     const target = resolveTargetUrl(axiosConfig);
     const resolution = this.resolveCrawl(target?.hostname, ctx, requestCrawl);
@@ -1283,6 +1313,7 @@ export class HttpClient {
       identity,
       ctx,
       requestCrawl,
+      rawCapture,
       redirectHops,
     };
     // A re-issued redirect hop (Spec 1715 audit A0) never consults the memo: the
@@ -1397,7 +1428,6 @@ export class HttpClient {
       // A site's Crawl-delay is honoured up to the limiter's cool-down ceiling.
       crawlDelayMs = Math.min(decision.crawlDelayMs ?? 0, limiter.maxCooldownMs);
     }
-
     const limits = this.acquireOptions(policy, signal, crawlDelayMs);
     const retries = Math.max(0, Math.floor(policy.retries));
     // Pre-1690 (`legacy`) retried a 0 ms back-off immediately; every other preset
@@ -1420,6 +1450,13 @@ export class HttpClient {
             builtinHostPatterns: resolution.builtinHostPatterns,
           })));
 
+    // Spec 5161 — read the capture sink once per call; AsyncLocalStorage
+    // keeps it in scope across the awaits below. A token / auth call (the
+    // plugin's `rawCapture: false`, or a URL that looks like one) is recorded
+    // without its request or response body.
+    const sink = getRawCapture();
+    const withheld = sink ? rawCaptureWithholdReason(target?.href ?? axiosConfig.url, plan.rawCapture) : undefined;
+
     for (let attempt = 0; ; attempt++) {
       const release = bucket ? await limiter.acquire(bucket, limits) : undefined;
       let error: unknown;
@@ -1428,6 +1465,24 @@ export class HttpClient {
       const redirectHook: Partial<AxiosRequestConfig> = paceRedirects
         ? this.pacedRedirectHook(transport, axiosConfig, plan, env)
         : {};
+      // Spec 5161 — one capture entry per attempt; the sink itself is read once
+      // per call (AsyncLocalStorage keeps it in scope across the awaits).
+      // `pushRawEntry` redacts the URL and scrubs secret values itself.
+      const entry = sink
+        ? pushRawEntry(sink, {
+            attempt,
+            method: (axiosConfig.method ?? 'GET').toUpperCase(),
+            url: axiosConfig.url ?? '(no url)',
+            status: null,
+            elapsed_ms: 0,
+            body_bytes: 0,
+            truncated: false,
+            ...(withheld
+              ? { bodies_withheld: withheld }
+              : { request_body: captureRequestBody(axiosConfig.data, sink) }),
+          })
+        : null;
+      const startedAt = Date.now();
       try {
         const response = await this.client.request<T>({
           ...axiosConfig,
@@ -1437,9 +1492,11 @@ export class HttpClient {
           ...(axiosSignal ? { signal: axiosSignal } : {}),
           [IDENTITY_KEY]: identity,
         } as AxiosRequestConfig);
+        if (sink && entry) this.recordCapturedResponse(sink, entry, response, startedAt);
         if (bucket) this.recordResponse(bucket, policy, attempt, response, axiosConfig);
         return response;
       } catch (err) {
+        if (sink && entry) this.recordCapturedError(sink, entry, err, startedAt);
         failed = true;
         error = err;
       } finally {
@@ -1683,6 +1740,7 @@ export class HttpClient {
     }
     if (hop.crossOrigin) delete next.auth;
     if (plan.requestCrawl && typeof plan.requestCrawl === 'object') next.crawl = plan.requestCrawl;
+    if (plan.rawCapture === false) next.rawCapture = false;
     this.logger.debug(
       `${this.describeRequest(config)} redirects (${hop.status ?? '3xx'}) to ${this.redactUrl(hop.href)}; ` +
         `re-issued under its own crawl policy (hop ${hop.hops}, ${CRAWL_EXTRA_ENV.PACE_REDIRECTS})`,
@@ -2111,64 +2169,60 @@ export class HttpClient {
 
   /**
    * Strip credentials out of a URL before it reaches a log line, leaving the
-   * rest intact so the message still names its target. Splits on delimiters
-   * rather than parsing, so a relative or malformed URL degrades to "unchanged"
-   * instead of throwing inside a logging path.
+   * rest intact so the message still names its target.
    */
   private redactUrl(url: string): string {
-    return this.redactQuery(this.redactPathCredential(url));
+    return redactUrl(url);
   }
 
   /**
-   * Replace a credential carried as a path segment (see
-   * `SENSITIVE_PATH_SEGMENTS`) with `REDACTED`. Relative URLs and hosts with no
-   * rule are returned unchanged.
+   * Spec 5161 — record a settled response into the capture sink. Non-2xx
+   * never reaches here (axios throws), so this handles success bodies only.
+   * `updateRawEntry` / `retainBody` redact and scrub everything they store
+   * (follow-redirects' `responseUrl` carries the serialized `params` and any
+   * userinfo, so `final_url` needs it as much as `url`), and keep no body for
+   * an entry with `bodies_withheld`.
    */
-  private redactPathCredential(url: string): string {
-    const authority = URL_AUTHORITY.exec(url);
-    if (!authority) return url;
-
-    const host = authority[1].replace(/^.*@/, '').replace(/:\d+$/, '').toLowerCase();
-    const index = SENSITIVE_PATH_SEGMENTS[host];
-    if (index === undefined) return url;
-
-    const pathStart = authority[0].length;
-    const query = url.indexOf('?', pathStart);
-    const fragment = url.indexOf('#', pathStart);
-    const ends = [query, fragment].filter((i) => i !== -1);
-    const pathEnd = ends.length ? Math.min(...ends) : url.length;
-
-    // A path that starts with `/` splits to a leading empty segment, so the
-    // first real segment is at index 1.
-    const segments = url.slice(pathStart, pathEnd).split('/');
-    const target = index + 1;
-    if (target >= segments.length || !segments[target]) return url;
-
-    segments[target] = 'REDACTED';
-    return url.slice(0, pathStart) + segments.join('/') + url.slice(pathEnd);
+  private recordCapturedResponse(
+    sink: RawCaptureSink,
+    entry: RawHttpEntry,
+    response: AxiosResponse,
+    startedAt: number,
+  ): void {
+    const finalUrl = response.request?.res?.responseUrl as string | undefined;
+    updateRawEntry(sink, entry, {
+      status: response.status,
+      elapsed_ms: Date.now() - startedAt,
+      content_type: headerString(response, 'content-type'),
+      ...(finalUrl ? { final_url: finalUrl } : {}),
+    });
+    retainBody(sink, entry, normalizeBody(response.data, entry.content_type));
   }
 
-  /**
-   * Replace the value of every credential-bearing query parameter with
-   * `REDACTED`.
-   */
-  private redactQuery(url: string): string {
-    const start = url.indexOf('?');
-    if (start === -1) return url;
-
-    const [query, ...fragment] = url.slice(start + 1).split('#');
-    const redacted = query
-      .split('&')
-      .map((pair) => {
-        const eq = pair.indexOf('=');
-        if (eq === -1) return pair;
-        const key = pair.slice(0, eq);
-        return SENSITIVE_QUERY_KEYS.test(key) ? `${key}=REDACTED` : pair;
-      })
-      .join('&');
-
-    const hash = fragment.length ? `#${fragment.join('#')}` : '';
-    return `${url.slice(0, start)}?${redacted}${hash}`;
+  /** Spec 5161 — record a thrown attempt: HTTP errors carry `response`; network errors don't. */
+  private recordCapturedError(
+    sink: RawCaptureSink,
+    entry: RawHttpEntry,
+    error: any,
+    startedAt: number,
+  ): void {
+    const message = typeof error?.message === 'string' ? error.message : String(error);
+    const response = error?.response as AxiosResponse | undefined;
+    if (!response) {
+      updateRawEntry(sink, entry, { elapsed_ms: Date.now() - startedAt, error: message });
+      return;
+    }
+    const finalUrl = response.request?.res?.responseUrl as string | undefined;
+    updateRawEntry(sink, entry, {
+      elapsed_ms: Date.now() - startedAt,
+      status: response.status,
+      content_type: headerString(response, 'content-type'),
+      ...(finalUrl ? { final_url: finalUrl } : {}),
+      error: message,
+    });
+    // Error payloads usually carry the actual diagnostic — capture the body,
+    // redacted: a failed token exchange can echo the submitted client_secret.
+    retainBody(sink, entry, normalizeBody(response.data, entry.content_type));
   }
 
   /** `Retry-After` as milliseconds: delta-seconds or an HTTP-date. Null when absent/unparseable. */

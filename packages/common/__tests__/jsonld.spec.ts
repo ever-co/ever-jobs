@@ -286,3 +286,143 @@ describe('jobPostingLdFromNode', () => {
     expect(jobPostingLdFromNode({ '@type': 'Organization', name: 'Acme' })).toBeNull();
   });
 });
+
+describe('ld+json extraction and mapping: linear time (fork-sync hardening)', () => {
+  // The former extraction regex, kept here only as the parity oracle.
+  const OLD_SCRIPT_BLOCK_RE =
+    /<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
+  const oracle = (html: string): unknown[] => {
+    const out: unknown[] = [];
+    OLD_SCRIPT_BLOCK_RE.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = OLD_SCRIPT_BLOCK_RE.exec(html)) !== null) {
+      const raw = m[1]?.trim();
+      if (!raw) continue;
+      try {
+        out.push(JSON.parse(raw));
+      } catch {
+        // malformed: skipped, as in extractLdJsonBlocks
+      }
+    }
+    return out;
+  };
+  // Generous bound: the old regex took ~4.5-4.9 s on 125-563 KiB of these
+  // shapes and grew quadratically; slow CI CPUs must never flake here.
+  const BOUND_MS = 1000;
+
+  it.each([
+    ['upper-case tags', '<SCRIPT TYPE="APPLICATION/LD+JSON">{"a":1}</SCRIPT>'],
+    ['single quotes and extra attrs', `<script id="x" type='application/ld+json' async>[2]</script>`],
+    ['mixed quotes', `<script type="application/ld+json'>{"b":3}</script>`],
+    ['data-type also matches', '<script data-type="application/ld+json">{"c":4}</script>'],
+    ['other script types skipped', '<script type="text/javascript">{"d":5}</script><script type="application/ld+json">{"e":6}</script>'],
+    ['spaces around = do not match', '<script type = "application/ld+json">{"f":7}</script>'],
+    ['closer with a space does not close', '<script type="application/ld+json">{"g":8}</script ><script type="application/ld+json">{"h":9}</script>'],
+    ['opener inside an opener', '<script <script type="application/ld+json">{"i":10}</script>'],
+    ['opener without type then a real block', '<script async>x</script><script type="application/ld+json">{"j":11}</script>'],
+    ['unclosed last block', '<script type="application/ld+json">{"k":12}</script><script type="application/ld+json">{"l":13}'],
+    ['no > after opener', '<script type="application/ld+json"'],
+    ['<scripts prefix matches too', '<scripts type="application/ld+json">{"m":14}</script>'],
+    ['non-ASCII look-alikes do not fold', '<\u017Fcript type="application/ld+json">{"n":15}</script>'],
+    ['empty and malformed bodies', '<script type="application/ld+json">  </script><script type="application/ld+json">{bad</script>'],
+  ])('matches the former regex: %s', (_label, html) => {
+    expect(extractLdJsonBlocks(html)).toEqual(oracle(html));
+  });
+
+  it('extracts blocks before 560 KiB of unclosed ld+json openers in linear time', () => {
+    // No `</script>` after the openers: the old regex re-scanned to the end of
+    // the page from every one of them.
+    const html =
+      '<script type="application/ld+json">{"ok":1}</script>' +
+      '<script type="application/ld+json">x'.repeat(16_000);
+    const started = Date.now();
+    const blocks = extractLdJsonBlocks(html);
+    expect(Date.now() - started).toBeLessThan(BOUND_MS);
+    expect(blocks).toEqual([{ ok: 1 }]);
+  });
+
+  it('scans 256 KiB of "<script " without a closing > in linear time', () => {
+    // ~18 s with the old regex; a few ms now.
+    const html = '<script '.repeat(32_768);
+    const started = Date.now();
+    expect(extractLdJsonBlocks(html)).toEqual([]);
+    expect(Date.now() - started).toBeLessThan(BOUND_MS);
+  });
+
+  it('maps a 300 x 300 nested-address JobPosting quickly', () => {
+    // Finding 13's shape: jobLocation.address with many junk keys and a large
+    // address array. The uncapped mapper took ~94 s on 35 KiB of this.
+    const junk: Record<string, string> = {};
+    for (let i = 0; i < 300; i++) junk[`junk${i}`] = 'x';
+    const address = Array.from({ length: 300 }, (_, i) => ({ addressLocality: `c${i}` }));
+    const html = page(
+      { ...baseJob, jobLocation: { address: { ...junk, address } } },
+      { ...baseJob, jobLocation: { address: { address, ...junk } } },
+    );
+    const started = Date.now();
+    const postings = parseJobPostingLd(html);
+    expect(Date.now() - started).toBeLessThan(2000);
+    expect(postings).toHaveLength(2);
+    // address key first: the first expanded entry fills the location
+    expect(postings[1].locations[0]?.city).toBe('c0');
+  });
+});
+
+describe('parseJobPostingLd: address caps (fork-sync hardening)', () => {
+  const addresses = (n: number, prefix = 'c') =>
+    Array.from({ length: n }, (_, i) => ({ addressLocality: `${prefix}${i}` }));
+  // Generous bound: these pages took 2-8 s when every address was its own
+  // uncapped mapping call; slow CI CPUs must never flake here.
+  const BOUND_MS = 1000;
+
+  it('maps at most 100 addresses per posting, skipping non-objects without counting them', () => {
+    const [posting] = parseJobPostingLd(
+      page({
+        ...baseJob,
+        jobLocation: [
+          'not a place',
+          { address: ['skip', null, ...addresses(60, 'a')] },
+          { address: addresses(60, 'b') },
+        ],
+      }),
+    );
+    expect(posting.title).toBe('Staff Engineer');
+    expect(posting.locations).toHaveLength(100);
+    expect(posting.locations[59].city).toBe('a59');
+    expect(posting.locations[99].city).toBe('b39');
+    const node = jobPostingLdFromNode({ ...baseJob, jobLocation: { address: addresses(150) } });
+    expect(node?.locations).toHaveLength(100);
+  });
+
+  it('maps at most 2000 addresses per page across its postings', () => {
+    const postings = parseJobPostingLd(
+      page(Array.from({ length: 25 }, () => ({ ...baseJob, jobLocation: { address: addresses(100) } }))),
+    );
+    expect(postings).toHaveLength(25);
+    expect(postings.map((p) => p.locations.length)).toEqual([
+      ...Array.from({ length: 20 }, () => 100),
+      ...Array.from({ length: 5 }, () => 0),
+    ]);
+    // every posting keeps its other fields
+    expect(postings.every((p) => p.title === 'Staff Engineer')).toBe(true);
+    // one address per posting: the page budget still stops at 2000
+    const many = parseJobPostingLd(
+      page(Array.from({ length: 2100 }, (_, i) => ({ '@type': 'JobPosting', jobLocation: { address: { addressLocality: `p${i}` } } }))),
+    );
+    expect(many.filter((p) => p.locations.length === 1)).toHaveLength(2000);
+    expect(many[1999].locations[0]?.city).toBe('p1999');
+    expect(many[2000].locations).toEqual([]);
+  });
+
+  it.each([
+    ['100k empty addresses (293 KiB)', { ...baseJob, jobLocation: { address: Array.from({ length: 100_000 }, () => ({})) } }],
+    ['33k places with an empty address', { ...baseJob, jobLocation: Array.from({ length: 33_000 }, () => ({ address: {} })) }],
+  ])('maps a page of %s in linear time', (_label, payload) => {
+    const html = page(payload);
+    const started = Date.now();
+    const postings = parseJobPostingLd(html);
+    expect(Date.now() - started).toBeLessThan(BOUND_MS);
+    expect(postings.length).toBeGreaterThan(0);
+    expect(postings.every((p) => p.locations.length === 0)).toBe(true);
+  });
+});

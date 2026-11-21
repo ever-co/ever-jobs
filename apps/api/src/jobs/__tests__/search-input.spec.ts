@@ -4,6 +4,7 @@ import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 import { SITE_CATEGORIES, ScraperInputDto } from '@ever-jobs/models';
 import {
+  callerSuppliesFetchTarget,
   clampResultsWanted,
   describeTerm,
   isListMode,
@@ -174,5 +175,46 @@ describe('clampResultsWanted (Spec 1720 / FR-12)', () => {
     const before = input.resultsWanted;
     expect(clampResultsWanted(input, max)).toBeUndefined();
     expect(input.resultsWanted).toBe(before);
+  });
+});
+
+/**
+ * Fork-sync hardening (Spec 5161) — a request whose fetch target the caller
+ * chose gets metadata-only raw capture.
+ */
+describe('callerSuppliesFetchTarget', () => {
+  it.each([
+    ['a companyUrl', { companyUrl: 'https://target.example.test/jobs' }],
+    ['a companyUrl next to a plain slug', { companyUrl: 'https://x.example.test', companySlug: 'acme' }],
+    ['a dotted slug (several ATS plugins use it as a bare host)', { companySlug: 'target.example.test' }],
+    ['a slug with a path', { companySlug: 'acme/../x' }],
+    ['a slug with a query', { companySlug: 'target?' }],
+    ['a slug with userinfo', { companySlug: 'acme@target' }],
+    ['a slug with a fragment', { companySlug: 'target#' }],
+    ['a slug with a percent escape', { companySlug: 'target%2f' }],
+    ['a slug with inner whitespace', { companySlug: 'acme corp' }],
+    ['a non-string companyUrl', { companyUrl: 42 }],
+    ['a non-string companySlug', { companySlug: ['acme'] }],
+  ])('true for %s', (_label, input) => {
+    expect(callerSuppliesFetchTarget(input)).toBe(true);
+  });
+
+  it.each([
+    ['nothing', {}],
+    ['a blank companyUrl', { companyUrl: '   ' }],
+    ['a null companyUrl', { companyUrl: null }],
+    ['a plain tenant slug', { companySlug: 'acme-corp_2' }],
+    ['a padded plain slug', { companySlug: '  acme  ' }],
+    ['a Workday compound slug', { companySlug: 'acme:5:External' }],
+    ['a blank slug', { companySlug: ' ' }],
+  ])('false for %s', (_label, input) => {
+    expect(callerSuppliesFetchTarget(input)).toBe(false);
+  });
+
+  it('stays linear on a long hostile slug', () => {
+    const slug = `${'a'.repeat(200_000)}!`;
+    const started = Date.now();
+    expect(callerSuppliesFetchTarget({ companySlug: slug })).toBe(true);
+    expect(Date.now() - started).toBeLessThan(1000);
   });
 });

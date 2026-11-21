@@ -8,6 +8,10 @@ import {
   StreamableFile,
   Optional,
   Inject,
+  BadRequestException,
+  HttpException,
+  HttpStatus,
+  Req,
 } from '@nestjs/common';
 import {
   ApiOperation,
@@ -15,7 +19,7 @@ import {
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
-import { Response } from 'express';
+import { Request, Response } from 'express';
 import {
   ScraperInputDto,
   JobPostDto,
@@ -29,6 +33,7 @@ import {
   type ILivenessChecker,
   type ILegitimacyChecker,
   type LegitimacyInput,
+  type RawHttpEntry,
   JOB_LIVENESS_REASON_FRESH_FETCH,
   JOB_LIVENESS_REASON_LISTED,
 } from '@ever-jobs/models';
@@ -38,6 +43,7 @@ import {
   exclusionSpecFromInput,
   hasExclusionInput,
   runWithScrapeContext,
+  toCsvCell,
 } from '@ever-jobs/common';
 import {
   LIVENESS_CRAWL_SITE,
@@ -63,10 +69,24 @@ import { SearchCompleteness, isSearchCompleteness } from './search-completeness'
 import { SEARCH_CACHE_ENDPOINT, readCachedSearch, toCachedSearch } from './search-cache';
 import {
   DEFAULT_CACHE_MAX_JOBS,
+  DEFAULT_FANOUT_DEADLINE_MS,
   DEFAULT_LIVENESS_MAX_URLS,
   DEFAULT_MAX_RESULTS_WANTED,
   isCacheableJobCount,
 } from '../config/search-config';
+import {
+  SEARCH_DEADLINE_ALLOW_UNBOUNDED_ENV_VAR,
+  SEARCH_DEADLINE_MAX_ENV_VAR,
+  clampRequestedDeadline,
+  sanitizeDeadlineCap,
+} from '../config/search-deadline-config';
+import {
+  INCLUDE_RAW_API_KEYS_ENV_VAR,
+  INCLUDE_RAW_ENABLED_ENV_VAR,
+  INCLUDE_RAW_MAX_CONCURRENT_ENV_VAR,
+  includeRawMaxConcurrent,
+} from '../config/include-raw-config';
+import { assertIncludeRawAllowed } from '../auth/include-raw-access';
 import { AnalyticsService } from '@ever-jobs/analytics';
 import { CacheService } from '../cache/cache.service';
 import { searchCacheParams } from './search-cache-params';
@@ -110,6 +130,13 @@ export const NDJSON_CAREER_LEVEL_CHUNK = 256;
 @Controller('api/jobs')
 export class JobsController {
   private readonly logger = new Logger(JobsController.name);
+
+  /**
+   * `include_raw` searches scraping right now (fork-sync hardening). Each can
+   * retain up to 20 MiB of upstream bodies and always runs a fresh scrape, so
+   * they are bounded by `rawCapture.maxConcurrent` per process.
+   */
+  private rawCaptureInFlight = 0;
 
   constructor(
     private readonly jobsService: JobsService,
@@ -216,6 +243,41 @@ export class JobsController {
     description: 'Cap on returned per_source rows (default 200). Non-positive means no cap.',
   })
   @ApiQuery({
+    name: 'include_raw',
+    required: false,
+    type: Boolean,
+    description:
+      'Raw HTTP capture for a single source (Spec 5161), an operator debugging aid. Off unless the server sets ' +
+      `${INCLUDE_RAW_ENABLED_ENV_VAR}=true (403 otherwise). It needs API key auth on (ENABLE_API_KEY_AUTH=true; ` +
+      '503 otherwise) and a valid key in the API key header: a missing or unknown key gets 403 from the global API ' +
+      'key guard before the search runs, and no configured API_KEYS gets 503. The key must also be listed in ' +
+      `${INCLUDE_RAW_API_KEYS_ENV_VAR} (503 while that list is empty, 403 for a key not in it). Credentials are ` +
+      'scrubbed from every entry (the server\'s API keys and secrets, the request\'s own auth values, ' +
+      'credential-named query params and JSON fields such as tokens, keyed URL paths), shown as "REDACTED". ' +
+      'Valid only when the request resolves to exactly one source; otherwise 400. At most ' +
+      `${INCLUDE_RAW_MAX_CONCURRENT_ENV_VAR} (default 2) capture searches run at once; more get 429. Skips the cache ` +
+      'read and adds `raw_by_source` to the JSON response (not to ndjson). Two flags say why bodies are missing: ' +
+      '`bodies_withheld: "opt_out" | "auth_endpoint"`, set by the capture layer when the plugin opted the request ' +
+      'out or the URL is a token / auth endpoint (that entry has no `body` / `request_body`); and ' +
+      '`body_withheld: "caller_supplied_url"`, set by the API when the request names its own target ' +
+      '(`companyUrl`, or a `companySlug` that can name a host): then every entry keeps only metadata (status, url, ' +
+      'final_url, content_type, body_bytes, elapsed_ms, and `bodies_withheld` when set) instead of `body` / ' +
+      '`request_body`.',
+  })
+  @ApiQuery({
+    name: 'deadline_ms',
+    required: false,
+    type: Number,
+    description:
+      'Per-request fan-out wall-clock budget in ms, a non-negative integer (Spec 5164). Valid only when the request ' +
+      'resolves to exactly one source; otherwise 400. A blank, non-numeric, negative or fractional value is a 400. ' +
+      'Replaces the server deadline (EVER_JOBS_FANOUT_DEADLINE_MS) for this request only, but by default can only ' +
+      `SHORTEN it: a larger value is capped to ${SEARCH_DEADLINE_MAX_ENV_VAR} (default: the server deadline). ` +
+      '`0` asks for no deadline and is capped the same way unless the server sets ' +
+      `${SEARCH_DEADLINE_ALLOW_UNBOUNDED_ENV_VAR}=true. The deadline actually used is returned in the ` +
+      '`X-Search-Deadline-Ms` response header (`0` = none). Ignored by format=ndjson.',
+  })
+  @ApiQuery({
     name: 'liveness',
     required: false,
     type: Boolean,
@@ -239,7 +301,17 @@ export class JobsController {
     description:
       'Invalid input, e.g. an unknown siteCategories value or a companyDomain that maps to no plugin (also for ndjson — checked before the stream starts)',
   })
-  @ApiResponse({ status: 429, description: 'Rate limit exceeded' })
+  @ApiResponse({
+    status: 403,
+    description:
+      'With API key auth on, a missing or unknown API key (the global API key guard, before the search runs); ' +
+      `include_raw while the server has it disabled, or with a key not in ${INCLUDE_RAW_API_KEYS_ENV_VAR}`,
+  })
+  @ApiResponse({ status: 429, description: 'Rate limit exceeded, or too many include_raw searches at once' })
+  @ApiResponse({
+    status: 503,
+    description: `include_raw while API key auth is off, or no API_KEYS or ${INCLUDE_RAW_API_KEYS_ENV_VAR} are configured`,
+  })
   async searchJobs(
     @Body() input: ScraperInputDto,
     @Query('format') format?: string,
@@ -256,6 +328,10 @@ export class JobsController {
     // directly), and inserting ahead of `res` silently shifts it.
     @Query('diagnostics') diagnosticsRaw?: string,
     @Query('diagnostics_limit') diagnosticsLimitRaw?: string,
+    @Query('include_raw') includeRawRaw?: string,
+    @Query('deadline_ms') deadlineMsRaw?: string,
+    // Fork-sync hardening — `include_raw` checks the API key on this request.
+    @Req() req?: Request,
   ) {
     // Spec 1720 — normalise the keyword BEFORE logging and the cache lookup,
     // so "", "   ", null and an omitted term are one request and one cache
@@ -320,6 +396,25 @@ export class JobsController {
       return 'off';
     };
 
+    // Spec 5161 — raw HTTP capture is a debugging aid for one source at a
+    // time; the service 400s when the selection resolves to anything else.
+    // Fork-sync hardening: it returns data fetched with the server's identity
+    // and credentials, so it needs the operator opt-in AND an admin key that
+    // is also in EVER_JOBS_INCLUDE_RAW_API_KEYS (403 / 503; see
+    // `assertIncludeRawAllowed`). Checked before any cache or scrape work, and for
+    // format=ndjson too: NDJSON ignores the flag, but the answer to an
+    // unauthorised include_raw request should not depend on the format.
+    const includeRaw = parseBool(includeRawRaw);
+    if (includeRaw) assertIncludeRawAllowed(this.configService, req, this.logger);
+
+    // Spec 5164 — per-request deadline override. Deliberately not `parseNum`
+    // (which folds `0` into the default): `0` is meaningful here — it asks
+    // for no deadline. Fork-sync hardening: bad input is a 400, and the value
+    // is capped so a caller can only shorten the operator's deadline unless
+    // the operator allows more (see `resolveDeadlineOverride`).
+    const deadlineMs =
+      deadlineMsRaw === undefined ? undefined : this.resolveDeadlineOverride(deadlineMsRaw);
+
     const dedup = parseBoolWithDefault(dedupRaw, true);
 
     // Spec 1714 FR-16 — taken BEFORE the cache lookup: a job whose plugin fetched
@@ -343,8 +438,18 @@ export class JobsController {
       );
     }
 
+    // The deadline this request actually runs with, so a capped caller can
+    // see it (NDJSON above does not take the override).
+    if (deadlineMs !== undefined) res?.setHeader?.('X-Search-Deadline-Ms', String(deadlineMs));
+
     // ── Cache → fan-out → dedup (shared with NDJSON) ──
-    const { aggregated, perSource, fromCache } = await this.runSearch(input, dedup);
+    // Fork-sync hardening — an include_raw search holds a capture slot while
+    // it scrapes (429 when all are taken).
+    const releaseCaptureSlot = includeRaw ? this.acquireRawCaptureSlot() : undefined;
+    const { aggregated, perSource, fromCache, rawBySource } = await this.runSearch(input, dedup, {
+      captureRaw: includeRaw,
+      deadlineMs,
+    }).finally(() => releaseCaptureSlot?.());
     const jobs = aggregated.jobs;
 
     // ── Output window (Spec 5025) ─────────
@@ -419,6 +524,7 @@ export class JobsController {
         dedup_metrics: aggregated.dedupMetrics,
         per_source: diagnostics.rows,
         per_source_summary: diagnostics.summary,
+        ...(includeRaw ? { raw_by_source: rawBySource } : {}),
         next_page: page < totalPages ? page + 1 : null,
         previous_page: page > 1 ? page - 1 : null,
         ...exclusionKeys,
@@ -438,7 +544,70 @@ export class JobsController {
       dedup_metrics: aggregated.dedupMetrics,
       per_source: diagnostics.rows,
       per_source_summary: diagnostics.summary,
+      ...(includeRaw ? { raw_by_source: rawBySource } : {}),
       ...exclusionKeys,
+    };
+  }
+
+  /**
+   * Validate and cap `?deadline_ms` (Spec 5164; fork-sync hardening).
+   *
+   * - Not a single non-blank string, not an integer, or negative → 400.
+   *   (`Number('')` is `0`, so a bare `?deadline_ms=` used to switch the
+   *   deadline off.)
+   * - Capped at `search.deadlineMaxMs`, which defaults to the operator's own
+   *   fan-out deadline: callers can only shorten it. `0` ("none") is capped
+   *   the same way. Only `search.deadlineAllowUnbounded` lifts the cap.
+   * - The ceiling is re-validated here: a missing or invalid value falls back
+   *   to the fan-out deadline (fail closed).
+   */
+  private resolveDeadlineOverride(raw: unknown): number {
+    const text = typeof raw === 'string' ? raw.trim() : '';
+    const requested = text === '' ? Number.NaN : Number(text);
+    if (!Number.isInteger(requested) || requested < 0) {
+      throw new BadRequestException(
+        `deadline_ms must be a non-negative integer number of milliseconds; got ${JSON.stringify(raw)}`,
+      );
+    }
+    const fanoutDeadlineMs = this.configService.get<number>(
+      'search.deadlineMs',
+      DEFAULT_FANOUT_DEADLINE_MS,
+    );
+    const maxMs = sanitizeDeadlineCap(
+      this.configService.get<unknown>('search.deadlineMaxMs'),
+      fanoutDeadlineMs,
+    );
+    const allowUnbounded =
+      this.configService.get<boolean>('search.deadlineAllowUnbounded', false) === true;
+    const effective = clampRequestedDeadline(requested, { maxMs, allowUnbounded });
+    if (effective !== requested) {
+      this.logger.log(
+        `deadline_ms=${requested} capped to ${effective}ms ` +
+          `(${SEARCH_DEADLINE_MAX_ENV_VAR}; ${SEARCH_DEADLINE_ALLOW_UNBOUNDED_ENV_VAR}=${allowUnbounded})`,
+      );
+    }
+    return effective;
+  }
+
+  /**
+   * Take one of the `rawCapture.maxConcurrent` capture slots, or throw 429.
+   * Returns the release function (idempotent).
+   */
+  private acquireRawCaptureSlot(): () => void {
+    const max = includeRawMaxConcurrent(this.configService.get<unknown>('rawCapture.maxConcurrent'));
+    if (this.rawCaptureInFlight >= max) {
+      this.logger.warn(`include_raw refused: ${this.rawCaptureInFlight} capture search(es) already running`);
+      throw new HttpException(
+        `include_raw: ${max} capture search(es) already running (${INCLUDE_RAW_MAX_CONCURRENT_ENV_VAR}); retry later`,
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
+    this.rawCaptureInFlight++;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.rawCaptureInFlight--;
     };
   }
 
@@ -504,7 +673,10 @@ export class JobsController {
     const jobs = hasExclusionInput(input)
       ? applyJobExclusions(found, exclusionSpecFromInput(input)).kept
       : found;
-    const analysis = this.analyticsService.analyze(jobs);
+    // T-2605 — the summary needs the flag the jobs were scraped with.
+    const analysis = this.analyticsService.analyze(jobs, {
+      enforceAnnualSalary: input.enforceAnnualSalary,
+    });
     this.logger.log(`Analysis complete: ${analysis.summary.totalJobs} jobs, ${analysis.companies.length} companies`);
     return analysis;
   }
@@ -531,6 +703,8 @@ export class JobsController {
      * reported none, or a cache entry without one (served on the JSON path only).
      */
     completeness: SearchCompleteness | undefined;
+    /** Spec 5161 — captured raw HTTP entries by site; `{}` unless `hooks.captureRaw`. */
+    rawBySource: Record<string, RawHttpEntry[]>;
   }> {
     // ── Cache check (cache stores RAW fan-out — dedup runs per-request) ──
     // Spec 1721 / FR-19 — ONE entry holds the raw set and the completeness
@@ -545,7 +719,12 @@ export class JobsController {
       { endpoint: SEARCH_CACHE_ENDPOINT, careerLevels: undefined },
       readMaxSearchLocations(this.configService),
     );
-    const hit = readCachedSearch(await this.cacheService.get<unknown>(cacheParams));
+    // Spec 5161 — `captureRaw` skips the read: a hit ran no scrapers, so
+    // there would be nothing to capture. The write is unchanged — the entry
+    // stores only the `JobPostDto[]` fan-out, which never carries capture data.
+    const hit = hooks.captureRaw
+      ? null
+      : readCachedSearch(await this.cacheService.get<unknown>(cacheParams));
     let cached: JobPostDto[] | null = hit?.jobs ?? null;
     let completeness: SearchCompleteness | undefined = hit?.completeness;
     if (cached && options.requireCompleteness && !completeness) {
@@ -559,16 +738,14 @@ export class JobsController {
     // Per-source outcome breakdown (Spec 5082). Only meaningful on a fresh
     // fan-out — a cache hit ran no scrapers, so it stays empty.
     let perSource: SourceDiagnosticDto[] = [];
+    let rawBySource: Record<string, RawHttpEntry[]> = {};
 
     if (cached) {
       rawJobs = cached;
       fromCache = true;
       this.logger.log(`Cache hit — returning ${rawJobs.length} cached results`);
     } else {
-      const result =
-        hooks.onProgress || hooks.isCancelled
-          ? await this.jobsService.searchJobsWithDiagnostics(input, hooks)
-          : await this.jobsService.searchJobsWithDiagnostics(input);
+      const result = await this.jobsService.searchJobsWithDiagnostics(input, hooks);
       // Spec 1721 / FR-14 — sources were left unstarted because the caller
       // went away: a partial answer must never be cached (a retry would be
       // served the truncated set), deduped or persisted.
@@ -577,6 +754,7 @@ export class JobsController {
       }
       rawJobs = result.jobs;
       perSource = result.perSource;
+      rawBySource = result.rawBySource;
       if (isSearchCompleteness(result.completeness)) {
         completeness = result.completeness;
       } else {
@@ -587,8 +765,17 @@ export class JobsController {
       // Spec 1721 / FR-20 — nor is an incomplete crawl: a retry within the TTL
       // must get a fresh chance at the sources the bound left out.
       const cacheMaxJobs = this.configService.get<number>('cache.maxJobs', DEFAULT_CACHE_MAX_JOBS);
+      // Spec 5164 — a failed single-source result must not poison the cache:
+      // a deadline-abandoned scrape caches `[]` for the full TTL and every
+      // repeat call returns it instead of re-scraping. Single-source only —
+      // on a fan-out at least one failure is normal (e.g. browser_unavailable
+      // on browser-less deployments), so a wide rule would disable caching.
+      const failedSingleSource =
+        perSource.length === 1 && !['ok', 'empty'].includes(perSource[0].reason);
       if (completeness?.complete === false) {
         this.logger.log(`Not caching an incomplete crawl (${completeness.stopReason})`);
+      } else if (failedSingleSource) {
+        this.logger.log(`Not caching a failed single-source result (${perSource[0].reason})`);
       } else if (isCacheableJobCount(rawJobs.length, cacheMaxJobs)) {
         await this.cacheService.set(cacheParams, toCachedSearch(rawJobs, completeness));
       } else {
@@ -623,7 +810,7 @@ export class JobsController {
     this.logger.log(
       `Returning ${aggregated.jobs.length} jobs (raw=${aggregated.rawCount}, deduped=${aggregated.deduped}, cached=${fromCache})`,
     );
-    return { aggregated, perSource, fromCache, completeness };
+    return { aggregated, perSource, fromCache, completeness, rawBySource };
   }
 
   // ── NDJSON streaming (Spec 1721) ──
@@ -974,22 +1161,30 @@ export class JobsController {
     if (jobs.length === 0) return 'No results\n';
 
     // Flatten nested objects for CSV
+    // Arrays are joined with "; "; object items (e.g. `locations`, `offices`)
+    // are written as JSON so they do not print as "[object Object]".
+    const joinList = (items: unknown[]): string =>
+      items
+        .map((item) =>
+          item !== null && typeof item === 'object' ? JSON.stringify(item) : String(item ?? ''),
+        )
+        .join('; ');
+
+    // Cells stay raw here; `toCsvCell` guards and quotes them at write time.
     const flatJobs = jobs.map((job) => {
-      const flat: Record<string, string> = {};
+      const flat: Record<string, unknown> = {};
       for (const [key, value] of Object.entries(job)) {
         if (value === null || value === undefined) {
           flat[key] = '';
-        } else if (typeof value === 'object' && !Array.isArray(value)) {
+        } else if (Array.isArray(value)) {
+          flat[key] = joinList(value);
+        } else if (typeof value === 'object' && !(value instanceof Date)) {
           for (const [subKey, subVal] of Object.entries(value as Record<string, any>)) {
             // Nested arrays (e.g. `legitimacy.reasons`) read like top-level ones.
-            flat[`${key}.${subKey}`] = Array.isArray(subVal)
-              ? subVal.join('; ')
-              : String(subVal ?? '');
+            flat[`${key}.${subKey}`] = Array.isArray(subVal) ? joinList(subVal) : (subVal ?? '');
           }
-        } else if (Array.isArray(value)) {
-          flat[key] = value.join('; ');
         } else {
-          flat[key] = String(value);
+          flat[key] = value;
         }
       }
       return flat;
@@ -1004,16 +1199,9 @@ export class JobsController {
     }
     const headerArr = [...headers];
 
-    const escape = (v: string) => {
-      if (v.includes(',') || v.includes('"') || v.includes('\n')) {
-        return `"${v.replace(/"/g, '""')}"`;
-      }
-      return v;
-    };
-
-    const lines = [headerArr.map(escape).join(',')];
+    const lines = [headerArr.map(toCsvCell).join(',')];
     for (const row of flatJobs) {
-      lines.push(headerArr.map((h) => escape(row[h] ?? '')).join(','));
+      lines.push(headerArr.map((h) => toCsvCell(row[h])).join(','));
     }
     return lines.join('\n') + '\n';
   }

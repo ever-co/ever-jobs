@@ -99,13 +99,14 @@ export class AuthenticJobsService implements IScraper {
 
       params.sort = 'date-posted-desc';
 
-      const queryString = new URLSearchParams(params).toString();
-      const url = `${AUTHENTICJOBS_API_URL}?${queryString}`;
-
-      this.logger.log(`Fetching Authentic Jobs page ${page}: ${url}`);
+      // Never log the request URL or params: they carry `api_key` (T-2584).
+      this.logger.log(`Fetching Authentic Jobs page ${page}`);
 
       try {
-        const response = await client.get(url);
+        // Params go in the request config rather than a hand-built query
+        // string. The shared client names only `config.url` in its retry,
+        // redirect and cool-down log lines, so the key stays out of those too.
+        const response = await client.get(AUTHENTICJOBS_API_URL, { params });
         const data = response.data as AuthenticJobsApiResponse;
 
         const listings = data?.listings?.listing;

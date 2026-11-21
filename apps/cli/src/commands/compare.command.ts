@@ -17,6 +17,7 @@ import {
   applyCrawlCliOptions,
   parseNonNegativeInt,
 } from './crawl-options';
+import { applyNumericCliOptions, parseCliDecimal, parseCliInteger } from './numeric-options';
 
 interface CompareOptions extends CrawlCliOptions {
   searchTerm?: string;
@@ -51,7 +52,9 @@ export class CompareCommand extends CommandRunner {
     super();
   }
 
-  async run(_passedParams: string[], options: CompareOptions): Promise<void> {
+  async run(_passedParams: string[], rawOptions: CompareOptions): Promise<void> {
+    // Invalid or out-of-range numbers are dropped with a warning, so the defaults below apply.
+    const options = applyNumericCliOptions(rawOptions);
     const searchTerm = options.searchTerm ?? 'software engineer';
     const sites = Object.values(Site);
 
@@ -143,7 +146,10 @@ export class CompareCommand extends CommandRunner {
       searchTerm,
       totalJobs: allJobs.length,
       siteComparison: comparison,
-      summary: this.analyticsService.summarize(allJobs),
+      // T-2605 — the flag the jobs were scraped with (compare has no flag for it, so false).
+      summary: this.analyticsService.summarize(allJobs, {
+        enforceAnnualSalary: baseInput.enforceAnnualSalary,
+      }),
       // Spec 1700 — present only when exclusions were requested.
       ...(exclusions ? { excludedJobs: excludedTotal } : {}),
     };
@@ -195,13 +201,13 @@ export class CompareCommand extends CommandRunner {
   }
 
   @Option({ flags: '-n, --results <count>', description: 'Results per site (default: 15)' })
-  parseResults(val: string): number { return parseInt(val, 10); }
+  parseResults(val: string): number { return parseCliInteger(val); }
 
   @Option({ flags: '-c, --country <code>', description: 'Country (default: USA)' })
   parseCountry(val: string): string { return val; }
 
   @Option({ flags: '--hours-old <hours>', description: 'Max job age in hours' })
-  parseHoursOld(val: string): number { return parseInt(val, 10); }
+  parseHoursOld(val: string): number { return parseCliInteger(val); }
 
   @Option({ flags: '-r, --remote', description: 'Remote jobs only' })
   parseRemote(): boolean { return true; }
@@ -210,10 +216,10 @@ export class CompareCommand extends CommandRunner {
   parseJobType(val: string): string { return val; }
 
   @Option({ flags: '--rate-delay-min <seconds>', description: 'Min request delay (seconds)' })
-  parseRateDelayMin(val: string): number { return parseFloat(val); }
+  parseRateDelayMin(val: string): number { return parseCliDecimal(val); }
 
   @Option({ flags: '--rate-delay-max <seconds>', description: 'Max request delay (seconds)' })
-  parseRateDelayMax(val: string): number { return parseFloat(val); }
+  parseRateDelayMax(val: string): number { return parseCliDecimal(val); }
 
   @Option({ flags: '-o, --output <file>', description: 'Write output to file' })
   parseOutput(val: string): string { return val; }

@@ -81,12 +81,14 @@ describe('extractSalary', () => {
 
   // Spec 5045 — explicit interval hint overrides magnitude inference.
   it('takes the interval from the hint instead of magnitude (low yearly)', () => {
-    // Without a hint this range is lost entirely: 28000 sits in the monthly
-    // band but 32000 crosses monthlyThreshold(30000), so the crossing guard
-    // nulls the max and the parser returns nothing.
+    // T-2633 — without a hint, 28000 sits in the monthly band but 32000
+    // crosses monthlyThreshold(30000), so the range is read as yearly (it
+    // was dropped when only the minimum chose the interval).
     const inferred = extractSalary('$28,000 - $32,000');
-    expect(inferred.interval).toBeNull();
-    expect(inferred.minAmount).toBeNull();
+    expect(inferred.interval).toBe('yearly');
+    expect(inferred.minAmount).toBe(28000);
+    expect(inferred.maxAmount).toBe(32000);
+    expect(inferred.currency).toBe('USD');
 
     const hinted = extractSalary('$28,000 - $32,000', {
       interval: CompensationInterval.YEARLY,
@@ -379,6 +381,20 @@ describe('parseSalaryCurrency (Spec 012 / T01)', () => {
     expect(result.confidence).toBe('country');
   });
 
+  it('finds a stand-alone ISO code after one buried inside a longer word', () => {
+    // "EUROPEAN" contains `EUR` but is not a code; the real `EUR` after it
+    // must still be detected (it used to fall through to the USD default).
+    const result = parseSalaryCurrency('European remote role. Salary: EUR 70.000 - 90.000');
+    expect(result).toEqual({ code: 'EUR', symbol: null, confidence: 'iso' });
+  });
+
+  it('extractSalary keeps the EUR range when a longer word precedes the code', () => {
+    const result = extractSalary('European remote role. Salary: EUR 70.000 - 90.000');
+    expect(result.currency).toBe('EUR');
+    expect(result.minAmount).toBe(70000);
+    expect(result.maxAmount).toBe(90000);
+  });
+
   // ─── Spec 014 / T01 — `$` symbol promotion (Q-027 / FR-1) ─────────
   //
   // Before T01, `$` was implicit USD via the FR-7 default branch.
@@ -408,6 +424,57 @@ describe('parseSalaryCurrency (Spec 012 / T01)', () => {
       symbol: '$',
       confidence: 'symbol',
     });
+  });
+
+  // ─── `kr` must be a stand-alone token, not the start of a word ─────
+  it.each(['Kraków', 'Krefeld', 'Kroger HQ', 'skriv', 'KRAKOW'])(
+    'does not read the letters "kr" inside "%s" as a krona sign',
+    (word) => {
+      const text = `8.000 - 10.000, ${word}`;
+      expect(parseSalaryCurrency(text, { country: Country.POLAND })).toEqual({
+        code: 'PLN',
+        symbol: null,
+        confidence: 'country',
+      });
+      expect(parseSalaryCurrency(text)).toEqual({
+        code: 'USD',
+        symbol: null,
+        confidence: 'default',
+      });
+    },
+  );
+
+  it.each(['東京kr', 'kr東京', 'مkr', 'kŕ', 'กkr', 'kr公司', '公司kr', 'kr𠮷', '𠮷kr', 'kr𝐀', '𝐀kr'])(
+    'treats a letter of a caseless script or a combining mark next to "kr" as part of a word (%s)',
+    (word) => {
+      expect(parseSalaryCurrency(`8.000 - 10.000, ${word}`, { country: Country.POLAND })).toEqual({
+        code: 'PLN',
+        symbol: null,
+        confidence: 'country',
+      });
+    },
+  );
+
+  it.each(['💰kr 500', '500 kr💰', '500 kr', '500kr', 'kr 500', 'Kr. 500', 'KR 500', '500,- kr.', 'Lön: 45 000 kr/mån'])(
+    'still reads "kr" as a krona sign in "%s"',
+    (text) => {
+      expect(parseSalaryCurrency(text)).toEqual({ code: 'SEK', symbol: 'kr', confidence: 'symbol' });
+    },
+  );
+
+  it('finds a stand-alone "kr" after one buried inside a longer word', () => {
+    expect(parseSalaryCurrency('Kraków office, 500 kr', { country: Country.NORWAY })).toEqual({
+      code: 'NOK',
+      symbol: 'kr',
+      confidence: 'symbol',
+    });
+  });
+
+  it('extractSalary uses the country currency when a place name starts with "kr"', () => {
+    const result = extractSalary('8.000 - 10.000 Kraków', { country: Country.POLAND });
+    expect(result.currency).toBe('PLN');
+    expect(result.minAmount).toBe(8000);
+    expect(result.maxAmount).toBe(10000);
   });
 });
 
