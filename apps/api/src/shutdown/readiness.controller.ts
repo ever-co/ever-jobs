@@ -1,6 +1,8 @@
 import { Controller, Get, HttpStatus, Res } from '@nestjs/common';
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
+import { SkipThrottle } from '@nestjs/throttler';
 import { Response } from 'express';
+import { ProbeRoute } from '../auth/probe-route.decorator';
 import { ShutdownDrainService } from './shutdown-drain.service';
 
 /** Body of `GET /ready` (Spec 1753 FR-2). */
@@ -19,13 +21,19 @@ export interface ReadinessResponse {
  *
  * Declared in the root `AppModule` beside {@link ShutdownDrainService}, which
  * must stay there (see that class).
+ *
+ * Like `/health`, it needs no API key (`@ProbeRoute()`) and is not rate
+ * limited (`@SkipThrottle()`), so a probe every 10 s never gets 403 or 429
+ * and drops the pod out of the Service (T-2672).
  */
 @ApiTags('Health')
+@SkipThrottle()
 @Controller()
 export class ReadinessController {
   constructor(private readonly drain: ShutdownDrainService) {}
 
   @Get('ready')
+  @ProbeRoute()
   @ApiOperation({
     summary: 'Readiness probe',
     description:
