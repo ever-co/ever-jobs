@@ -1,6 +1,8 @@
 import 'reflect-metadata';
 import { AnalyticsService } from '@ever-jobs/analytics';
-import { JobPostDto, LocationDto, CompensationDto, CompensationInterval, JobType } from '@ever-jobs/models';
+import {
+  JobPostDto, LocationDto, CompensationDto, CompensationInterval, JobType, SalarySource,
+} from '@ever-jobs/models';
 
 function makeJob(overrides: Partial<{
   title: string;
@@ -8,6 +10,7 @@ function makeJob(overrides: Partial<{
   site: string;
   isRemote: boolean;
   compensation: any;
+  salarySource: SalarySource;
   location: any;
   jobType: JobType[];
   emails: string[];
@@ -20,10 +23,18 @@ function makeJob(overrides: Partial<{
     site: overrides.site ?? 'linkedin',
     isRemote: overrides.isRemote ?? false,
     compensation: overrides.compensation,
+    salarySource: overrides.salarySource,
     location: overrides.location,
     jobType: overrides.jobType ?? null,
     emails: overrides.emails ?? null,
   });
+}
+
+const GRAMMAR_ENV = 'EVER_JOBS_SALARY_GRAMMAR';
+
+/** An hourly compensation with the given amounts, in USD. */
+function hourly(minAmount: number, maxAmount: number): CompensationDto {
+  return new CompensationDto({ interval: CompensationInterval.HOURLY, minAmount, maxAmount, currency: 'USD' });
 }
 
 describe('AnalyticsService', () => {
@@ -73,6 +84,75 @@ describe('AnalyticsService', () => {
       expect(result.salaryStats!.avgSalary).toBe(90000); // (80000+100000)/2
     });
 
+    // T-2522 — amounts are annualised before they are compared.
+    it('annualises an hourly salary before it is compared with a yearly one', () => {
+      const hourly = new CompensationDto({ interval: CompensationInterval.HOURLY, minAmount: 25, maxAmount: 35, currency: 'USD' });
+      const jobs = [
+        makeJob({ compensation: hourly }),
+        makeJob({ compensation: new CompensationDto({ interval: CompensationInterval.YEARLY, minAmount: 90000, maxAmount: 120000, currency: 'USD' }) }),
+      ];
+      const result = service.summarize(jobs);
+      expect(result.withSalaryCount).toBe(2);
+      expect(result.salaryStats).toEqual({
+        minSalary: 52000, // 25 * 2080
+        maxSalary: 120000,
+        avgSalary: 71000, // (52000 + 90000) / 2
+        currency: 'USD',
+      });
+      // The job itself is not changed.
+      expect(jobs[0].compensation).toBe(hourly);
+      expect(hourly).toMatchObject({ interval: CompensationInterval.HOURLY, minAmount: 25, maxAmount: 35 });
+    });
+
+    // T-2522 — one currency: the most common one among the jobs with a salary.
+    it('reports the most common currency and leaves other currencies out of the figures', () => {
+      const jobs = [
+        makeJob({ compensation: new CompensationDto({ interval: CompensationInterval.YEARLY, minAmount: 10000, maxAmount: 500000, currency: 'EUR' }) }),
+        makeJob({ compensation: new CompensationDto({ interval: CompensationInterval.YEARLY, minAmount: 80000, maxAmount: 120000, currency: 'USD' }) }),
+        makeJob({ compensation: new CompensationDto({ interval: CompensationInterval.YEARLY, minAmount: 100000, maxAmount: 150000, currency: 'USD' }) }),
+      ];
+      const result = service.summarize(jobs);
+      expect(result.withSalaryCount).toBe(3);
+      expect(result.salaryStats).toEqual({
+        minSalary: 80000,
+        maxSalary: 150000,
+        avgSalary: 90000,
+        currency: 'USD',
+      });
+    });
+
+    // T-2522 — a compensation with only an upper bound is a salary too.
+    it('counts a compensation that has only a maxAmount', () => {
+      const jobs = [
+        makeJob({ compensation: new CompensationDto({ interval: CompensationInterval.YEARLY, maxAmount: 100000, currency: 'USD' }) }),
+        makeJob(),
+      ];
+      const result = service.summarize(jobs);
+      expect(result.withSalaryCount).toBe(1);
+      expect(result.salaryStats).toEqual({
+        minSalary: 100000,
+        maxSalary: 100000,
+        avgSalary: 100000,
+        currency: 'USD',
+      });
+    });
+
+    // T-2522 — a 0 bound is a "not disclosed" placeholder (as in hasSalaryAmount), not the low end.
+    it('does not take a 0 minAmount as the low end', () => {
+      const jobs = [
+        makeJob({ compensation: new CompensationDto({ interval: CompensationInterval.MONTHLY, minAmount: 0, maxAmount: 5000, currency: 'USD' }) }),
+        makeJob({ compensation: new CompensationDto({ interval: CompensationInterval.YEARLY, minAmount: 0, maxAmount: 0, currency: 'USD' }) }),
+      ];
+      const result = service.summarize(jobs);
+      expect(result.withSalaryCount).toBe(1);
+      expect(result.salaryStats).toEqual({
+        minSalary: 60000, // 5000 * 12
+        maxSalary: 60000,
+        avgSalary: 60000,
+        currency: 'USD',
+      });
+    });
+
     it('should break down by site', () => {
       const jobs = [
         makeJob({ site: 'linkedin' }),
@@ -82,6 +162,91 @@ describe('AnalyticsService', () => {
       const result = service.summarize(jobs);
       expect(result.bySite['linkedin']).toBe(2);
       expect(result.bySite['indeed']).toBe(1);
+    });
+
+    // T-2605 — under EVER_JOBS_SALARY_GRAMMAR=legacy with enforceAnnualSalary,
+    // postProcessCompensation parses a description salary pre-annualised but
+    // keeps its source interval ('Pay: $20 - $25/hr' → hourly 41600-52000,
+    // pinned in packages/common/__tests__/salary.spec.ts). Those amounts are
+    // yearly already and must not be multiplied by 2080 again.
+    describe('legacy grammar, description salary under enforceAnnualSalary (T-2605)', () => {
+      const shellGrammar = process.env[GRAMMAR_ENV];
+
+      beforeEach(() => {
+        delete process.env[GRAMMAR_ENV];
+      });
+
+      afterEach(() => {
+        if (shellGrammar === undefined) delete process.env[GRAMMAR_ENV];
+        else process.env[GRAMMAR_ENV] = shellGrammar;
+      });
+
+      it('takes a description-sourced salary as already yearly', () => {
+        process.env[GRAMMAR_ENV] = 'legacy';
+        const compensation = hourly(41600, 52000);
+        const jobs = [makeJob({ compensation, salarySource: SalarySource.DESCRIPTION })];
+        const result = service.summarize(jobs, { enforceAnnualSalary: true });
+        expect(result.withSalaryCount).toBe(1);
+        expect(result.salaryStats).toEqual({
+          minSalary: 41600,
+          maxSalary: 52000,
+          avgSalary: 41600,
+          currency: 'USD',
+        });
+        // The job itself is not changed.
+        expect(compensation).toMatchObject({ interval: CompensationInterval.HOURLY, minAmount: 41600, maxAmount: 52000 });
+      });
+
+      it('mixes a description-sourced salary with a yearly direct one without annualising it again', () => {
+        process.env[GRAMMAR_ENV] = 'legacy';
+        const jobs = [
+          makeJob({ compensation: hourly(41600, 52000), salarySource: SalarySource.DESCRIPTION }),
+          makeJob({
+            compensation: new CompensationDto({ interval: CompensationInterval.YEARLY, minAmount: 90000, maxAmount: 120000, currency: 'USD' }),
+            salarySource: SalarySource.DIRECT_DATA,
+          }),
+        ];
+        const result = service.summarize(jobs, { enforceAnnualSalary: true });
+        expect(result.salaryStats).toEqual({
+          minSalary: 41600,
+          maxSalary: 120000,
+          avgSalary: 65800, // (41600 + 90000) / 2
+          currency: 'USD',
+        });
+      });
+
+      it('passes enforceAnnualSalary from analyze() to the summary', () => {
+        process.env[GRAMMAR_ENV] = 'legacy';
+        const jobs = [makeJob({ compensation: hourly(41600, 52000), salarySource: SalarySource.DESCRIPTION })];
+        const result = service.analyze(jobs, { enforceAnnualSalary: true });
+        expect(result.summary.salaryStats).toMatchObject({ minSalary: 41600, maxSalary: 52000 });
+      });
+
+      // Controls: every other case is annualised as before.
+      it('still annualises a description-sourced hourly salary without enforceAnnualSalary', () => {
+        process.env[GRAMMAR_ENV] = 'legacy';
+        const jobs = [makeJob({ compensation: hourly(20, 25), salarySource: SalarySource.DESCRIPTION })];
+        expect(service.summarize(jobs).salaryStats).toMatchObject({ minSalary: 41600, maxSalary: 52000 });
+        expect(service.summarize(jobs, { enforceAnnualSalary: false }).salaryStats)
+          .toMatchObject({ minSalary: 41600, maxSalary: 52000 });
+        expect(service.analyze(jobs).summary.salaryStats).toMatchObject({ minSalary: 41600, maxSalary: 52000 });
+      });
+
+      it('still annualises a direct_data hourly salary under the legacy grammar', () => {
+        process.env[GRAMMAR_ENV] = 'legacy';
+        const jobs = [makeJob({ compensation: hourly(20, 25), salarySource: SalarySource.DIRECT_DATA })];
+        expect(service.summarize(jobs, { enforceAnnualSalary: true }).salaryStats)
+          .toMatchObject({ minSalary: 41600, maxSalary: 52000 });
+      });
+
+      it('still annualises a description-sourced hourly salary under the default grammar', () => {
+        const jobs = [makeJob({ compensation: hourly(20, 25), salarySource: SalarySource.DESCRIPTION })];
+        expect(service.summarize(jobs, { enforceAnnualSalary: true }).salaryStats)
+          .toMatchObject({ minSalary: 41600, maxSalary: 52000 });
+        process.env[GRAMMAR_ENV] = 'extended';
+        expect(service.summarize(jobs, { enforceAnnualSalary: true }).salaryStats)
+          .toMatchObject({ minSalary: 41600, maxSalary: 52000 });
+      });
     });
   });
 
@@ -163,6 +328,15 @@ describe('AnalyticsService', () => {
       expect(indeed.totalJobs).toBe(1);
       expect(indeed.withSalary).toBe(1);
       expect(indeed.remoteJobs).toBe(1);
+    });
+
+    // T-2522 — same rule as summarize(): a max-only compensation counts.
+    it('counts a compensation that has only a maxAmount', () => {
+      const jobs = [
+        makeJob({ site: 'indeed', compensation: new CompensationDto({ interval: CompensationInterval.MONTHLY, maxAmount: 6000, currency: 'EUR' }) }),
+      ];
+      const [indeed] = service.compareSites(jobs);
+      expect(indeed.withSalary).toBe(1);
     });
   });
 

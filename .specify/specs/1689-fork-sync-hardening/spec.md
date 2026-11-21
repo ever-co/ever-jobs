@@ -212,7 +212,9 @@ One commit, `a243b1b9`, on top of `11c61771` — 125 files, +10,032 / −481:
 - **Pre-existing failures unrelated to the fork:** `store-sqlite-drizzle` / `store-postgres-prisma`
   are still not in CI (native SQLite build, Prisma client, containers); the `apps/cli` e2e
   `UnknownDependenciesException` is identical on `origin/develop`; MCP `get_job_details` calls a
-  `GET /api/jobs/details` route that does not exist.
+  `GET /api/jobs/details` route that does not exist. *(Fixed 2026-11-17, T-2586: `get_job_details`
+  now answers from the last 1000 jobs this MCP process's searches returned and makes no API
+  request; see `docs/log.md`.)*
 - **Minor residuals on pinned inputs:** `soundryx` still fetches every detail page one after
   another with no cap; `getmaxspace`'s `indeedJobId` regex is quadratic at worst on input from its
   own pinned site.

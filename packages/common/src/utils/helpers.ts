@@ -207,7 +207,7 @@ export function parseSalaryCurrency(
   // present; otherwise use the documented fallback (Q-025: SEK).
   const lowered = text.toLowerCase();
   for (const [symbol, ambiguous] of SALARY_AMBIGUOUS_SYMBOLS.entries()) {
-    if (lowered.includes(symbol.toLowerCase())) {
+    if (containsStandaloneToken(lowered, symbol.toLowerCase())) {
       const fromCountry = opts?.country
         ? ambiguous.byCountry.get(opts.country)
         : undefined;
@@ -244,14 +244,57 @@ function matchIsoCode(text: string): string | null {
     // `\b...\b` won't anchor against punctuation like `'EUR.'`, so we
     // lean on a manual char-class check on the surrounding chars
     // instead. `RegExp` is overkill for an 8-element exact-match set.
-    const idx = upper.indexOf(code);
-    if (idx === -1) continue;
-    const before = idx === 0 ? '' : upper[idx - 1];
-    const after = idx + code.length >= upper.length ? '' : upper[idx + code.length];
-    if (isWordChar(before) || isWordChar(after)) continue;
-    return code;
+    // Check EVERY occurrence: a first hit inside a longer word ("EUROPEAN")
+    // must not hide a later stand-alone code ("EUR 70,000").
+    for (let idx = upper.indexOf(code); idx !== -1; idx = upper.indexOf(code, idx + 1)) {
+      const before = idx === 0 ? '' : upper[idx - 1];
+      const after = idx + code.length >= upper.length ? '' : upper[idx + code.length];
+      if (!isWordChar(before) && !isWordChar(after)) return code;
+    }
   }
   return null;
+}
+
+/**
+ * Letter test for any script, including scripts without letter case (Han,
+ * Arabic, Hebrew, Thai …) and combining marks, which belong to the letter
+ * before them (`kr` + U+0301 is one accented letter, not a krona sign).
+ */
+const LETTER_OR_MARK = /[\p{L}\p{M}]/u;
+
+function isLetter(ch: string): boolean {
+  return ch !== '' && LETTER_OR_MARK.test(ch);
+}
+
+/**
+ * Whether `token` occurs in `text` without a letter directly before or after
+ * it. Used for the ambiguous `kr` symbol, so the first letters of a word
+ * ("Kraków", "Kroger", "Krefeld") are not read as a krona sign. A digit,
+ * space or punctuation on either side still counts as a boundary (`500kr`,
+ * `kr 500`, `kr.`). Both arguments must already be lower-cased.
+ */
+function containsStandaloneToken(text: string, token: string): boolean {
+  for (let idx = text.indexOf(token); idx !== -1; idx = text.indexOf(token, idx + 1)) {
+    if (!isLetter(codePointBefore(text, idx)) && !isLetter(codePointAt(text, idx + token.length))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** The whole code point starting at `index` (a surrogate pair is one character), or `''` past the end. */
+function codePointAt(text: string, index: number): string {
+  const cp = index < text.length ? text.codePointAt(index) : undefined;
+  return cp === undefined ? '' : String.fromCodePoint(cp);
+}
+
+/** The whole code point ending just before `index`, or `''` at the start. */
+function codePointBefore(text: string, index: number): string {
+  if (index <= 0) return '';
+  const low = text.charCodeAt(index - 1);
+  const high = index >= 2 ? text.charCodeAt(index - 2) : 0;
+  const isPair = low >= 0xdc00 && low <= 0xdfff && high >= 0xd800 && high <= 0xdbff;
+  return text.slice(isPair ? index - 2 : index - 1, index);
 }
 
 /** Word-character test for the ISO-code boundary check. */
@@ -523,6 +566,12 @@ export interface ExtractSalaryOptions {
  *   `"relocation up to $10,000"`) is never read as the salary, and a `to`
  *   range with neither a pay-period token nor a salary word before it is
  *   used only when no dash range or qualified `to` range exists in the text.
+ *   T-2634 — it also reads a dash range whose currency follows only the
+ *   maximum (`"60,000 - 80,000 USD"`, `"60K-80K USD"`), after the anchored
+ *   shapes; its raw minimum must reach `lowerLimit` unless a `k` suffix or a
+ *   pay-period token is present, so `"5 - 7 USD"` stays unread, and one
+ *   whose nearest keyword before it is a benefit word
+ *   (`"sign-on bonus 5,000 - 10,000 USD"`) is skipped, as a `to` range is.
  * - `'legacy'` — the grammar before Spec 1695: dash separators only, no
  *   pay-period tokens (a token after the first amount breaks the match, one
  *   after the second is ignored), interval from magnitude unless
@@ -543,6 +592,15 @@ function resolveSalaryGrammar(option: SalaryGrammar | undefined): SalaryGrammar 
   if (option === 'extended' || option === 'legacy') return option;
   const raw = process.env[SALARY_GRAMMAR_ENV]?.trim().toLowerCase();
   return raw === 'legacy' ? 'legacy' : 'extended';
+}
+
+/**
+ * T-2605 — the process-wide {@link SalaryGrammar} in force right now: `legacy`
+ * when `EVER_JOBS_SALARY_GRAMMAR=legacy`, `extended` otherwise. This is the
+ * grammar {@link postProcessCompensation} applies when the caller passes none.
+ */
+export function activeSalaryGrammar(): SalaryGrammar {
+  return resolveSalaryGrammar(undefined);
 }
 
 /**
@@ -579,6 +637,17 @@ const SALARY_SYMBOL_ALTERNATIONS: ReadonlyMap<string, string> = new Map([
   ['DKK', '\\bDKK\\b|\\bkr\\b'],
   ['PLN', 'zł|\\bPLN\\b'],
 ]);
+
+/**
+ * T-2633 — currencies in which {@link extractSalary} reads a range with no
+ * stated period, whose minimum is under `monthlyThreshold` and whose maximum
+ * is at or above it (`"$25k - $35k"`), as yearly. The default thresholds are
+ * USD-sized bands (Spec 012 §3): in SEK / NOK / DKK and PLN a monthly salary
+ * routinely sits around 30,000 (`"25.000 kr - 35.000 kr"`), while a yearly
+ * one that low is far below full-time pay, so those currencies keep the
+ * earlier no-match instead of a yearly figure twelve times too small.
+ */
+const CROSSING_RANGE_YEARLY_CURRENCIES: ReadonlySet<string> = new Set(['USD', 'EUR', 'GBP', 'CHF']);
 
 /**
  * Per-locale regex source for a salary number. The continental and
@@ -900,12 +969,13 @@ function periodFromTokens(
 }
 
 /**
- * Spec 1695 — the three range regexes are built from a handful of inputs
+ * Spec 1695 — the range regexes are built from a handful of inputs
  * (currency alternation × locale number shape × grammar), so each distinct
  * one is compiled once and reused. The plain ones carry no `g` / `y` flag, so
  * a shared instance holds no `lastIndex` state between calls; the global
  * copies the extended grammar scans with are reset by {@link selectRangeMatch}
- * before every use (the scan is synchronous, so no two calls interleave).
+ * or {@link selectTrailingCurrencyRange} before every use (the scan is
+ * synchronous, so no two calls interleave).
  */
 const SALARY_REGEX_CACHE = new Map<string, RegExp>();
 
@@ -1057,6 +1127,61 @@ function buildSalaryRegexBare(
       `(?<max>${numSrc})\\s*(?<maxK>[kK]?\\b)` +
       `(?:\\s*(?<maxPer>${SALARY_PERIOD_TOKEN_SRC}))?`,
   );
+}
+
+/**
+ * T-2634 — build the trailing-currency salary regex (extended grammar only):
+ * the currency symbol or ISO code follows ONLY the maximum, as in
+ * `"60,000 - 80,000 USD"`, `"60K-80K USD"` or `"50.000 - 70.000 EUR"`. Same
+ * named groups as the bare variant. Form:
+ *
+ *   <num>K?\s*[<per>\s*]<dash>\s*<num>K?\s*<sym>[\s*<per>]
+ *
+ * Dash-only, like the bare variant: the minimum carries no currency, so a
+ * word separator would turn prose (`"5 to 7 USD"`) into candidates. A symbol
+ * followed on the same line by a number opens the next amount rather than
+ * closing this one (`"2020 - 2023 $50,000 grant"`), so it does not count.
+ * Global: {@link selectTrailingCurrencyRange} scans every match.
+ */
+function buildSalaryRegexTrailing(symbolAlt: string, numSrc: string): RegExp {
+  return new RegExp(
+    `(?<min>${numSrc})\\s*(?<minK>[kK]?\\b)\\s*` +
+      `(?:(?<minPer>${SALARY_PERIOD_TOKEN_SRC})\\s*)?` +
+      `[-–—]\\s*` +
+      `(?<max>${numSrc})\\s*(?<maxK>[kK]?\\b)\\s*(?:${symbolAlt})(?![^\\S\\r\\n]*\\d)` +
+      `(?:\\s*(?<maxPer>${SALARY_PERIOD_TOKEN_SRC}))?`,
+    'g',
+  );
+}
+
+/**
+ * T-2634 — the first trailing-currency range in `text` that reads as pay.
+ * Its minimum carries no currency, so it gets the bare path's prose guard: a
+ * match whose raw minimum is under `lowerLimit` is skipped (`"5 - 7 USD"`)
+ * unless a `k` suffix or a pay-period token marks it as pay
+ * (`"60K-80K USD"`, `"20 - 25 USD/hr"`). A match whose nearest keyword before
+ * it, in its clause, is a benefit word (`"Sign-on bonus 5,000 - 10,000 USD"`,
+ * `"learning budget 1,000 - 2,000 USD"`) is skipped too, as a `to` range and a
+ * single bound are: that amount is not the pay. A skipped match never hides a
+ * later reading: the scan goes on, and with no match the caller falls through
+ * to the `to` range, single-bound and other fallbacks as before.
+ */
+function selectTrailingCurrencyRange(
+  text: string,
+  pattern: RegExp,
+  locale: SalaryLocale,
+  lowerLimit: number,
+): RangeCandidate | null {
+  pattern.lastIndex = 0;
+  for (let found = pattern.exec(text); found !== null; found = pattern.exec(text)) {
+    if (salaryContextBefore(text, found.index).nearest === 'benefit') continue;
+    const groups = found.groups ?? {};
+    const rawMin = parseSalaryNumber(groups.min ?? '', locale);
+    const kSuffixed = /k/i.test(`${groups.minK ?? ''}${groups.maxK ?? ''}`);
+    const marked = kSuffixed || Boolean(groups.minPer || groups.maxPer);
+    if (rawMin !== null && (marked || rawMin >= lowerLimit)) return { match: found, strong: true };
+  }
+  return null;
 }
 
 /**
@@ -1250,6 +1375,12 @@ function buildSingleBoundCandidates(
  * different tokens on one range (`"$20/hr - $40,000/yr"`) return the
  * all-`null` envelope. `enforceAnnualSalary` still annualises the amounts
  * and keeps the stated interval.
+ *
+ * T-2633 — in the extended grammar, a range with no stated period whose
+ * minimum is in the monthly band and whose maximum is at or above
+ * `monthlyThreshold` (`"$25k - $35k"`) is read as yearly instead of being
+ * dropped; the legacy grammar and the `kr` / `zł` currencies keep the
+ * earlier no-match (see {@link CROSSING_RANGE_YEARLY_CURRENCIES}).
  */
 export function extractSalary(
   salaryStr: string | null,
@@ -1332,7 +1463,17 @@ export function extractSalary(
         salaryStr,
         cachedSalaryRegex(`suffix-g|${cacheKey}`, () => new RegExp(suffixPattern.source, 'g')),
       );
-      picked = fromSuffix?.strong ? fromSuffix : (fromPrefix ?? fromSuffix);
+      picked = fromSuffix?.strong ? fromSuffix : null;
+      // T-2634 — a dash range whose currency follows only the maximum
+      // ("60,000 - 80,000 USD"): tried after the anchored shapes and, being a
+      // dash range, before an unqualified `to` range.
+      picked ??= selectTrailingCurrencyRange(
+        salaryStr,
+        cachedSalaryRegex(`trailing-g|${cacheKey}`, () => buildSalaryRegexTrailing(symbolAlt, numSrc)),
+        locale,
+        lowerLimit,
+      );
+      picked ??= fromPrefix ?? fromSuffix;
     }
     match = picked?.match ?? null;
   }
@@ -1454,6 +1595,20 @@ export function extractSalary(
     interval = CompensationInterval.HOURLY;
     annualMinSalary = minSalary * 2080;
     annualMaxSalary = maxSalary < hourlyThreshold ? maxSalary * 2080 : null;
+  } else if (
+    minSalary < monthlyThreshold &&
+    grammar !== 'legacy' &&
+    maxSalary >= monthlyThreshold &&
+    CROSSING_RANGE_YEARLY_CURRENCIES.has(detected.code)
+  ) {
+    // T-2633 — a minimum in the monthly band with a maximum at or above
+    // monthlyThreshold (`$25k - $35k`) is a low yearly range, not a monthly
+    // one with its ceiling nulled; both ends are read as yearly and the
+    // bounds checks below still apply. The legacy grammar keeps dropping it,
+    // and so do currencies where such a range is monthly pay (`kr`, `zł`).
+    interval = CompensationInterval.YEARLY;
+    annualMinSalary = minSalary;
+    annualMaxSalary = maxSalary;
   } else if (minSalary < monthlyThreshold) {
     interval = CompensationInterval.MONTHLY;
     annualMinSalary = minSalary * 12;

@@ -6,7 +6,7 @@ import {
   DescriptionFormat, JobType, ExclusionPreset, DatePostedBasis,
 } from '@ever-jobs/models';
 import {
-  applyJobExclusions, exclusionSpecFromInput, hasExclusionInput,
+  applyJobExclusions, exclusionSpecFromInput, hasExclusionInput, hasSalaryAmount, toCsvCell,
 } from '@ever-jobs/common';
 import { AnalyticsService } from '@ever-jobs/analytics';
 import {
@@ -17,6 +17,7 @@ import {
   applyCrawlCliOptions,
   parseNonNegativeInt,
 } from './crawl-options';
+import { applyNumericCliOptions, parseCliDecimal, parseCliInteger } from './numeric-options';
 
 interface SearchOptions extends CrawlCliOptions {
   site?: string[];
@@ -47,6 +48,8 @@ interface SearchOptions extends CrawlCliOptions {
   format?: string;
   output?: string;
   verbose?: boolean;
+  /** `false` with `--no-description`: descriptions are left out of the output. */
+  description?: boolean;
   stdin?: boolean;
   analyze?: boolean;
   bd?: boolean;
@@ -73,6 +76,16 @@ export function applyCliExclusions(input: ScraperInputDto, jobs: JobPostDto[]): 
     console.error(`Ignored exclusion term "${ignored.term}" (${ignored.reason})`);
   }
   return kept;
+}
+
+/**
+ * A copy of `job` without `description`, for `--no-description` output. The
+ * job itself is not changed.
+ */
+function withoutDescription(job: JobPostDto): JobPostDto {
+  const copy: JobPostDto = { ...job };
+  delete copy.description;
+  return copy;
 }
 
 /**
@@ -163,7 +176,9 @@ export class SearchCommand extends CommandRunner {
     await this.executeAndOutput(input, options);
   }
 
-  private buildInputFromOptions(options: SearchOptions): ScraperInputDto {
+  private buildInputFromOptions(rawOptions: SearchOptions): ScraperInputDto {
+    // Invalid or out-of-range numbers are dropped with a warning, so the defaults below apply.
+    const options = applyNumericCliOptions(rawOptions);
     // Build per-source auth from CLI flags
     let auth: any;
     if (options.upworkAuthJson) {
@@ -231,14 +246,20 @@ export class SearchCommand extends CommandRunner {
       return;
     }
 
-    // Format job output
+    // Format job output. --no-description drops descriptions from the output only;
+    // exclusions above and --analyze below still see them.
     const format = options.format ?? 'json';
-    const content = this.formatOutput(jobs, format);
+    const withDescription = options.description !== false;
+    const outputJobs = withDescription ? jobs : jobs.map(withoutDescription);
+    const content = this.formatOutput(outputJobs, format, withDescription);
     this.writeOutput(content, options);
 
     // Append analysis if --analyze flag is set
     if (options.analyze && jobs.length > 0) {
-      const analysis = this.analyticsService.analyze(jobs);
+      // T-2605 — the flag the jobs were scraped with (--enforce-annual-salary, or the --stdin JSON).
+      const analysis = this.analyticsService.analyze(jobs, {
+        enforceAnnualSalary: input.enforceAnnualSalary,
+      });
       console.error('');
       console.error('=== Analysis ===');
       console.error(`Total: ${analysis.summary.totalJobs} jobs`);
@@ -246,7 +267,8 @@ export class SearchCommand extends CommandRunner {
       console.error(`With salary: ${analysis.summary.withSalaryCount}`);
       if (analysis.summary.salaryStats) {
         const s = analysis.summary.salaryStats;
-        console.error(`Salary range: $${s.minSalary.toLocaleString()} - $${s.maxSalary.toLocaleString()} (avg $${s.avgSalary.toLocaleString()})`);
+        // T-2522 — annualised figures in the currency the analysis reports, not a fixed "$".
+        console.error(`Salary range (${s.currency}): ${s.minSalary.toLocaleString()} - ${s.maxSalary.toLocaleString()} (avg ${s.avgSalary.toLocaleString()})`);
       }
       console.error('');
       console.error('--- By Site ---');
@@ -277,12 +299,12 @@ export class SearchCommand extends CommandRunner {
     }
   }
 
-  private formatOutput(jobs: JobPostDto[], format: string): string {
+  private formatOutput(jobs: JobPostDto[], format: string, withDescription = true): string {
     switch (format) {
       case 'json':
         return JSON.stringify(jobs, null, 2);
       case 'csv':
-        return this.toCsv(jobs);
+        return this.toCsv(jobs, withDescription);
       case 'table':
         return this.toTable(jobs);
       case 'summary':
@@ -292,23 +314,20 @@ export class SearchCommand extends CommandRunner {
     }
   }
 
-  private toCsv(jobs: JobPostDto[]): string {
+  private toCsv(jobs: JobPostDto[], withDescription = true): string {
     if (jobs.length === 0) return '';
 
-    const headers = [
+    const allHeaders = [
       'id', 'site', 'title', 'companyName', 'location', 'jobUrl',
       'datePosted', 'jobType', 'isRemote', 'minAmount', 'maxAmount',
       'currency', 'interval', 'description',
       // Spec 1696 — appended, so every column above keeps its position.
       'datePostedAt', 'datePostedPrecision', 'datePostedBasis',
     ];
+    // --no-description leaves the column out (the columns after it move one to the left).
+    const headers = withDescription ? allHeaders : allHeaders.filter((h) => h !== 'description');
 
-    const escape = (val: any): string => {
-      if (val == null) return '';
-      const str = typeof val === 'object' ? JSON.stringify(val) : String(val);
-      return str.includes(',') || str.includes('"') || str.includes('\n')
-        ? `"${str.replace(/"/g, '""')}"` : str;
-    };
+    const escape = (val: any): string => toCsvCell(val);
 
     const rows = jobs.map((job) =>
       headers.map((h) => {
@@ -379,7 +398,7 @@ export class SearchCommand extends CommandRunner {
         }
       }
       if (job.isRemote) remoteCount++;
-      if (job.compensation?.minAmount) salaryCount++;
+      if (hasSalaryAmount(job.compensation)) salaryCount++;
     }
 
     const lines: string[] = [
@@ -460,7 +479,7 @@ export class SearchCommand extends CommandRunner {
   }
 
   @Option({ flags: '-d, --distance <miles>', description: 'Search radius in miles (default: 50)' })
-  parseDistance(val: string): number { return parseInt(val, 10); }
+  parseDistance(val: string): number { return parseCliInteger(val); }
 
   @Option({ flags: '-r, --remote', description: 'Filter for remote jobs only' })
   parseRemote(): boolean { return true; }
@@ -472,13 +491,13 @@ export class SearchCommand extends CommandRunner {
   parseEasyApply(): boolean { return true; }
 
   @Option({ flags: '-n, --results <count>', description: 'Number of results wanted per site (default: 15)' })
-  parseResults(val: string): number { return parseInt(val, 10); }
+  parseResults(val: string): number { return parseCliInteger(val); }
 
   @Option({ flags: '--offset <n>', description: 'Skip first N results' })
-  parseOffset(val: string): number { return parseInt(val, 10); }
+  parseOffset(val: string): number { return parseCliInteger(val); }
 
   @Option({ flags: '--hours-old <hours>', description: 'Max job age in hours' })
-  parseHoursOld(val: string): number { return parseInt(val, 10); }
+  parseHoursOld(val: string): number { return parseCliInteger(val); }
 
   @Option({ flags: '-c, --country <code>', description: 'Country for Indeed/Glassdoor domain (default: USA)' })
   parseCountry(val: string): string { return val; }
@@ -494,14 +513,14 @@ export class SearchCommand extends CommandRunner {
 
   @Option({ flags: '--linkedin-company-ids [ids...]', description: 'Filter LinkedIn by company IDs' })
   parseLinkedinCompanyIds(val: string, acc?: number[]): number[] {
-    return (acc ?? []).concat(parseInt(val, 10));
+    return (acc ?? []).concat(parseCliInteger(val));
   }
 
   @Option({ flags: '--enforce-annual-salary', description: 'Convert all wages to annual equivalent' })
   parseEnforceAnnualSalary(): boolean { return true; }
 
-  @Option({ flags: '--timeout <seconds>', description: 'Request timeout in seconds (default: 60)' })
-  parseTimeout(val: string): number { return parseInt(val, 10); }
+  @Option({ flags: '--timeout <seconds>', description: 'Request timeout in seconds, 0 = none (default: 60)' })
+  parseTimeout(val: string): number { return parseCliInteger(val); }
 
   @Option({ flags: '-p, --proxy [urls...]', description: 'Proxy URLs for rotation' })
   parseProxy(val: string, acc?: string[]): string[] {
@@ -515,10 +534,10 @@ export class SearchCommand extends CommandRunner {
   parseUserAgent(val: string): string { return val; }
 
   @Option({ flags: '--rate-delay-min <seconds>', description: 'Minimum delay between requests in seconds' })
-  parseRateDelayMin(val: string): number { return parseFloat(val); }
+  parseRateDelayMin(val: string): number { return parseCliDecimal(val); }
 
   @Option({ flags: '--rate-delay-max <seconds>', description: 'Maximum delay between requests in seconds' })
-  parseRateDelayMax(val: string): number { return parseFloat(val); }
+  parseRateDelayMax(val: string): number { return parseCliDecimal(val); }
 
   @Option({ flags: '-f, --format <format>', description: 'Output format: json, csv, table, summary (default: json)' })
   parseFormat(val: string): string { return val; }
@@ -529,8 +548,9 @@ export class SearchCommand extends CommandRunner {
   @Option({ flags: '-v, --verbose', description: 'Enable verbose debug output' })
   parseVerbose(): boolean { return true; }
 
+  // A --no-* flag sets `description`; it must be false so the flag differs from its absence (true).
   @Option({ flags: '--no-description', description: 'Omit job descriptions from output (reduces size for LLMs)' })
-  parseNoDescription(): boolean { return true; }
+  parseNoDescription(): boolean { return false; }
 
   @Option({ flags: '--analyze', description: 'Append summary analysis (salary, remote %, top companies) after results' })
   parseAnalyze(): boolean { return true; }

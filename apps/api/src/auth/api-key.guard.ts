@@ -11,6 +11,62 @@ import { ConfigService } from '@nestjs/config';
 import { Reflector } from '@nestjs/core';
 import { Request } from 'express';
 import { ADMIN_AUTH_METADATA_KEY } from './admin-auth.decorator';
+import { getRequestFromContext } from './context-request';
+
+/**
+ * The API key a request carries in the configured header (`x-api-key` by
+ * default), or `undefined` when there is none or no request at all.
+ */
+export function readApiKey(
+  config: ConfigService,
+  request: Request | undefined,
+): string | undefined {
+  const headerName: string = config.get<string>('auth.headerName', 'x-api-key');
+  return request?.headers?.[headerName.toLowerCase()] as string | undefined;
+}
+
+/**
+ * The admin-tier check (Spec 005 / FR-7), shared by {@link ApiKeyGuard} for
+ * `@AdminAuth()` routes and by per-request admin gates such as `include_raw`
+ * (see `include-raw-access.ts`), so both answer the same way:
+ *
+ *  - no `API_KEYS` configured → 503 Service Unavailable (admin is disabled
+ *    by misconfiguration; an operator must set `API_KEYS=...`);
+ *  - missing key → 401 Unauthorized;
+ *  - a key that is not in `API_KEYS` → 401 Unauthorized.
+ *
+ * Deliberately independent of `auth.enabled`, exactly like `@AdminAuth()`.
+ * `what` names the protected feature in the log lines.
+ */
+export function assertAdminApiKey(
+  config: ConfigService,
+  request: Request | undefined,
+  logger: Logger,
+  what = 'Admin route',
+): void {
+  const apiKeys: string[] = config.get<string[]>('auth.apiKeys', []);
+
+  // The operator explicitly opted into admin endpoints (the route exists in
+  // the build), but the deploy hasn't set `API_KEYS=...`. 503 is
+  // operator-fixable; 401 would mislead the caller into trying again.
+  if (apiKeys.length === 0) {
+    logger.error(`${what} invoked but no API_KEYS configured — refusing`);
+    throw new ServiceUnavailableException(
+      'Admin endpoints require API_KEYS to be configured',
+    );
+  }
+
+  const providedKey = readApiKey(config, request);
+  if (!providedKey) {
+    logger.warn(`Missing API key in request (${what.toLowerCase()})`);
+    throw new UnauthorizedException('Missing API Key');
+  }
+
+  if (!apiKeys.includes(providedKey)) {
+    logger.warn(`Invalid API key provided (${what.toLowerCase()})`);
+    throw new UnauthorizedException('Invalid API Key');
+  }
+}
 
 /**
  * Guard that validates the `x-api-key` header against a configured allow-list.
@@ -24,7 +80,7 @@ import { ADMIN_AUTH_METADATA_KEY } from './admin-auth.decorator';
  *        on missing/invalid.
  *
  *  - **Admin routes** (decorated with `@AdminAuth()` — e.g. force-open /
- *    force-reset of a circuit breaker):
+ *    force-reset of a circuit breaker): {@link assertAdminApiKey}.
  *      - Always require a valid key, regardless of `auth.enabled`.
  *      - If no API keys are configured at all, return 503 Service
  *        Unavailable — admin is disabled by misconfiguration; an
@@ -44,10 +100,6 @@ export class ApiKeyGuard implements CanActivate {
 
   canActivate(context: ExecutionContext): boolean {
     const apiKeys: string[] = this.config.get<string[]>('auth.apiKeys', []);
-    const headerName: string = this.config.get<string>(
-      'auth.headerName',
-      'x-api-key',
-    );
 
     const isAdmin =
       this.reflector.getAllAndOverride<boolean>(ADMIN_AUTH_METADATA_KEY, [
@@ -65,41 +117,23 @@ export class ApiKeyGuard implements CanActivate {
       return true;
     }
 
-    // Admin route: refuse when keys are not configured. The operator
-    // explicitly opted into admin endpoints (the route exists in the
-    // build), but the deploy hasn't set `API_KEYS=...`. 503 is
-    // operator-fixable; 401 would mislead the caller into trying again.
-    if (isAdmin && apiKeys.length === 0) {
-      this.logger.error(
-        'Admin route invoked but no API_KEYS configured — refusing',
-      );
-      throw new ServiceUnavailableException(
-        'Admin endpoints require API_KEYS to be configured',
-      );
+    // REST and GraphQL expose the request differently; a missing request is
+    // treated as a missing key.
+    if (isAdmin) {
+      assertAdminApiKey(this.config, getRequestFromContext(context), this.logger);
+      this.logger.debug('Valid API key provided');
+      return true;
     }
 
-    const request = context.switchToHttp().getRequest<Request>();
-    const providedKey = request.headers[headerName.toLowerCase()] as
-      | string
-      | undefined;
+    const providedKey = readApiKey(this.config, getRequestFromContext(context));
 
     if (!providedKey) {
-      this.logger.warn(
-        `Missing API key in request${isAdmin ? ' (admin route)' : ''}`,
-      );
-      if (isAdmin) {
-        throw new UnauthorizedException('Missing API Key');
-      }
+      this.logger.warn('Missing API key in request');
       throw new ForbiddenException('Missing API Key');
     }
 
     if (!apiKeys.includes(providedKey)) {
-      this.logger.warn(
-        `Invalid API key provided${isAdmin ? ' (admin route)' : ''}`,
-      );
-      if (isAdmin) {
-        throw new UnauthorizedException('Invalid API Key');
-      }
+      this.logger.warn('Invalid API key provided');
       throw new ForbiddenException('Invalid API Key');
     }
 

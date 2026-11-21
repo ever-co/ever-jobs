@@ -26,6 +26,7 @@ The API supports passing source-specific credentials (e.g., Upwork OAuth2 tokens
 - **Always use HTTPS** when sending credentials in request bodies to prevent interception
 - **Prefer environment variables** for server deployments to avoid credentials appearing in request logs or network traces
 - The API controller does **not** log auth credentials (only search term, sites, and location are logged)
+- When a request fails validation (HTTP 400), the global exception filter logs a **redacted** copy of the body, never the raw body: every value under `auth` and under a secret-looking key (`apiKey`, `clientSecret`, `accessToken`, `password`, …) at any depth becomes `[REDACTED]`, everything before the last `@` of a proxy URL (under `proxies`) becomes `***`, `user:password@` in any other string becomes `***@`, and the logged body is cut to about 2 KB (`apps/api/src/filters/log-safe-body.ts`)
 - Auth data **is included in cache keys** — this is by design since different credentials may return different results
 - Per-request credentials are held in memory only for the duration of the request and are not persisted
 - See [Authentication](./AUTHENTICATION.md) for full details on per-request auth
@@ -33,6 +34,7 @@ The API supports passing source-specific credentials (e.g., Upwork OAuth2 tokens
 ## Network Security
 
 - Deploy behind a reverse proxy (nginx, Caddy) with TLS/HTTPS
+- Behind that proxy, set `TRUST_PROXY` to its addresses or CIDRs, so rate limiting sees each client's IP instead of the proxy's. Use a hop count (`1`) only when clients cannot reach the API port except through the proxy, and never `true` on a port clients can reach: with either, a client that connects directly can spoof `X-Forwarded-For` and pick its own rate limit bucket. With API key auth on, a valid key is limited per key
 - Restrict `CORS_ORIGINS` to trusted domains in production
 - Use firewall rules to limit access to the API port
 

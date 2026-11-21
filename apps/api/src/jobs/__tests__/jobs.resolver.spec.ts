@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { Country, JobPostDto, Site } from '@ever-jobs/models';
+import { Country, DescriptionFormat, JobPostDto, Site } from '@ever-jobs/models';
 import { JobsResolver } from '../jobs.resolver';
 import { SearchJobsInput, resolveSearchCountry } from '../gql-types';
 
@@ -303,6 +303,40 @@ describe('JobsResolver', () => {
       expect(jobsService.searchJobsWithDiagnostics.mock.calls[0][0].country).toBeUndefined();
       expect(warn).toHaveBeenCalledWith(expect.stringContaining('"Atlantis"'));
     });
+
+    it("maps the documented descriptionFormat 'text' to 'plain' for the service (T-2523)", async () => {
+      const { resolver, jobsService } = createResolver({ jobs: [makeJob()] });
+
+      await resolver.searchJobs(makeInput({ descriptionFormat: 'text' }));
+
+      expect(jobsService.searchJobsWithDiagnostics).toHaveBeenCalledWith(
+        expect.objectContaining({ descriptionFormat: DescriptionFormat.PLAIN }),
+      );
+    });
+
+    it("keys 'text' and 'plain' to the same cache entry (T-2523)", async () => {
+      const asText = createResolver({ jobs: [makeJob()] });
+      await asText.resolver.searchJobs(makeInput({ descriptionFormat: 'text' }));
+      const asPlain = createResolver({ jobs: [makeJob()] });
+      await asPlain.resolver.searchJobs(makeInput({ descriptionFormat: 'plain' }));
+
+      const textKey = asText.cacheService.get.mock.calls[0][0];
+      expect(textKey.descriptionFormat).toBe(DescriptionFormat.PLAIN);
+      expect(textKey).toEqual(asPlain.cacheService.get.mock.calls[0][0]);
+    });
+
+    it.each([DescriptionFormat.MARKDOWN, DescriptionFormat.HTML, DescriptionFormat.PLAIN])(
+      'passes descriptionFormat %j through unchanged (T-2523)',
+      async (format) => {
+        const { resolver, jobsService } = createResolver({ jobs: [makeJob()] });
+
+        await resolver.searchJobs(makeInput({ descriptionFormat: format }));
+
+        expect(jobsService.searchJobsWithDiagnostics).toHaveBeenCalledWith(
+          expect.objectContaining({ descriptionFormat: format }),
+        );
+      },
+    );
 
     it('defaults resultsWanted to 20 and descriptionFormat to markdown', async () => {
       const jobs = [makeJob()];
