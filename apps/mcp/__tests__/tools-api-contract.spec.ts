@@ -482,6 +482,116 @@ describe('search tools — limit caps the jobs returned (T-2585)', () => {
   });
 });
 
+/**
+ * T-2674 — `get_salary_insights` read its numbers back out of the salary
+ * strings, which name neither the pay period nor a locale-proof amount, and
+ * pooled every currency and period into one set of stats. The stats are now
+ * yearly amounts in the most common currency, built from the API's
+ * compensation objects, and each salary string names its pay period.
+ */
+describe('get_salary_insights — yearly stats in one currency (T-2674)', () => {
+  function paidJob(id: string, compensation: Record<string, unknown>) {
+    return {
+      id,
+      title: 'Engineer',
+      companyName: 'Acme',
+      jobUrl: `https://acme.example.com/${id}`,
+      site: 'lever',
+      isRemote: false,
+      location: null,
+      compensation,
+    };
+  }
+
+  const MIXED = [
+    paidJob('yearly-usd', { minAmount: 100_000, maxAmount: 120_000, currency: 'USD', interval: 'yearly' }),
+    paidJob('monthly-usd', { minAmount: 8_000, maxAmount: 9_000, currency: 'USD', interval: 'monthly' }),
+    paidJob('hourly-usd', { minAmount: 50, maxAmount: 60, currency: 'USD', interval: 'hourly' }),
+    paidJob('yearly-eur', { minAmount: 70_000, currency: 'EUR', interval: 'yearly' }),
+  ];
+
+  it('annualises every pay period and keeps only the most common currency', async () => {
+    mockClient({ post: { jobs: MIXED } });
+    const insights = await getSalaryInsights({ query: 'x' });
+
+    expect(insights.totalJobsSearched).toBe(4);
+    expect(insights.jobsWithSalary).toBe(4);
+    // Yearly amounts: 100000-120000, 96000-108000 (8000-9000 x 12) and
+    // 104000-124800 (50-60 x 2080); the EUR job is left out.
+    expect(insights.stats).toEqual({
+      currency: 'USD',
+      min: 96_000,
+      max: 124_800,
+      median: 108_000,
+      p25: 100_000,
+      p75: 120_000,
+    });
+  });
+
+  it('names the pay period in every salary string', async () => {
+    mockClient({ post: { jobs: MIXED } });
+    const search = await searchJobs({ query: 'x' });
+    const salaryOf = (id: string) => search.jobs.find((j) => j.id === id)?.salary;
+
+    expect(salaryOf('hourly-usd')).toBe('USD 50 - 60 per hour');
+    expect(salaryOf('monthly-usd')).toBe('USD 8,000 - 9,000 per month');
+    expect(salaryOf('yearly-usd')).toBe('USD 100,000 - 120,000 per year');
+    expect(salaryOf('yearly-eur')).toBe('EUR 70,000+ per year');
+
+    const insights = await getSalaryInsights({ query: 'x' });
+    expect(insights.sampleJobs.map((j) => j.salary)).toContain('USD 50 - 60 per hour');
+  });
+
+  it('writes amounts the en-US way whatever the server locale is', async () => {
+    const original = Number.prototype.toLocaleString;
+    // A server whose default locale is de-DE writes 100000 as '100.000'.
+    const spy = jest
+      .spyOn(Number.prototype, 'toLocaleString')
+      .mockImplementation(function (this: number, locales?: Intl.LocalesArgument, options?: Intl.NumberFormatOptions) {
+        return original.call(this, locales ?? 'de-DE', options);
+      });
+    try {
+      mockClient({ post: { jobs: [MIXED[0]] } });
+      const insights = await getSalaryInsights({ query: 'x' });
+
+      expect(insights.sampleJobs[0].salary).toBe('USD 100,000 - 120,000 per year');
+      expect(insights.stats).toMatchObject({ currency: 'USD', min: 100_000, max: 120_000 });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('keeps yearly amounts of a million or more', async () => {
+    mockClient({
+      post: {
+        jobs: [
+          paidJob('jpy-1', { minAmount: 6_000_000, maxAmount: 8_000_000, currency: 'JPY', interval: 'yearly' }),
+          paidJob('jpy-2', { minAmount: 7_000_000, maxAmount: 9_000_000, currency: 'JPY', interval: 'yearly' }),
+        ],
+      },
+    });
+    const insights = await getSalaryInsights({ query: 'x' });
+
+    expect(insights.stats).toMatchObject({ currency: 'JPY', min: 6_000_000, max: 9_000_000 });
+  });
+
+  it('leaves a job whose pay period is unknown out of the stats', async () => {
+    mockClient({
+      post: {
+        jobs: [
+          MIXED[0],
+          paidJob('no-period', { minAmount: 5_000, maxAmount: 6_000, currency: 'USD' }),
+        ],
+      },
+    });
+    const insights = await getSalaryInsights({ query: 'x' });
+
+    expect(insights.jobsWithSalary).toBe(2);
+    expect(insights.stats).toMatchObject({ currency: 'USD', min: 100_000, max: 120_000 });
+    expect(insights.sampleJobs.map((j) => j.salary)).toContain('USD 5,000 - 6,000');
+  });
+});
+
 describe('normalizeSearchLimit (T-2585)', () => {
   it('gives the default 20 for a missing, non-numeric or below-1 limit', () => {
     for (const input of [undefined, null, 'abc', '', '  ', NaN, -Infinity, 0, -5, 0.5, true, [5], {}]) {

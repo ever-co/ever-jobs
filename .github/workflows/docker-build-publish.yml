@@ -29,7 +29,7 @@ jobs:
     # Publishes to ghcr.io/ever-jobs/*, which only the canonical repo's
     # GITHUB_TOKEN can write to. Forks would fail the push with
     # `denied: permission_denied`, so skip the job outside this repo.
-    if: ${{ github.repository == 'ever-jobs/ever-jobs' }}
+    if: ${{ github.repository == 'ever-co/ever-jobs' || github.repository == 'ever-jobs/ever-jobs' }}
     runs-on: ${{ vars.RUNNER_LINUX_X64_8 || 'ubuntu-latest' }}
     steps:
       - name: Checkout
@@ -80,7 +80,7 @@ jobs:
   build-mcp:
     # See the note on `build`: skip outside the canonical repo (forks can't
     # push to ghcr.io/ever-jobs/*).
-    if: ${{ github.repository == 'ever-jobs/ever-jobs' }}
+    if: ${{ github.repository == 'ever-co/ever-jobs' || github.repository == 'ever-jobs/ever-jobs' }}
     runs-on: ${{ vars.RUNNER_LINUX_X64_8 || 'ubuntu-latest' }}
     steps:
       - name: Checkout
