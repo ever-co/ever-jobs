@@ -1,8 +1,16 @@
 import { Controller, Get, Logger, VERSION_NEUTRAL } from '@nestjs/common';
 import { ApiExcludeEndpoint, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { ConfigService } from '@nestjs/config';
+import { SkipThrottle } from '@nestjs/throttler';
+import { ProbeRoute } from '../auth/probe-route.decorator';
 
+/**
+ * Liveness probes. They need no API key (`@ProbeRoute()`) and are not rate
+ * limited (`@SkipThrottle()`), so a healthcheck polling every 30 s never gets
+ * 403 or 429 (T-2672).
+ */
 @ApiTags('Health')
+@SkipThrottle()
 @Controller()
 export class HealthController {
   private readonly logger = new Logger(HealthController.name);
@@ -11,6 +19,7 @@ export class HealthController {
   constructor(private readonly config: ConfigService) {}
 
   @Get('health')
+  @ProbeRoute()
   @ApiOperation({
     summary: 'Health check',
     description:
@@ -33,6 +42,7 @@ export class HealthController {
   }
 
   @Get('ping')
+  @ProbeRoute()
   @ApiOperation({ summary: 'Ping', description: 'Simple ping endpoint for monitoring.' })
   ping() {
     return { status: 'pong', timestamp: new Date().toISOString() };
