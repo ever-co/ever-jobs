@@ -15,7 +15,7 @@
 
 **Validation.** New `graphql-config.spec.ts` (resolver parse) and two integration specs that boot the real `AppModule` with GraphQL off (REST answers, `/graphql` is 404) and on (`/graphql` answers): 24/24 pass; the GraphQL-off integration spec fails 3/3 on the previous `app.module.ts`. `tsc -p tsconfig.typecheck.json` clean.
 
-**Files:** `apps/api/src/app.module.ts`, `apps/api/src/config/{configuration,graphql-config}.ts`, `apps/api/src/config/__tests__/graphql-config.spec.ts`, `apps/api/__tests__/integration/graphql-{disabled,enabled}.integration.spec.ts`, `docs/log.md`.
+**Files:** `apps/api/src/app.module.ts`, `apps/api/src/config/{configuration,graphql-config}.ts`, `apps/api/src/config/__tests__/graphql-config.spec.ts`, `apps/api/__tests__/integration/graphql-{disabled,enabled}.integration.spec.ts`, `docs/API_CHANGELOG.md` (Fixed entry), `docs/log.md`.
 
 ## 2026-11-18 — Spec 1761: fork sync 2026-11-17 hardening (MakeDeeply/ever-jobs@5fd45911)
 

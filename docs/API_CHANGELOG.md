@@ -1,5 +1,11 @@
 # API Changelog
 
+### [Unreleased] - 2026-11-23
+
+#### Fixed
+
+- **`ENABLE_GRAPHQL=false` turns GraphQL off instead of stopping the API at boot** (T-2673). Before, the flag left Apollo with no schema, so startup failed with "Query root type must be provided." and the REST API was down too. Now the API starts, REST answers as usual and `/graphql` (or `GRAPHQL_PATH`) is a 404. Unset, blank, `true`, `1`, `yes` or `on` (any case) keep GraphQL on, as before; any other value turns it off. The flag is read from the environment or the `.env` files.
+
 ### [Unreleased] - 2026-11-18 (fork sync, Spec 1761)
 
 #### Added
