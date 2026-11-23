@@ -7,6 +7,7 @@ import {
 import { resolvePersistSearch } from './store-config';
 import { resolveShutdownDrainTimeoutMs } from './shutdown-config';
 import { resolveTrustProxy } from './trust-proxy-config';
+import { resolveGraphqlEnabled } from './graphql-config';
 import { resolveDeadlineAllowUnbounded, resolveSearchDeadlineMaxMs } from './search-deadline-config';
 import { resolveIncludeRawConfig } from './include-raw-config';
 import {
@@ -261,7 +262,8 @@ export default () => {
 
     // GraphQL
     graphql: {
-      enabled: parseBool(process.env.ENABLE_GRAPHQL, true),
+      /** ENABLE_GRAPHQL — AppModule imports GraphQLModule only when this is on (T-2673). */
+      enabled: resolveGraphqlEnabled(process.env),
       playground: parseBool(process.env.GRAPHQL_PLAYGROUND, true),
       path: process.env.GRAPHQL_PATH || 'graphql',
     },

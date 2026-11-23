@@ -3,9 +3,10 @@ import { APP_GUARD, APP_INTERCEPTOR, APP_FILTER } from '@nestjs/core';
 import { ThrottlerModule } from '@nestjs/throttler';
 import { GraphQLModule } from '@nestjs/graphql';
 import { ApolloDriver, ApolloDriverConfig } from '@nestjs/apollo';
-import { ConfigModule, ConfigService } from '@nestjs/config';
+import { ConditionalModule, ConfigModule, ConfigService } from '@nestjs/config';
 import { StoreModule } from '@ever-jobs/plugin';
 import { AppConfigModule } from './config/config.module';
+import { resolveGraphqlEnabled } from './config/graphql-config';
 import { AppCacheModule } from './cache/cache.module';
 import { MetricsModule } from './metrics/metrics.module';
 import { MetricsInterceptor } from './metrics/metrics.interceptor';
@@ -65,26 +66,34 @@ const ACTIVE_STORE_PROVIDERS = resolveStoreProviders(ACTIVE_STORE.id);
       }),
     }),
 
-    // GraphQL API (alongside REST)
-    GraphQLModule.forRootAsync<ApolloDriverConfig>({
-      driver: ApolloDriver,
-      imports: [ConfigModule],
-      inject: [ConfigService],
-      useFactory: (config: ConfigService) => ({
-        autoSchemaFile: true,
-        sortSchema: true,
-        // Apollo Server 5 removed the bundled GraphQL Playground (the old
-        // `playground: true` pulled the deprecated, unmaintained
-        // `@apollo/server-plugin-landing-page-graphql-playground`). @nestjs/apollo
-        // v13 serves the modern Apollo Sandbox landing page by default, so no
-        // explicit landing-page plugin is configured here — adding one throws
-        // "Only one plugin can implement renderLandingPage" at startup.
-        path: config.get<string>('graphql.path', 'graphql'),
-        introspection: true,
-        // Disable GraphQL module entirely if env var is set
-        ...(config.get<boolean>('graphql.enabled', true) ? {} : { autoSchemaFile: false }),
+    // GraphQL API (alongside REST). T-2673 — imported only when ENABLE_GRAPHQL is on
+    // (`resolveGraphqlEnabled`, the parse behind `graphql.enabled`), evaluated once the
+    // `.env` files are loaded. Importing it with GraphQL off left Apollo with no schema,
+    // and `app.init()` threw "Query root type must be provided.", REST included.
+    // `JobsResolver` stays in `JobsModule`: with no GraphQLModule it is an inert provider.
+    ConditionalModule.registerWhen(
+      GraphQLModule.forRootAsync<ApolloDriverConfig>({
+        driver: ApolloDriver,
+        imports: [ConfigModule],
+        inject: [ConfigService],
+        useFactory: (config: ConfigService) => ({
+          autoSchemaFile: true,
+          sortSchema: true,
+          // Apollo Server 5 removed the bundled GraphQL Playground (the old
+          // `playground: true` pulled the deprecated, unmaintained
+          // `@apollo/server-plugin-landing-page-graphql-playground`). @nestjs/apollo
+          // v13 serves the modern Apollo Sandbox landing page by default, so no
+          // explicit landing-page plugin is configured here — adding one throws
+          // "Only one plugin can implement renderLandingPage" at startup.
+          path: config.get<string>('graphql.path', 'graphql'),
+          introspection: true,
+        }),
       }),
-    }),
+      resolveGraphqlEnabled,
+      // `main.ts` already logs "GraphQL: disabled"; the default debug line would
+      // print the condition's source code.
+      { debug: false },
+    ),
 
     // Global cache (Redis or in-memory)
     AppCacheModule,
