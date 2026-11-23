@@ -614,6 +614,20 @@ export function recentJobCount(): number {
  * remembered for {@link getJobDetails}.
  */
 export async function searchJobs(params: JobSearchParams): Promise<SearchResponse> {
+  return (await runJobSearch(params)).response;
+}
+
+/**
+ * What {@link runJobSearch} gives: the tool response, and the raw API job of
+ * every mapped job, so a tool can read fields the response leaves out (the
+ * structured `compensation` for {@link getSalaryInsights}, T-2674).
+ */
+interface JobSearchOutcome {
+  response: SearchResponse;
+  rawJobs: Map<JobResult, Record<string, unknown>>;
+}
+
+async function runJobSearch(params: JobSearchParams): Promise<JobSearchOutcome> {
   const client = getClient();
 
   try {
@@ -664,14 +678,17 @@ export async function searchJobs(params: JobSearchParams): Promise<SearchRespons
     });
 
     return {
-      total: returnedJobs.length,
-      ...(filteredJobs.length > returnedJobs.length ? { total_found: filteredJobs.length } : {}),
-      jobs: returnedJobs,
-      sources_searched: requestedSites(params) ?? ['all'],
-      query: params.query,
-      ...(hasExclusions(params)
-        ? { excluded: Number(data.exclusion_metrics?.excluded_count ?? 0) || 0 }
-        : {}),
+      response: {
+        total: returnedJobs.length,
+        ...(filteredJobs.length > returnedJobs.length ? { total_found: filteredJobs.length } : {}),
+        jobs: returnedJobs,
+        sources_searched: requestedSites(params) ?? ['all'],
+        query: params.query,
+        ...(hasExclusions(params)
+          ? { excluded: Number(data.exclusion_metrics?.excluded_count ?? 0) || 0 }
+          : {}),
+      },
+      rawJobs: new Map(jobs.map((job, index) => [job, data.jobs[index]])),
     };
   } catch (err: any) {
     // An unreachable API must not look like "no jobs found": fail loudly.
@@ -773,30 +790,33 @@ export async function searchRemoteJobs(params: {
 
 /**
  * Get salary insights: aggregate salary data from search results.
+ *
+ * The stats are built from the API's structured `compensation` of each
+ * returned job, never from the salary strings (T-2674): every amount is made
+ * yearly by its pay period ({@link yearlyPay}), and only the jobs paid in the
+ * most common currency count, so the stats never mix currencies or periods.
+ * A job whose pay period is unknown is left out of the stats but still counts
+ * in `jobsWithSalary` and can appear in `sampleJobs`.
  */
 export async function getSalaryInsights(params: {
   query: string;
   location?: string;
   limit?: number;
 }): Promise<SalaryInsightsResponse> {
-  const searchResult = await searchJobs({
+  const { response: searchResult, rawJobs } = await runJobSearch({
     query: params.query,
     location: params.location,
     limit: params.limit ?? 50,
   });
 
   const jobsWithSalary = searchResult.jobs.filter((j) => j.salary);
-  const salaryValues: number[] = [];
-
-  for (const job of jobsWithSalary) {
-    const nums = job.salary!.match(/[\d,]+/g);
-    if (nums) {
-      for (const n of nums) {
-        const val = parseInt(n.replace(/,/g, ''), 10);
-        if (val > 1000 && val < 1000000) salaryValues.push(val);
-      }
-    }
-  }
+  const pay = jobsWithSalary
+    .map((j) => yearlyPay(rawJobs.get(j)?.compensation))
+    .filter((p): p is YearlyPay => p !== null);
+  const currency = mostCommonCurrency(pay);
+  const salaryValues = pay
+    .filter((p) => p.currency === currency)
+    .flatMap((p) => p.amounts);
 
   salaryValues.sort((a, b) => a - b);
 
@@ -812,8 +832,9 @@ export async function getSalaryInsights(params: {
     salaryPercentage: searchResult.total > 0
       ? Math.round((jobsWithSalary.length / searchResult.total) * 100)
       : 0,
-    stats: salaryValues.length > 0
+    stats: currency !== null && salaryValues.length > 0
       ? {
+          currency,
           min: Math.min(...salaryValues),
           max: Math.max(...salaryValues),
           median: median!,
@@ -837,7 +858,12 @@ export interface SalaryInsightsResponse {
   totalJobsSearched: number;
   jobsWithSalary: number;
   salaryPercentage: number;
+  /**
+   * Yearly amounts (T-2674), over the jobs paid in `currency` (the most common
+   * currency among the jobs whose pay period is known); null when there are none.
+   */
   stats: {
+    currency: string;
     min: number;
     max: number;
     median: number;
@@ -1112,12 +1138,74 @@ function truncateDescription(desc: string | null | undefined): string | null {
   return desc.slice(0, maxLen) + '...';
 }
 
+/**
+ * T-2674 — per pay period the API sends (`CompensationInterval` in
+ * `@ever-jobs/models`), how a salary string names it and how many of it make
+ * a year (hourly = 40 h x 52 weeks, daily = 5 days x 52 weeks), the factors
+ * the API's `convertToAnnual` uses. Kept here because the MCP server imports
+ * no `@ever-jobs` package.
+ */
+const PAY_PERIODS: ReadonlyMap<string, { label: string; perYear: number }> = new Map([
+  ['hourly', { label: 'per hour', perYear: 2080 }],
+  ['daily', { label: 'per day', perYear: 260 }],
+  ['weekly', { label: 'per week', perYear: 52 }],
+  ['monthly', { label: 'per month', perYear: 12 }],
+  ['yearly', { label: 'per year', perYear: 1 }],
+]);
+
+function payPeriod(interval: unknown): { label: string; perYear: number } | undefined {
+  return typeof interval === 'string' ? PAY_PERIODS.get(interval.trim().toLowerCase()) : undefined;
+}
+
+/** One job's pay for {@link getSalaryInsights}: its currency and its amounts made yearly. */
+interface YearlyPay {
+  currency: string;
+  amounts: number[];
+}
+
+/**
+ * The yearly pay of an API `compensation` object: `minAmount` and `maxAmount`
+ * (each when a number above zero) times the pay period's factor. `null` when
+ * the pay period is unknown or there is no amount. A missing currency is USD,
+ * as {@link formatSalary} shows it.
+ */
+function yearlyPay(compensation: unknown): YearlyPay | null {
+  if (!compensation || typeof compensation !== 'object') return null;
+  const c = compensation as Record<string, unknown>;
+  const period = payPeriod(c.interval);
+  if (!period) return null;
+  const amounts = [c.minAmount, c.maxAmount]
+    .filter((v): v is number => typeof v === 'number' && Number.isFinite(v) && v > 0)
+    .map((v) => Math.round(v * period.perYear));
+  if (amounts.length === 0) return null;
+  const currency = typeof c.currency === 'string' && c.currency.trim() ? c.currency.trim().toUpperCase() : 'USD';
+  return { currency, amounts };
+}
+
+/** The currency most jobs are paid in; on a tie, the one met first. `null` for no jobs. */
+function mostCommonCurrency(pay: YearlyPay[]): string | null {
+  const counts = new Map<string, number>();
+  for (const p of pay) counts.set(p.currency, (counts.get(p.currency) ?? 0) + 1);
+  let best: string | null = null;
+  for (const [currency, count] of counts) {
+    if (best === null || count > counts.get(best)!) best = currency;
+  }
+  return best;
+}
+
+/**
+ * A job's salary as the tools show it, e.g. `USD 45 - 60 per hour`. Amounts
+ * are written the en-US way whatever the server locale is, and the pay period
+ * is named when the API sent one (T-2674).
+ */
 function formatSalary(compensation: any): string | null {
   if (!compensation) return null;
   const { minAmount, maxAmount, currency } = compensation;
   if (!minAmount && !maxAmount) return null;
   const cur = currency ?? 'USD';
-  if (minAmount && maxAmount) return `${cur} ${minAmount.toLocaleString()} - ${maxAmount.toLocaleString()}`;
-  if (minAmount) return `${cur} ${minAmount.toLocaleString()}+`;
-  return `Up to ${cur} ${maxAmount.toLocaleString()}`;
+  const period = payPeriod(compensation.interval);
+  const per = period ? ` ${period.label}` : '';
+  if (minAmount && maxAmount) return `${cur} ${minAmount.toLocaleString('en-US')} - ${maxAmount.toLocaleString('en-US')}${per}`;
+  if (minAmount) return `${cur} ${minAmount.toLocaleString('en-US')}+${per}`;
+  return `Up to ${cur} ${maxAmount.toLocaleString('en-US')}${per}`;
 }
