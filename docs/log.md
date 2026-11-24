@@ -5,6 +5,18 @@
 
 ---
 
+## 2026-11-23 — Lane-scan fix (T-2673)
+
+### Fix: `ENABLE_GRAPHQL=false` turns GraphQL off instead of crashing the API at boot (T-2673)
+
+**Symptom.** With `ENABLE_GRAPHQL=false`, `app.module.ts` still imported `GraphQLModule` and only dropped `autoSchemaFile`, so Apollo had no schema and `app.init()` threw "Query root type must be provided." — the whole API, REST included, failed to start.
+
+**Change.** `GraphQLModule` is now registered through `ConditionalModule.registerWhen(..., resolveGraphqlEnabled)`, evaluated after the `.env` files load. The parse lives in the new `apps/api/src/config/graphql-config.ts` and is shared with `graphql.enabled` in `configuration.ts` (unset or blank = on; otherwise on only for `true`/`1`/`yes`/`on`, any case). `JobsResolver` stays in `JobsModule` as an inert provider when GraphQL is off.
+
+**Validation.** New `graphql-config.spec.ts` (resolver parse) and two integration specs that boot the real `AppModule` with GraphQL off (REST answers, `/graphql` is 404) and on (`/graphql` answers): 24/24 pass; the GraphQL-off integration spec fails 3/3 on the previous `app.module.ts`. `tsc -p tsconfig.typecheck.json` clean.
+
+**Files:** `apps/api/src/app.module.ts`, `apps/api/src/config/{configuration,graphql-config}.ts`, `apps/api/src/config/__tests__/graphql-config.spec.ts`, `apps/api/__tests__/integration/graphql-{disabled,enabled}.integration.spec.ts`, `docs/API_CHANGELOG.md` (Fixed entry), `docs/log.md`.
+
 ## 2026-11-18 — Spec 1761: fork sync 2026-11-17 hardening (MakeDeeply/ever-jobs@5fd45911)
 
 **Change:** Brought in the MakeDeeply fork tip `5fd45911` (fork PRs up to #185, Specs 5153–5175) with a merge commit (`9f106583`), after a five-lane read-only security review with two-vote verification (14 findings confirmed, 1 refuted). The fixes are on top as Spec 1761:
