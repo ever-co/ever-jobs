@@ -10,6 +10,33 @@
 
 ---
 
+## Q-129 — MCP `get_salary_insights`: jobs with no pay period, and jobs in other currencies (T-2674)
+
+**Context:** `get_salary_insights` now makes every amount yearly by the job's pay period
+(`compensation.interval`) and takes its stats only over the jobs paid in the most common
+currency, which `stats.currency` names (`docs/log.md`, 2026-11-18). Two cases have no single
+right answer: a compensation with amounts but no pay period (a few sources, e.g. Naukri, send
+none), and the jobs paid in the other currencies.
+
+**Options:**
+
+- **A. Leave both out of the stats.** Jobs with no pay period and jobs in other currencies
+  still count in `jobsWithSalary` and can appear in `sampleJobs`, whose salary strings name
+  the currency (and the pay period when known). The stats never mix periods or currencies;
+  a search where no job states a pay period gets `stats: null`.
+- **B. Read a missing pay period as yearly**, as the API leaves such amounts when it
+  annualises (`convertToAnnual` skips them). More jobs count, but a monthly or hourly amount
+  without a period would land in the yearly stats.
+- **C. Guess the period from the amount** (the magnitude thresholds of `extractSalary`), and
+  report stats per currency instead of only the most common one. Fuller, but a larger
+  response and a second copy of the API's heuristics in the MCP server.
+
+**Default:** **A**, proceeding.
+
+**Resolution:** _open — awaiting the owner._
+
+---
+
 ## Q-128 — Softy's retry and back-off numbers (Specs 1714/1715)
 
 **Context:** Softy's operator asked us to back off on `429` / `Retry-After`, never to retry

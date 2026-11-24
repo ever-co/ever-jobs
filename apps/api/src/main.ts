@@ -1,9 +1,10 @@
 import { NestFactory } from '@nestjs/core';
 import { Logger } from '@nestjs/common';
-import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
+import { SwaggerModule } from '@nestjs/swagger';
 import { apiReference } from '@scalar/nestjs-api-reference';
 import { ConfigService } from '@nestjs/config';
 import { AppModule } from './app.module';
+import { buildOpenApiConfig } from './openapi';
 import { requestContextMiddleware } from './middleware/request-context.middleware';
 import { createGlobalValidationPipe } from './pipes/global-validation.pipe';
 import { installGracefulShutdown } from './shutdown/graceful-shutdown';
@@ -66,38 +67,7 @@ async function bootstrap() {
   const scalarPath = config.get<string>('scalar.path', 'docs');
 
   if (swaggerEnabled || scalarEnabled) {
-    const openApiConfig = new DocumentBuilder()
-      .setTitle('Ever Jobs API')
-      .setDescription(
-        `# Ever Jobs API
-
-Multi-source job scraping API. Aggregates job listings from 160+ sources including LinkedIn, Indeed, Glassdoor, ZipRecruiter, and 150+ more job boards, ATS platforms, and company career pages.\n\n## GraphQL\n\nA GraphQL API is available at \`/graphql\` alongside this REST API.
-
-## Authentication
-
-When API key authentication is enabled, include your key in the \`x-api-key\` header.
-
-## Rate Limiting
-
-Requests are limited per API key when API key authentication is enabled and the key is valid, otherwise per client IP address. Default: 100 requests per hour.
-
-## Caching
-
-Results are cached (when enabled) to improve performance and reduce load on job board sites.`,
-      )
-      .setVersion('0.1.0')
-      .addApiKey(
-        {
-          type: 'apiKey',
-          name: config.get<string>('auth.headerName', 'x-api-key'),
-          in: 'header',
-          description: 'API key for authentication',
-        },
-        'api-key',
-      )
-      .addTag('Jobs', 'Job search and analysis endpoints')
-      .addTag('Health', 'Health check and monitoring endpoints')
-      .build();
+    const openApiConfig = buildOpenApiConfig(config);
 
     const document = SwaggerModule.createDocument(app, openApiConfig);
 

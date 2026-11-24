@@ -111,6 +111,8 @@ Without `source`, or with a `source` that is not a remote board, every board tha
 
 Aggregate salary data from job search results. Returns min, max, median, P25, and P75 salary statistics.
 
+The statistics are yearly amounts (hourly pay × 2080, daily × 260, weekly × 52, monthly × 12) in `stats.currency`, the currency most of the jobs are paid in. Jobs paid in another currency, or whose pay period is unknown, are left out of the statistics but still count in `jobsWithSalary` and can appear in `sampleJobs`. Each job's `salary` names its pay period, e.g. `USD 45 - 60 per hour`.
+
 | Parameter  | Type   | Required | Description                            |
 | ---------- | ------ | -------- | -------------------------------------- |
 | `query`    | string | ✅       | Job title/role to research             |
