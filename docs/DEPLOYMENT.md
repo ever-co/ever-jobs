@@ -96,6 +96,8 @@ spec:
   type: LoadBalancer
 ```
 
+The probes `GET /health`, `/ping` and `/ready` skip the API key (`ENABLE_API_KEY_AUTH`) and the rate limit (`RATE_LIMIT_ENABLED`), so they need no header; `GET /metrics` skips the rate limit but still needs the key when API key auth is on.
+
 ## Graceful shutdown (Spec 1753)
 
 On SIGTERM the API drains instead of dying mid-request:
