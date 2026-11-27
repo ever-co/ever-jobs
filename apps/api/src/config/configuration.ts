@@ -81,6 +81,10 @@ export default () => {
     proxy: {
       defaults: parseList(process.env.DEFAULT_PROXIES),
       caCertPath: process.env.CA_CERT_PATH || null,
+      // T-2880 — a caller's `caCert` turns off upstream TLS certificate checks
+      // for its whole search, so the REST API drops it unless
+      // EVER_JOBS_ALLOW_CALLER_INSECURE_TLS=true. The CLI's --ca-cert is unaffected.
+      allowCallerInsecureTls: parseBool(process.env.EVER_JOBS_ALLOW_CALLER_INSECURE_TLS, false),
     },
 
     // Search Defaults

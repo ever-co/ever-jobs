@@ -99,6 +99,40 @@ export function clampResultsWanted(
   return requested;
 }
 
+/** Operator opt-in that lets REST callers send `caCert` (T-2880). Off by default. */
+export const ALLOW_CALLER_INSECURE_TLS_ENV_VAR = 'EVER_JOBS_ALLOW_CALLER_INSECURE_TLS';
+
+/**
+ * Drop a REST caller's `caCert` unless the operator allows it (T-2880).
+ *
+ * `caCert` loads no CA. Any non-empty value makes `HttpClient` build its agents
+ * with `rejectUnauthorized: false`, so a caller could turn off upstream
+ * certificate checks for every direct HTTPS request of its search, including
+ * sources that send the operator's API keys. That choice is the operator's:
+ * the CLI's `--ca-cert` calls `JobsService` directly and keeps it, and
+ * {@link ALLOW_CALLER_INSECURE_TLS_ENV_VAR}`=true` lets REST callers send it.
+ *
+ * The controller calls this before the cache key, so the field reaches neither
+ * the key nor any plugin. The key is deleted (not set to `undefined`), so the
+ * cache key equals that of a request that never sent it. Logs one warning when
+ * the caller had set a value, without the value. Idempotent.
+ */
+export function dropCallerCaCert(
+  input: { caCert?: unknown },
+  allowCallerInsecureTls: boolean,
+  logger: { warn(message: string): void },
+): void {
+  if (allowCallerInsecureTls || !('caCert' in input)) return;
+  const supplied = input.caCert !== undefined && input.caCert !== null;
+  delete input.caCert;
+  if (supplied) {
+    logger.warn(
+      `caCert ignored: a request may not turn off upstream TLS certificate checks ` +
+        `(${ALLOW_CALLER_INSECURE_TLS_ENV_VAR}=true allows it)`,
+    );
+  }
+}
+
 /** True when the request carries no usable keyword (Spec 1720 list mode). */
 export function isListMode(input: { searchTerm?: unknown }): boolean {
   return normalizeSearchTerm(input.searchTerm) === undefined;
