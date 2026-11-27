@@ -1,5 +1,15 @@
 # API Changelog
 
+### [Unreleased] - 2026-11-27
+
+#### Fixed
+
+- **GraphQL `searchJobs { jobs { logoUrl } }` returns the company logo** (T-2882). Before, `logoUrl` was always null, because the job record names the field `companyLogo` (as REST returns it) and nothing filled `logoUrl`. Now `logoUrl` carries the `companyLogo` value, and is null only when the source gave no logo.
+
+#### Added
+
+- **`companyLogo` on the GraphQL `JobPostGql` type** (T-2882): the same value as `logoUrl`, under the name REST uses. `logoUrl` stays.
+
 ### [Unreleased] - 2026-11-23
 
 #### Fixed

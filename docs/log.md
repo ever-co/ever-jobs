@@ -5,6 +5,18 @@
 
 ---
 
+## 2026-11-27 — Lane-scan fix (T-2882)
+
+### Fix: GraphQL `JobPostGql.logoUrl` carries the job's `companyLogo` (T-2882)
+
+**Symptom.** `JobPostGql` declared `logoUrl` (`apps/api/src/jobs/gql-types.ts:534-535` on develop), but the job record has no such field: the logo is `companyLogo` (`packages/models/src/dtos/job-post.dto.ts:78`), and `JobsResolver.searchJobs` returned the DTOs unchanged (`jobs: aggregated.jobs as any[]`, `apps/api/src/jobs/jobs.resolver.ts:191`). Nothing mapped one to the other, so `searchJobs { jobs { logoUrl } }` was always null, even when the source gave a logo that REST returns as `companyLogo`.
+
+**Change.** A new `toJobPostGql(job)` in `jobs.resolver.ts` returns a shallow copy of each job with `logoUrl` set to `companyLogo` (null when there is none), and `searchJobs` maps its jobs through it. Cached jobs are not changed: the cache still holds the raw jobs. `JobPostGql.logoUrl` is now typed `String` explicitly (it can be null) and gets a description, and `JobPostGql.companyLogo` is a new nullable field with the same value, so both spellings work. `logoUrl` stays for existing clients.
+
+**Validation.** 7 new tests: 4 in `jobs.resolver.spec.ts` (`searchJobs` fills `logoUrl` from `companyLogo`, gives null without one, fills it on a cache hit without changing the cached job, and caches the raw job without `logoUrl`) and 3 in `gql-types.schema.spec.ts`, which run a GraphQL query on the real code-first schema through the real `searchJobs`. 6 fail on develop (`logoUrl` came back null, `companyLogo` was not in the schema) and all 7 pass now; the cache-on-miss test is a guard and passes before and after.
+
+**Files:** `apps/api/src/jobs/{gql-types,jobs.resolver}.ts`, `apps/api/src/jobs/__tests__/{jobs.resolver,gql-types.schema}.spec.ts`, `docs/API_CHANGELOG.md` (Fixed entry), `docs/log.md`.
+
 ## 2026-11-23 — Lane-scan fix (T-2673)
 
 ### Fix: `ENABLE_GRAPHQL=false` turns GraphQL off instead of crashing the API at boot (T-2673)

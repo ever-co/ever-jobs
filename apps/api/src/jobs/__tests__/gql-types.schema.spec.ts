@@ -19,8 +19,9 @@ import { SearchJobsInput } from '../gql-types';
  * (Specs 5118/5123): `JobPost.countryCode`, `JobPost.locations[]`,
  * `JobPost.offices[]`, and `Location.name/text/streetAddress/postalCode`.
  *
- * The resolver returns `JobPostDto`s as-is (no hand-copied mapping), so the
- * types alone decide what a client can select. This builds the real
+ * The resolver returns each `JobPostDto`'s own fields (a shallow copy that only
+ * adds `logoUrl`, T-2882; no hand-copied mapping), so the types alone decide
+ * what a client can select. This builds the real
  * code-first schema and executes a query against it.
  */
 describe('GraphQL schema — additive location fields (Spec 1689)', () => {
@@ -243,6 +244,86 @@ describe('GraphQL schema — posted-time fields (Spec 1696)', () => {
         datePostedPrecision: null,
         datePostedBasis: null,
       },
+    ]);
+  });
+});
+
+/**
+ * T-2882 — `jobs { logoUrl }` carries the job's `companyLogo` (the REST name), and
+ * `companyLogo` itself is selectable too. Unlike the tests above, the query runs
+ * through the real `JobsResolver.searchJobs` (stubbed service, cache and
+ * aggregator), so it covers the resolver's mapping as well as the types.
+ */
+describe('GraphQL schema — logoUrl from companyLogo (T-2882)', () => {
+  let schema: GraphQLSchema;
+
+  beforeAll(async () => {
+    const moduleRef = await Test.createTestingModule({
+      imports: [GraphQLSchemaBuilderModule],
+    }).compile();
+    await moduleRef.init();
+    schema = await moduleRef.get(GraphQLSchemaFactory).create([JobsResolver]);
+  });
+
+  it('exposes logoUrl and companyLogo on JobPostGql as nullable Strings', () => {
+    const fields = (schema.getType('JobPostGql') as GraphQLObjectType).getFields();
+    expect(String(fields.logoUrl?.type)).toBe('String');
+    expect(String(fields.companyLogo?.type)).toBe('String');
+  });
+
+  /** Runs `jobs { id <fields> }` through the real `searchJobs` over one job with a logo and one without. */
+  async function queryJobs(fields: string): Promise<Array<Record<string, unknown>>> {
+    const withLogo = new JobPostDto({
+      id: 'logo-1',
+      site: Site.LINKEDIN,
+      title: 'Engineer',
+      jobUrl: 'https://example.com/logo-1',
+      companyLogo: 'https://cdn.test/logo.png',
+    });
+    const withoutLogo = new JobPostDto({
+      id: 'logo-2',
+      site: Site.LEVER,
+      title: 'Operator',
+      jobUrl: 'https://example.com/logo-2',
+    });
+    const resolver = new JobsResolver(
+      {
+        searchJobsWithDiagnostics: async () => ({ jobs: [withLogo, withoutLogo], perSource: [] }),
+      } as any,
+      {
+        aggregateRaw: async (jobs: JobPostDto[]) => ({
+          jobs,
+          rawCount: jobs.length,
+          outputCount: jobs.length,
+          deduped: false,
+        }),
+      } as any,
+      { get: async () => null, set: async () => undefined } as any,
+      { get: (_key: string, def?: unknown) => def } as any,
+    );
+    schema.getQueryType()!.getFields().searchJobs.resolve = (_src, args) =>
+      resolver.searchJobs(Object.assign(new SearchJobsInput(), args.input));
+
+    const result = await graphql({
+      schema,
+      source: `{ searchJobs(input: { searchTerm: "x" }) { jobs { id ${fields} } } }`,
+    });
+
+    expect(result.errors).toBeUndefined();
+    return (result.data as any).searchJobs.jobs;
+  }
+
+  it("answers jobs { logoUrl } with the job's companyLogo, and null without one", async () => {
+    expect(await queryJobs('logoUrl')).toEqual([
+      { id: 'logo-1', logoUrl: 'https://cdn.test/logo.png' },
+      { id: 'logo-2', logoUrl: null },
+    ]);
+  });
+
+  it('answers jobs { companyLogo } with the same value, as REST spells it', async () => {
+    expect(await queryJobs('logoUrl companyLogo')).toEqual([
+      { id: 'logo-1', logoUrl: 'https://cdn.test/logo.png', companyLogo: 'https://cdn.test/logo.png' },
+      { id: 'logo-2', logoUrl: null, companyLogo: null },
     ]);
   });
 });

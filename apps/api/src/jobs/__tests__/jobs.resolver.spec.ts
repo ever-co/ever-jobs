@@ -353,6 +353,52 @@ describe('JobsResolver', () => {
     });
   });
 
+  // T-2882 — JobPostDto carries the logo as `companyLogo`; the schema's `logoUrl` was
+  // never filled, so a client selecting `jobs { logoUrl }` always got null.
+  describe('searchJobs — logoUrl from companyLogo (T-2882)', () => {
+    const LOGO = 'https://cdn.test/logo.png';
+
+    it("fills logoUrl from the job's companyLogo", async () => {
+      const { resolver } = createResolver({ jobs: [makeJob({ companyLogo: LOGO })] });
+
+      const result = await resolver.searchJobs(makeInput());
+
+      expect(result.jobs[0]!.logoUrl).toBe(LOGO);
+      expect(result.jobs[0]!.companyLogo).toBe(LOGO);
+    });
+
+    it('gives logoUrl null when the job has no companyLogo', async () => {
+      const jobs = [makeJob(), makeJob({ id: 'test-2', companyLogo: null })];
+      const { resolver } = createResolver({ jobs });
+
+      const result = await resolver.searchJobs(makeInput());
+
+      expect(result.jobs.map((job) => job.logoUrl)).toEqual([null, null]);
+    });
+
+    it('fills logoUrl on a cache hit without changing the cached jobs', async () => {
+      const cachedJobs = [makeJob({ companyLogo: LOGO })];
+      const { resolver } = createResolver({ cachedValue: cachedJobs });
+
+      const result = await resolver.searchJobs(makeInput());
+
+      expect(result.cached).toBe(true);
+      expect(result.jobs[0]!.logoUrl).toBe(LOGO);
+      expect(cachedJobs[0]).not.toHaveProperty('logoUrl');
+    });
+
+    it('caches the raw jobs without logoUrl on a miss', async () => {
+      const jobs = [makeJob({ companyLogo: LOGO })];
+      const { resolver, cacheService } = createResolver({ jobs });
+
+      await resolver.searchJobs(makeInput());
+
+      expect(cacheService.set).toHaveBeenCalledWith(expect.any(Object), jobs);
+      expect(jobs[0]).not.toHaveProperty('logoUrl');
+      expect(jobs[0]!.companyLogo).toBe(LOGO);
+    });
+  });
+
   describe('resolveSearchCountry (Spec 1689)', () => {
     it('resolves every Country enum value to itself', () => {
       for (const country of Object.values(Country)) {
