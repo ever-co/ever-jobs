@@ -1,5 +1,11 @@
 # API Changelog
 
+### [Unreleased] - 2026-11-28
+
+#### Fixed
+
+- **`POST /api/jobs/analyze` applies the `careerLevels` filter, as `/search` does** (T-2883). `/analyze` takes the same body as `/search`, but it applied only the exclusion filters (`excludeTitleTerms`, `excludeKeywords`, `excludePresets`), so `{"searchTerm":"engineer","careerLevels":["internship"]}` returned statistics over every level, senior and director roles included, while `/search` with the same body returned only the internships. Now both the exclusion filters and `careerLevels` remove the same jobs from the analysis as from a `/search` result, and `summary`, `companies` and `siteComparison` cover only the jobs that remain. As on `/search`, a `careerLevels` filter that cannot be applied (no career-level classifier, or classification failed) is a 503, never an unfiltered analysis, and an unknown level is a 400. A request without `careerLevels` (or with `[]`) gets the same response as before.
+
 ### [Unreleased] - 2026-11-27
 
 #### Fixed

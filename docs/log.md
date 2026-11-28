@@ -5,6 +5,18 @@
 
 ---
 
+## 2026-11-28 — Lane-scan fix (T-2883)
+
+### Fix: `POST /api/jobs/analyze` applies the `careerLevels` filter like `/search` (T-2883)
+
+**Symptom.** `JobsController.analyzeJobs` (`apps/api/src/jobs/jobs.controller.ts:683-697` on develop `f0544be3`) ran `this.jobsService.searchJobs(input)` and then only the exclusion filters (`hasExclusionInput(input) ? applyJobExclusions(found, exclusionSpecFromInput(input)).kept : found`) before `analyticsService.analyze`. The body is the same `ScraperInputDto` as `/search`, which documents `careerLevels` (`packages/models/src/dtos/scraper-input.dto.ts:294-303`, Spec 1730), but that filter runs only inside `JobsAggregator.aggregateRaw` / `applyCareerLevel` (`apps/api/src/jobs/jobs.aggregator.ts:318-399`), which `/analyze` never called; `JobsService` and `@ever-jobs/analytics` have no `careerLevels` handling. So `{"searchTerm":"engineer","careerLevels":["internship"]}` on `/analyze` returned statistics over every level, senior and director roles included, while `/search` with the same body returned only internships, with no error.
+
+**Fix.** When `input.careerLevels` is non-empty, `analyzeJobs` passes the fan-out through `this.aggregator.aggregateRaw(found, { dedup: false, persist: false, dedupByUrl: false, careerLevels, ...exclusions when supplied })` and analyses the returned jobs. `dedup: false` and `dedupByUrl: false` keep the raw fan-out `/analyze` always analysed (no URL skip even with `EVER_JOBS_DEDUP_BY_URL=true`), `persist: false` keeps it free of store writes. The aggregator fails closed with a 503 when no classifier is bound or classification fails (Q-106), as `/search` does. Without `careerLevels` (or with `[]`) the code path is the one before. The `ApiOperation` description, the README `/analyze` section and `docs/API_CHANGELOG.md` say that both the exclusion filters and `careerLevels` apply.
+
+**Validation.** 9 new tests; 7 fail on develop and pass now. `search-filters.api.spec.ts` (new `describe` "/analyze careerLevels (T-2883)", 6 tests, real `JobsAggregator` with the real `CareerLevelClassifierService`): `/analyze applies careerLevels` (an intern and a senior job, `careerLevels: ['internship']`, the analysis gets only the intern), `careerLevels` plus `excludeTitleTerms` together, `/analyze` analyses the ids `/search` returns for the same body, the aggregator options (`dedup`/`persist`/`dedupByUrl` false, exclusions only when supplied), and the 503 without a classifier on both routes (5 fail on develop); `careerLevels: []` analyses the raw set without the aggregator (guard). `analyze-career-levels.integration.spec.ts` (new, 4 tests) boots the real `JobsController`, `JobsAggregator`, `AnalyticsService` and `CareerLevelClassifierModule` with the production `ValidationPipe` and sends real requests: `careerLevels: ["internship"]` analyses the 2 internships out of 4 jobs, and for three bodies `summary.totalJobs` equals the `/search` `count` (2 fail on develop); without `careerLevels` all 4 jobs are analysed and an unknown level is a 400 before searching (guards). The existing `/analyze without exclusions analyses the raw set` passes unchanged.
+
+**Files:** `apps/api/src/jobs/jobs.controller.ts`, `apps/api/src/jobs/__tests__/search-filters.api.spec.ts`, `apps/api/__tests__/integration/analyze-career-levels.integration.spec.ts` (new), `README.md`, `docs/API_CHANGELOG.md` (Fixed entry), `docs/log.md`.
+
 ## 2026-11-27 — Lane-scan fix (T-2882)
 
 ### Fix: GraphQL `JobPostGql.logoUrl` carries the job's `companyLogo` (T-2882)

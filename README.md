@@ -844,6 +844,9 @@ paginated JSON, NDJSON (inside each `job` line's `data`), CSV (`careerLevel.leve
 ### `POST /api/jobs/analyze`
 
 Search and analyze jobs — returns summary statistics, company intelligence, and per-site comparison.
+It takes the same body as `/search`. The exclusion filters (`excludeTitleTerms`, `excludeKeywords`,
+`excludePresets`) and `careerLevels` remove the same jobs from the analysis as they remove from a
+`/search` result; a `careerLevels` filter that cannot be applied is a 503, as on `/search`.
 
 ```bash
 curl -X POST http://localhost:3001/api/jobs/analyze \
