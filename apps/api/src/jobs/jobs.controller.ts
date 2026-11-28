@@ -63,6 +63,7 @@ import {
   SearchRunOptions,
   clampResultsWanted,
   describeTerm,
+  dropCallerCaCert,
   normalizeSearchInput,
 } from './search-input';
 import { SearchCompleteness, isSearchCompleteness } from './search-completeness';
@@ -337,6 +338,8 @@ export class JobsController {
     // so "", "   ", null and an omitted term are one request and one cache
     // entry, and the log never prints term="undefined".
     normalizeSearchInput(input);
+    // T-2880 — before the cache key and every path below (JSON, CSV, NDJSON).
+    this.stripCallerCaCert(input);
     // Spec 1720 / FR-12 — clamp before the cache key, so an over-cap request
     // shares the entry of the request the server will actually run.
     const maxResultsWanted = this.configService.get<number>(
@@ -590,6 +593,19 @@ export class JobsController {
   }
 
   /**
+   * T-2880 — a caller's `caCert` turns off upstream TLS certificate checks for
+   * its whole search, so it is dropped unless the operator set
+   * EVER_JOBS_ALLOW_CALLER_INSECURE_TLS=true (`proxy.allowCallerInsecureTls`).
+   */
+  private stripCallerCaCert(input: ScraperInputDto): void {
+    dropCallerCaCert(
+      input,
+      this.configService.get<boolean>('proxy.allowCallerInsecureTls', false) === true,
+      this.logger,
+    );
+  }
+
+  /**
    * Take one of the `rawCapture.maxConcurrent` capture slots, or throw 429.
    * Returns the release function (idempotent).
    */
@@ -665,6 +681,7 @@ export class JobsController {
     description: 'Full analysis including summary, company insights, and site comparison.',
   })
   async analyzeJobs(@Body() input: ScraperInputDto): Promise<JobAnalysisDto> {
+    this.stripCallerCaCert(input);
     this.logger.log(
       `Analyze request: sites=${input.siteType?.join(',') ?? 'all'}, term=${describeTerm(input)}, location=${input.location ? JSON.stringify(input.location) : '<none>'}`,
     );

@@ -169,6 +169,20 @@ describe('JobsService — scrape context (Spec 1690 §4.1/§4.6)', () => {
     expect(getScrapeContext()).toBeUndefined();
   });
 
+  // T-2880 — only the REST controller drops a caller's caCert. The CLI's
+  // `--ca-cert` is the operator's own choice and calls JobsService directly,
+  // so the service must still hand it to the plugin.
+  it('a direct caller\'s caCert (the CLI --ca-cert path) still reaches the plugin input', async () => {
+    const { scraper, seen } = capturingScraper();
+    const service = createService([[Site.LINKEDIN, scraper]]);
+
+    await service.searchJobs(
+      new ScraperInputDto({ siteType: [Site.LINKEDIN], searchTerm: 'node', caCert: '/etc/ssl/operator-ca.pem' }),
+    );
+
+    expect(seen.input?.caCert).toBe('/etc/ssl/operator-ca.pem');
+  });
+
   it('carries no caller override when the caller sent no crawl or legacy fields — FILLED retry defaults stay out', async () => {
     const { scraper, seen } = capturingScraper();
     const service = createService([[Site.LINKEDIN, scraper]], {

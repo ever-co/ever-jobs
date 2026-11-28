@@ -200,7 +200,12 @@ export class ScraperInputDto {
   @IsString({ each: true })
   proxies?: string[];
 
-  @ApiPropertyOptional({ description: 'Custom CA certificate path' })
+  @ApiPropertyOptional({
+    description:
+      'Custom CA certificate path. Any value turns off upstream TLS certificate checks for the search, ' +
+      'so the REST API ignores it (and logs a warning) unless the operator sets ' +
+      'EVER_JOBS_ALLOW_CALLER_INSECURE_TLS=true (T-2880). The CLI --ca-cert flag is not affected.',
+  })
   @IsOptional()
   @IsString()
   caCert?: string;
