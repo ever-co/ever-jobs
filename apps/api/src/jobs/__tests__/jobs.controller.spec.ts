@@ -542,6 +542,95 @@ describe('JobsController', () => {
   });
 
   /**
+   * T-2880 — `caCert` loads no CA: any non-empty value makes `HttpClient` build
+   * its agents with `rejectUnauthorized: false`. A REST caller's value is
+   * dropped, so a request cannot turn off upstream certificate checks for the
+   * sources it reaches (some send the operator's API keys). Only the operator
+   * may allow it, with EVER_JOBS_ALLOW_CALLER_INSECURE_TLS=true.
+   */
+  describe('caller-supplied caCert (T-2880)', () => {
+    const ALLOW_CALLER_INSECURE_TLS = { 'proxy.allowCallerInsecureTls': true };
+    const warnSpy = (controller: JobsController) =>
+      jest.spyOn((controller as unknown as { logger: { warn: (m: string) => void } }).logger, 'warn');
+    /** The warnings about caCert (the stub service also triggers an unrelated completeness warning). */
+    const caCertWarnings = (warn: jest.SpyInstance) =>
+      warn.mock.calls.map(([message]) => String(message)).filter((message) => message.includes('caCert'));
+
+    it('POST /search: the service never sees caCert and the cache key does not contain it', async () => {
+      const { controller, jobsService, cacheService } = createController({ jobs: [makeJob()] });
+
+      await controller.searchJobs(new ScraperInputDto({ searchTerm: 'node', caCert: '1' }));
+
+      expect(jobsService.searchJobsWithDiagnostics).toHaveBeenCalledTimes(1);
+      expect(jobsService.searchJobsWithDiagnostics.mock.calls[0][0]).not.toHaveProperty('caCert');
+      expect(cacheService.get.mock.calls[0][0]).not.toHaveProperty('caCert');
+      expect(cacheService.set.mock.calls[0][0]).not.toHaveProperty('caCert');
+    });
+
+    it('POST /search: the cache key is the one of the same search without caCert', async () => {
+      const withCert = createController({ jobs: [makeJob()] });
+      const without = createController({ jobs: [makeJob()] });
+
+      await withCert.controller.searchJobs(new ScraperInputDto({ searchTerm: 'node', caCert: '1' }));
+      await without.controller.searchJobs(new ScraperInputDto({ searchTerm: 'node' }));
+
+      expect(withCert.cacheService.get.mock.calls[0][0]).toEqual(without.cacheService.get.mock.calls[0][0]);
+    });
+
+    it('POST /analyze: the service never sees caCert', async () => {
+      const { controller, jobsService } = createController({ jobs: [makeJob()] });
+
+      await controller.analyzeJobs(new ScraperInputDto({ searchTerm: 'node', caCert: '1' }));
+
+      expect(jobsService.searchJobs).toHaveBeenCalledTimes(1);
+      expect(jobsService.searchJobs.mock.calls[0][0]).not.toHaveProperty('caCert');
+    });
+
+    it('logs one warning naming the opt-in, without the caller value', async () => {
+      const search = createController({ jobs: [makeJob()] });
+      const analyze = createController({ jobs: [makeJob()] });
+      const searchWarn = warnSpy(search.controller);
+      const analyzeWarn = warnSpy(analyze.controller);
+
+      await search.controller.searchJobs(new ScraperInputDto({ searchTerm: 'node', caCert: '/tmp/x-ca.pem' }));
+      await analyze.controller.analyzeJobs(new ScraperInputDto({ searchTerm: 'node', caCert: '/tmp/x-ca.pem' }));
+
+      for (const warn of [searchWarn, analyzeWarn]) {
+        const messages = caCertWarnings(warn);
+        expect(messages).toHaveLength(1);
+        expect(messages[0]).toContain('EVER_JOBS_ALLOW_CALLER_INSECURE_TLS');
+        expect(messages[0]).not.toContain('/tmp/x-ca.pem');
+      }
+    });
+
+    it('a request without caCert logs no warning', async () => {
+      const { controller } = createController({ jobs: [makeJob()] });
+      const warn = warnSpy(controller);
+
+      await controller.searchJobs(new ScraperInputDto({ searchTerm: 'node' }));
+      await controller.analyzeJobs(new ScraperInputDto({ searchTerm: 'node' }));
+
+      expect(caCertWarnings(warn)).toEqual([]);
+    });
+
+    it('with EVER_JOBS_ALLOW_CALLER_INSECURE_TLS=true, caCert passes through on both routes', async () => {
+      const { controller, jobsService, cacheService } = createController({
+        jobs: [makeJob()],
+        configValues: ALLOW_CALLER_INSECURE_TLS,
+      });
+      const warn = warnSpy(controller);
+
+      await controller.searchJobs(new ScraperInputDto({ searchTerm: 'node', caCert: '1' }));
+      await controller.analyzeJobs(new ScraperInputDto({ searchTerm: 'node', caCert: '1' }));
+
+      expect(jobsService.searchJobsWithDiagnostics.mock.calls[0][0]).toHaveProperty('caCert', '1');
+      expect(cacheService.get.mock.calls[0][0]).toHaveProperty('caCert', '1');
+      expect(jobsService.searchJobs.mock.calls[0][0]).toHaveProperty('caCert', '1');
+      expect(caCertWarnings(warn)).toEqual([]);
+    });
+  });
+
+  /**
    * `per_source` is opt-in because a full fan-out covers ~1 800 sources, and a
    * row for each put hundreds of KB of mostly-`ok`/`empty` noise on every
    * response. The summary must stay complete regardless of what is returned.
