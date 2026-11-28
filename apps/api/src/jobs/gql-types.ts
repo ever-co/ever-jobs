@@ -531,8 +531,18 @@ export class JobPostGql {
   @Field({ nullable: true })
   companyUrl?: string;
 
-  @Field({ nullable: true })
-  logoUrl?: string;
+  // T-2882 — filled by the resolver from the job's `companyLogo` (`toJobPostGql`).
+  @Field(() => String, {
+    nullable: true,
+    description: 'Company logo URL: the same value as `companyLogo`. Null when the source gives none.',
+  })
+  logoUrl?: string | null;
+
+  @Field(() => String, {
+    nullable: true,
+    description: 'Company logo URL under its REST name; `logoUrl` carries the same value.',
+  })
+  companyLogo?: string | null;
 
   @Field({
     nullable: true,

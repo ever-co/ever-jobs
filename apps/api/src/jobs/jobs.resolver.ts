@@ -40,6 +40,16 @@ export function toCrawlPolicyDto(
 }
 
 /**
+ * T-2882 — `JobPostDto` carries the logo as `companyLogo`; `JobPostGql.logoUrl` is
+ * its GraphQL name. Returns a shallow copy with `logoUrl` set to the job's
+ * `companyLogo` (null when there is none). The job itself is not changed: it can
+ * be an object the search cache holds.
+ */
+export function toJobPostGql(job: JobPostDto): JobPostDto & { logoUrl: string | null } {
+  return { ...job, logoUrl: job.companyLogo ?? null };
+}
+
+/**
  * GraphQL resolver exposing the same job search functionality as the REST API.
  *
  * Endpoint: POST /graphql
@@ -188,7 +198,7 @@ export class JobsResolver {
 
     return {
       count: aggregated.jobs.length,
-      jobs: aggregated.jobs as any[],
+      jobs: aggregated.jobs.map(toJobPostGql) as any[],
       cached: fromCache,
       deduped: aggregated.deduped,
       rawCount: aggregated.rawCount,

@@ -2,6 +2,14 @@
 
 ### [Unreleased] - 2026-11-27
 
+#### Fixed
+
+- **GraphQL `searchJobs { jobs { logoUrl } }` returns the company logo** (T-2882). Before, `logoUrl` was always null, because the job record names the field `companyLogo` (as REST returns it) and nothing filled `logoUrl`. Now `logoUrl` carries the `companyLogo` value, and is null only when the source gave no logo.
+
+#### Added
+
+- **`companyLogo` on the GraphQL `JobPostGql` type** (T-2882): the same value as `logoUrl`, under the name REST uses. `logoUrl` stays.
+
 #### Security
 
 - **`caCert` on `POST /api/jobs/search` and `POST /api/jobs/analyze` is ignored** (T-2880). `caCert` loads no CA: any value turned off upstream TLS certificate checks for every direct HTTPS request of that search, including sources that send the server's own API keys, so any caller could downgrade the server's TLS. The API now drops the field before the search and the cache key (JSON, CSV and NDJSON alike) and logs a warning without its value. The response is unchanged. An operator who wants the old behaviour sets **`EVER_JOBS_ALLOW_CALLER_INSECURE_TLS=true`** (default `false`). The CLI `--ca-cert` flag is not affected.
