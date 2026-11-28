@@ -1,10 +1,12 @@
 import 'reflect-metadata';
-import { BadRequestException, ValidationPipe } from '@nestjs/common';
+import { BadRequestException, ServiceUnavailableException, ValidationPipe } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { GraphQLSchemaBuilderModule, GraphQLSchemaFactory } from '@nestjs/graphql';
 import { GraphQLObjectType, GraphQLSchema } from 'graphql';
+import { CareerLevelClassifierService } from '@ever-jobs/career-level-classifier';
 import {
   ExclusionPreset,
+  type ICareerLevelClassifier,
   JobPostDto,
   ScraperInputDto,
   Site,
@@ -40,7 +42,15 @@ const JOBS = () => [
   makeJob('5', 'Lead Designer'),
 ];
 
-function createController(opts: { jobs?: JobPostDto[]; realAggregator?: boolean; liveness?: any } = {}) {
+function createController(
+  opts: {
+    jobs?: JobPostDto[];
+    realAggregator?: boolean;
+    /** Bound into the real aggregator (Spec 1730); without it a careerLevels filter is a 503. */
+    careerLevelClassifier?: ICareerLevelClassifier;
+    liveness?: any;
+  } = {},
+) {
   const jobs = opts.jobs ?? JOBS();
   const jobsService = {
     searchJobs: jest.fn().mockResolvedValue(jobs),
@@ -49,7 +59,7 @@ function createController(opts: { jobs?: JobPostDto[]; realAggregator?: boolean;
   const cacheService = { get: jest.fn().mockResolvedValue(null), set: jest.fn() };
   const analyticsService = { analyze: jest.fn().mockReturnValue({ summary: { totalJobs: 0 }, companies: [] }) };
   const aggregator = opts.realAggregator
-    ? new JobsAggregator(jobsService as any)
+    ? new JobsAggregator(jobsService as any, undefined, undefined, undefined, opts.careerLevelClassifier)
     : {
         aggregateRaw: jest.fn(async (raw: JobPostDto[]) => ({
           jobs: raw,
@@ -286,6 +296,88 @@ describe('JobsController — Spec 1700', () => {
     const { controller, analyticsService } = createController({ jobs });
     await controller.analyzeJobs(new ScraperInputDto({ searchTerm: 'x' }));
     expect(analyticsService.analyze).toHaveBeenCalledWith(jobs, { enforceAnnualSalary: undefined });
+  });
+
+  /**
+   * T-2883 — `/analyze` takes the same body as `/search`, so `careerLevels` (Spec 1730) must
+   * narrow the analysed set exactly as it narrows the search result. Before, only the
+   * exclusions were applied and the analysis counted every level.
+   */
+  describe('/analyze careerLevels (T-2883)', () => {
+    const levelJobs = () => [
+      makeJob('i1', 'Software Engineer Intern'),
+      makeJob('s1', 'Senior Software Engineer'),
+      makeJob('p1', 'Principal Engineer'),
+      makeJob('i2', 'Design Intern'),
+    ];
+    const withClassifier = (jobs: JobPostDto[] = levelJobs()) =>
+      createController({ jobs, realAggregator: true, careerLevelClassifier: new CareerLevelClassifierService() });
+    const analysedIds = (analyticsService: { analyze: jest.Mock }) =>
+      analyticsService.analyze.mock.calls[0][0].map((j: JobPostDto) => j.id);
+
+    it('/analyze applies careerLevels', async () => {
+      const { controller, analyticsService } = withClassifier([
+        makeJob('i1', 'Software Engineer Intern'),
+        makeJob('s1', 'Senior Software Engineer'),
+      ]);
+      await controller.analyzeJobs(new ScraperInputDto({ careerLevels: ['internship'] }));
+      expect(analyticsService.analyze).toHaveBeenCalledTimes(1);
+      expect(analysedIds(analyticsService)).toEqual(['i1']);
+      expect(analyticsService.analyze.mock.calls[0][1]).toEqual({ enforceAnnualSalary: undefined });
+    });
+
+    it('/analyze applies careerLevels and excludeTitleTerms together', async () => {
+      const { controller, analyticsService } = withClassifier();
+      await controller.analyzeJobs(
+        new ScraperInputDto({ careerLevels: ['internship'], excludeTitleTerms: ['design'] }),
+      );
+      expect(analysedIds(analyticsService)).toEqual(['i1']);
+    });
+
+    it('/analyze analyses the jobs /search returns for the same body', async () => {
+      const body: Partial<ScraperInputDto> = { careerLevels: ['internship', 'senior'], excludeTitleTerms: ['design'] };
+      const { controller, analyticsService } = withClassifier();
+      const searched = await search(controller, body);
+      await controller.analyzeJobs(new ScraperInputDto(body));
+      expect(searched.jobs.map((j: JobPostDto) => j.id)).toEqual(['i1', 's1']);
+      expect(analysedIds(analyticsService)).toEqual(['i1', 's1']);
+    });
+
+    it('/analyze passes careerLevels to the aggregator without dedup or persistence', async () => {
+      const { controller, aggregator, jobsService } = createController();
+      await controller.analyzeJobs(new ScraperInputDto({ careerLevels: ['internship'] }));
+      await controller.analyzeJobs(new ScraperInputDto({ careerLevels: ['internship'], excludeKeywords: ['polygraph'] }));
+      const calls = (aggregator as any).aggregateRaw.mock.calls;
+      expect(calls).toHaveLength(2);
+      expect(calls[0][0]).toBe(await jobsService.searchJobs.mock.results[0].value);
+      expect(calls[0][1]).toEqual({ dedup: false, persist: false, dedupByUrl: false, careerLevels: ['internship'] });
+      expect(calls[1][1]).toEqual({
+        dedup: false,
+        persist: false,
+        dedupByUrl: false,
+        careerLevels: ['internship'],
+        exclusions: { titleTerms: undefined, keywords: ['polygraph'], presets: undefined },
+      });
+    });
+
+    it('/analyze with careerLevels fails closed with 503 when no classifier is bound, as /search does', async () => {
+      const { controller, analyticsService } = createController({ jobs: levelJobs(), realAggregator: true });
+      await expect(search(controller, { careerLevels: ['internship'] })).rejects.toBeInstanceOf(
+        ServiceUnavailableException,
+      );
+      await expect(
+        controller.analyzeJobs(new ScraperInputDto({ careerLevels: ['internship'] })),
+      ).rejects.toBeInstanceOf(ServiceUnavailableException);
+      expect(analyticsService.analyze).not.toHaveBeenCalled();
+    });
+
+    it('/analyze with careerLevels: [] (no filter) analyses the raw set without the aggregator', async () => {
+      const jobs = levelJobs();
+      const { controller, analyticsService, aggregator } = createController({ jobs });
+      await controller.analyzeJobs(new ScraperInputDto({ careerLevels: [] }));
+      expect(analyticsService.analyze).toHaveBeenCalledWith(jobs, { enforceAnnualSalary: undefined });
+      expect((aggregator as any).aggregateRaw).not.toHaveBeenCalled();
+    });
   });
 
   describe('body validation through the global ValidationPipe', () => {

@@ -669,12 +669,17 @@ export class JobsController {
    *
    * Searches jobs then returns summary statistics, company intelligence,
    * and per-site comparison — a different response shape from /search.
+   * The exclusion filters (Spec 1700) and the `careerLevels` filter
+   * (Spec 1730) narrow the analysed set exactly as they narrow /search.
    */
   @Post('analyze')
   @ApiOperation({
     summary: 'Search and analyze jobs',
     description:
-      'Searches jobs from selected sites, then returns summary statistics, company intelligence, and per-site comparison.',
+      'Searches jobs from selected sites, then returns summary statistics, company intelligence, and per-site comparison. ' +
+      'The exclusion filters (excludeTitleTerms, excludeKeywords, excludePresets) and careerLevels remove the same jobs ' +
+      'from the analysis as they remove from a /search result. A careerLevels filter that cannot be applied (no ' +
+      'career-level classifier available) is a 503, as on /search.',
   })
   @ApiResponse({
     status: 200,
@@ -687,9 +692,24 @@ export class JobsController {
     );
     const found = await this.jobsService.searchJobs(input);
     // Spec 1700 — analyse the same set a search with these exclusions returns.
-    const jobs = hasExclusionInput(input)
-      ? applyJobExclusions(found, exclusionSpecFromInput(input)).kept
-      : found;
+    // T-2883 — and the same `careerLevels` filter (Spec 1730). That filter
+    // lives in the aggregator, so a request with one goes through it (no dedup,
+    // no persistence, no URL skip: the analysis keeps its raw fan-out). It
+    // fails closed with 503 when it cannot run, as /search does. A request
+    // without `careerLevels` (or with `[]`) keeps the pre-T-2883 path.
+    let jobs = found;
+    if (input.careerLevels?.length) {
+      const filtered = await this.aggregator.aggregateRaw(found, {
+        dedup: false,
+        persist: false,
+        dedupByUrl: false,
+        careerLevels: input.careerLevels,
+        ...(hasExclusionInput(input) ? { exclusions: exclusionSpecFromInput(input) } : {}),
+      });
+      jobs = filtered.jobs;
+    } else if (hasExclusionInput(input)) {
+      jobs = applyJobExclusions(found, exclusionSpecFromInput(input)).kept;
+    }
     // T-2605 — the summary needs the flag the jobs were scraped with.
     const analysis = this.analyticsService.analyze(jobs, {
       enforceAnnualSalary: input.enforceAnnualSalary,
